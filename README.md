@@ -2,28 +2,24 @@
 
 ## 算法需求
 <table>
-<capital>如何在Markdown里面画这样的表格：</capital>
 <tr>
-<th>普通表头</th>
-<th align="right"><i>斜体表头而且居右</th>
-<th colspan=2>表头横向合并单元格</th>
-<td width="80px">限制列宽为80px超出会自动换行</td>
+<th>模块名称</th>
+<th>算法名称</th>
 </tr>
 <tr>
-<th>左边也可以有表头</th>
-<td bgcolor=#ffffcc>涂个颜色</td>
-<td><mark>高亮文本</mark>但不全高亮</td>
-<td><b>有时候加粗</b><i>有时候斜体</i></td>
-<td width="20px">20px小于80px服从80px列宽命令无效</td>
+<td rowspan=4>OCR模块</td>
+<td>文档图片文本解析及矢量化转换</td>
 </tr>
 <tr>
-<td>表头不一定是一整行或者一整列的</td>
-<td rowspan=2>纵向合并单元格要注意<br>下一行少一个单元格<br>字太多必要时我会换行</td>
-<td rowspan=2 colspan=2>单元格也可以从两个方向合并</td>
-<td rowspan=2 width="10%">百分比和像素是可以混用的具体服从哪个取决于哪个大</td>
-</tr>
-<td align="left"> 简单做个居左 </td>
-</tr>
+<td>多语言文本检测识别</td>
+<tr>
+<tr>
+<td>中文手写体文本识别</td>
+<tr>
+<tr>
+<td>票据检测识别</td>
+<tr>
+
 </table>
 
 ## 上传格式
