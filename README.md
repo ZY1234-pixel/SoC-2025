@@ -3,11 +3,13 @@
 ## 算法需求
 <table>
     <tr>
+        <th>模块序号</th>
         <th>模块名称</th>
         <th>算法名称</th>
     </tr>
     <!-- OCR模块 -->
     <tr>
+        <th rowspan="4">1</th>
         <td rowspan="4">OCR模块</td>
         <td>文档图片文本解析及矢量化转换</td>
     </tr>
@@ -22,6 +24,7 @@
     </tr>
     <!-- 图像色彩修复模块 -->
     <tr>
+        <th rowspan="4">2</th>
         <td rowspan="4">图像色彩修复模块</td>
         <td>彩色图像颜色智能修复</td>
     </tr>
@@ -36,6 +39,7 @@
     </tr>
     <!-- 图像纹理修复模块 -->
     <tr>
+        <th rowspan="2">3</th>
         <td rowspan="2">图像纹理修复模块</td>
         <td>手机拍照去屏纹</td>
     </tr>
@@ -44,6 +48,7 @@
     </tr>
     <!-- 算法优化模块 -->
     <tr>
+        <th rowspan="3">4</th>
         <td rowspan="3">算法优化模块</td>
         <td>图像去污</td>
     </tr>
@@ -55,6 +60,7 @@
     </tr>
     <!-- 新增需求模块 -->
     <tr>
+        <th rowspan="1">5</th>
         <td rowspan="1">新增需求模块</td>
         <td>图像畸变校正算法</td>
     </tr>
