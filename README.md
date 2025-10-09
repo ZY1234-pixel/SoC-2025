@@ -7,12 +7,19 @@
 <th>算法名称</th>
 </tr>
 <tr>
-<td rowspan=5>OCR模块</td>
+<td rowspan=4>OCR模块</td>
 <td>文档图片文本解析及矢量化转换</td>
 </tr>
 <tr><td>多语言文本检测识别</td><tr>
 <tr><td>中文手写体文本识别</td><tr>
 <tr><td>票据检测识别</td><tr>
+<tr>
+<th rowspan=4>图像色彩修复</th>
+<th>彩色图像颜色智能修复</th>
+</tr>
+<tr><td>风格迁移</td><tr>
+<tr><td>图像上色</td><tr>
+<tr><td>图像动态化</td><tr>
 </table>
 
 ## 上传格式
