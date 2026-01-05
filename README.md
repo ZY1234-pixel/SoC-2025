@@ -22,7 +22,7 @@
     <!-- 场景图像修复模块 -->
     <tr>
         <th rowspan="2">2</th>
-        <td rowspan="2">场景图像修复模块<td>
+        <td rowspan="2">场景图像修复模块</td>
         <td>图像去污处理</td>
     </tr>
     <tr>
