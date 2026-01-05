@@ -1,1 +1,0 @@
-put Hi-SAM model weight here
