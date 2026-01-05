@@ -1,1 +1,0 @@
-put FastSAM model weight here
