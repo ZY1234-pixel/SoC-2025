@@ -19,4 +19,3 @@ venv/
 ENV/
 logs/
 img/
-img_out/
