@@ -17,5 +17,5 @@ __pycache__/
 .venv/
 venv/
 ENV/
-logs/
 img/
+img_out/
