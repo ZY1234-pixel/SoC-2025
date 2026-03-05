@@ -7,7 +7,7 @@ import os
 from nets.unet_training import CE_Loss, Dice_loss, Focal_Loss
 from tqdm import tqdm
 
-from utils import get_lr
+from .utils import get_lr
 from utils_metrics import f_score
 
 
