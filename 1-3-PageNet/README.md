@@ -15,10 +15,43 @@ pip install -r requirements.txt
 ```
 
 #### 2.下载权重文件
-通过网盘分享的文件：checkpoints链接: https://pan.baidu.com/s/1GBOIk7ARfDPuoO2u7CCw8A?pwd=9taz 提取码: 9taz 
+通过网盘分享的文件：checkpoints
+链接: https://pan.baidu.com/s/13VYuso9cu-wkXwOOMTP-eA?pwd=2c8z 提取码: 2c8z 
+--来自百度网盘超级会员v5的分享
 
-#### 3.运行代码
+#### 3. 下载数据集
+通过网盘分享的文件：datasets
+链接: https://pan.baidu.com/s/1m-BK-x_Z2TjBKLL8ryjTVA?pwd=wkcm 提取码: wkcm 
+--来自百度网盘超级会员v5的分享
+
+数据集下载后按照如下文件结构:
+```
+datasets
+├─IC13Comp
+├─MTHv2_test
+└─raw
+   └─SCUT-HCCDoc
+      │  hccdoc_test.json
+      │  hccdoc_train.json
+      └─image
+```
+运行下述代码，将SCUT-HCCDoc dataset转换为lmdb格式。
+```
+python tools/convert_hccdoc_to_lmdb.py \
+  --image_root datasets/raw/SCUT-HCCDoc/image/ \
+  --annotation_file datasets/raw/SCUT-HCCDoc/hccdoc_test.json \
+  --dict_path dicts/scut-hccdoc.txt \
+  --lmdb_root datasets/SCUT-HCCDoc_test
+```
+
+#### 4.运行代码
 
 ```sh
 python infer.py
 ```
+
+### 相关资料
+#### 模型结构及原理介绍
+通过网盘分享的文件：Docs
+链接: https://pan.baidu.com/s/1wbpdOlZusonyNTmGkncnjw?pwd=f2w1 提取码: f2w1 
+--来自百度网盘超级会员v5的分享
