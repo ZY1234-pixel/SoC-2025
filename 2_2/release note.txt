@@ -1,0 +1,6 @@
+20260211:
+补充:width在模型架构中已写死，如要使用不同width的网络进行训练，
+需要在file/models/image_restoration_model.py的ImageCleanModel函数中
+修改width为与file/configs/***.yml配置文件中对应的width;在使用不同width的模型进行预测时，
+需在file/test/predict.py的process函数中修改为相同的width，
+在NAFNet类中修改init函数的width为目标width的一半(设置width为24时，此处设置为12)
