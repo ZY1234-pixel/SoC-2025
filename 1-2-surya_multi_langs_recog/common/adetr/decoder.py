@@ -366,7 +366,7 @@ class SuryaADETRDecoderLayer(nn.Module):
 
         hidden_states = activations
         if self.cross_attn_block is not None:
-            # Do cross-attention on encoder outputs
+            # Do cross-attention on encoder test_result
             cross_attn_inputs = self.cross_pre_norm(hidden_states)
             cross_attn_path = self.cross_attn_block(
                 cross_attn_inputs, encoder_hidden_states, attention_mask, encoder_attention_mask, use_cache=use_cache
@@ -402,7 +402,7 @@ class SuryaADETRDecoderLayer(nn.Module):
         raw_activations = activations
 
         if self.cross_attn_block is not None:
-            # Do cross-attention on encoder outputs
+            # Do cross-attention on encoder test_result
             cross_attn_inputs = self.cross_pre_norm(activations)
             cross_attn_path = self.cross_attn_block(
                 cross_attn_inputs, encoder_hidden_states, attention_mask, encoder_attention_mask, use_cache=use_cache
