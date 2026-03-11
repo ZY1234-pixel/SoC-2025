@@ -1,16 +1,17 @@
 DATA:
-  DICT: dicts/scut-hccdoc.txt
+  DICT: dicts/mthv2.txt
   VAL:
-    DATA_ROOT: datasets/SCUT-HCCDoc_test
+    DATA_ROOT: datasets/MTHv2_test
     WIDTHS:
-      - 1600
-    MAX_HEIGHT: 2240 
+      - 2880
+    MAX_HEIGHT: 2880
+    FORCE_RESIZE: False
     SIZE_STRIDE: 16
     BATCH_SIZE: 1
     IMAGE_MODE: 'binary'
   NUM_WORKER: 3
 MODEL:
-  WEIGHTS: 'outputs/casia-hwdb/checkpoints/casia-hwdb.pth'
+  WEIGHTS: 'test_result/casia-hwdb/checkpoints/casia-hwdb.pth'
   BACKBONE:
     BLOCK: basicblock
     IN_CHANNEL: 3
@@ -42,12 +43,13 @@ MODEL:
       - 64
   PRED:
     DROPOUT: 0.5
-    NUM_CLASSES: 6109
+    NUM_CLASSES: 6760
 POST_PROCESS:
   DIS_WEIGHT: 0.8
   CONF_THRES: 0.8
   NMS_THRES: 0.15
   SOL_EOL_CONF_THRES: 0.9
-  READ_ORDER_MAX_STEP: 20
-OUTPUT_FOLDER: './outputs/scut-hccdoc'
+  READ_ORDER_MAX_STEP: 12
+  LAYOUT: 'vertical'
+OUTPUT_FOLDER: './test_result/mthv2'
 

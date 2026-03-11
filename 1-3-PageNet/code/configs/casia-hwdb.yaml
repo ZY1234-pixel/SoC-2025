@@ -1,20 +1,19 @@
 DATA:
-  DICT: dicts/mthv2.txt
+  DICT: dicts/casia-hwdb.txt # PageNet/
   VAL:
-    DATA_ROOT: datasets/MTHv2_test
+    DATA_ROOT: ../dataset/IC13Comp
     WIDTHS:
-      - 2880
-    MAX_HEIGHT: 2880
-    FORCE_RESIZE: False
+      - 1920
+    MAX_HEIGHT: 2080 
     SIZE_STRIDE: 16
     BATCH_SIZE: 1
-    IMAGE_MODE: 'binary'
+    IMAGE_MODE: 'np.tobytes'
   NUM_WORKER: 3
 MODEL:
-  WEIGHTS: 'outputs/mthv2/checkpoints/mthv2.pth'
+  WEIGHTS: 'ckpt/casia-hwdb/checkpoints/casia-hwdb.pth' # PageNet/
   BACKBONE:
     BLOCK: basicblock
-    IN_CHANNEL: 3
+    IN_CHANNEL: 1
     LAYERS: 
       - 2
       - 2
@@ -43,13 +42,12 @@ MODEL:
       - 64
   PRED:
     DROPOUT: 0.5
-    NUM_CLASSES: 6760
+    NUM_CLASSES: 7356
 POST_PROCESS:
   DIS_WEIGHT: 0.8
   CONF_THRES: 0.8
   NMS_THRES: 0.15
   SOL_EOL_CONF_THRES: 0.9
-  READ_ORDER_MAX_STEP: 12
-  LAYOUT: 'vertical'
-OUTPUT_FOLDER: './outputs/mthv2'
+  READ_ORDER_MAX_STEP: 20
+OUTPUT_FOLDER: '../test_result/casia-hwdb'
 
