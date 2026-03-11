@@ -1,5 +1,5 @@
 __pycache__/ 
 *.pyc 
 *.pyo 
-"*.pdparams" 
-"*.pdopt" 
+*.pdparams
+*.pdopt
