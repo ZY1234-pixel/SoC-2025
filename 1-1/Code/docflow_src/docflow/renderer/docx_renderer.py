@@ -1,0 +1,1716 @@
+"""DOCX 文档渲染器。
+
+实现分区域渲染编排、逐区块类型渲染、跨列布局表格等核心功能。
+"""
+from __future__ import annotations
+
+import re
+import io
+import logging
+import math
+from collections import defaultdict
+from typing import TYPE_CHECKING, List, Optional, Tuple
+
+from docx import Document as DocxDocument
+from docx.shared import Pt, Cm, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
+from docx.enum.section import WD_SECTION, WD_ORIENT
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ROW_HEIGHT_RULE
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+
+from docflow.renderer.base import BaseRenderer
+from docflow.renderer.docx_utils.paragraph_fmt import (
+    reset_paragraph_format, set_paragraph_spacing, add_spacing_para,
+)
+from docflow.renderer.docx_utils.run_fmt import set_run_font
+from docflow.renderer.docx_utils.table_fmt import (
+    clear_table_borders, set_table_col_widths, set_cell_right_margin,
+    fit_table_to_width,
+)
+from docflow.renderer.docx_utils.html_table import HtmlToDocx
+from docflow.renderer.context import RenderContext
+from docflow.schema.style import resolve_textline_style
+from docflow.model.base import Block, BlockType, Alignment
+from docflow.model.blocks.text_block import TextBlock, should_insert_space
+from docflow.model.blocks.table_block import TableBlock
+from docflow.model.blocks.image_block import ImageBlock
+from docflow.model.blocks.equation_block import EquationBlock
+from docflow.model.zone import Zone
+from docflow.utils.constants import MIN_LINE_SPACING_PT
+
+if TYPE_CHECKING:
+    from docflow.model.page import Page, Document
+
+logger = logging.getLogger(__name__)
+
+# 对齐字符串 → python-docx 枚举（模块级常量，避免重复构造）
+_ALIGN_MAP = {
+    "left": WD_ALIGN_PARAGRAPH.LEFT,
+    "center": WD_ALIGN_PARAGRAPH.CENTER,
+    "right": WD_ALIGN_PARAGRAPH.RIGHT,
+    "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
+}
+
+# caption 类区块集合
+_CAPTION_TYPES = frozenset({
+    BlockType.TABLE_CAPTION,
+    BlockType.FIGURE_CAPTION,
+    BlockType.TABLE_FOOTNOTE,
+    BlockType.FORMULA_CAPTION,
+})
+_LISTISH_RE = re.compile(
+    r"^\s*(\d+[\.．、\)](?!\d)|[A-Za-z][\.\)]|[（(]?[一二三四五六七八九十百]+[)）\.、]?|[•\-·])\s*"
+)
+_NUMBERED_TITLE_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)*[\.、]|\d+[)）]|\(?\d+\)|[（(]?[一二三四五六七八九十百]+[)）\.、])\s*\S+"
+)
+_NUMBERED_TITLE_LEVEL_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)(?:[\.、])?\s*\S")
+
+
+class DocxRenderer(BaseRenderer):
+    """将 Document 模型渲染为 DOCX 格式。
+
+    实现三种基于区域的渲染策略：
+      - single_col: 直接顺序段落输出
+      - multi_col_wcols: Word 原生 w:cols 分栏
+      - multi_col_table: 无边框布局表格（用于跨列内容）
+    """
+
+    _PAGE_FIT_SCALES = (
+        1.00, 0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93, 0.92, 0.91,
+        0.90, 0.89, 0.88, 0.87, 0.86, 0.85, 0.84, 0.83, 0.82,
+    )
+    _PAGE_FIT_MIN_SCALE = 0.82
+    _PAGE_FIT_HEADROOM = 0.99
+    _TEXT_WRAP_RISK_CJK = 1.04
+    _TEXT_WRAP_RISK_LATIN = 1.08
+    _TABLE_HEIGHT_RISK = 1.10
+    _IMAGE_HEIGHT_RISK = 1.03
+
+    def __init__(self, config=None) -> None:
+        super().__init__(config=config)
+        self._fit_scale: float = 1.0
+
+    def render(self, document: "Document", output_path: str, **options) -> None:
+        expected_pages = int(options.get("expected_pages", len(document.pages)))
+        enforce_single_page = bool(options.get("enforce_single_page", True))
+        if enforce_single_page and expected_pages == 1:
+            doc = self._render_single_page_fit(document, expected_pages, **options)
+            doc.save(output_path)
+            return
+        doc = self._build_docx(document, **options)
+        doc.save(output_path)
+
+    def render_bytes(self, document: "Document", **options) -> bytes:
+        expected_pages = int(options.get("expected_pages", len(document.pages)))
+        enforce_single_page = bool(options.get("enforce_single_page", True))
+        if enforce_single_page and expected_pages == 1:
+            doc = self._render_single_page_fit(document, expected_pages, **options)
+            buf = io.BytesIO()
+            doc.save(buf)
+            return buf.getvalue()
+        doc = self._build_docx(document, **options)
+        buf = io.BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
+
+    # ------------------------------------------------------------------
+    # 核心构建
+    # ------------------------------------------------------------------
+
+    def _build_docx(self, document: "Document", **options) -> DocxDocument:
+        doc = DocxDocument()
+
+        # 默认样式 -- 由 RecoveryConfig 驱动
+        cfg = self.config
+        style_normal = doc.styles['Normal']
+        style_normal.font.name = cfg.default_font
+        style_normal._element.rPr.rFonts.set(qn('w:eastAsia'), cfg.default_cjk_font)
+        style_normal.font.size = Pt(self._scale(cfg.default_font_size_pt))
+        style_normal.paragraph_format.space_after = Pt(0)
+        style_normal.paragraph_format.space_before = Pt(0)
+        style_normal.paragraph_format.line_spacing = self._scale(cfg.default_line_spacing)
+
+        for page in document.pages:
+            self._render_page(doc, page)
+
+        return doc
+
+    def _render_page(self, doc: DocxDocument, page: "Page") -> None:
+        sect = doc.sections[0] if len(doc.sections) == 1 and not doc.paragraphs else doc.add_section(WD_SECTION.NEW_PAGE)
+        self._setup_section(sect, page)
+        self._set_section_columns(sect, 1)
+        base_sect = sect
+        current_cols = 1
+
+        mapper = page.coord_mapper
+        usable_w_pt = page.usable_width_pt
+        img_w = page.image_width
+
+        for zi, zone in enumerate(page.zones):
+            # 预计算每个区域的列像素边界
+            col_px = self._build_render_col_px(zone)
+
+            strategy = zone.rendering_strategy
+            use_native_cols = self._should_use_native_columns(
+                zone,
+                col_px=col_px,
+                page_width_px=img_w,
+            )
+            desired_cols = zone.col_count if use_native_cols else 1
+            if desired_cols != current_cols:
+                new_sect = doc.add_section(WD_SECTION.CONTINUOUS)
+                self._copy_section(base_sect, new_sect)
+                self._set_section_columns(new_sect, desired_cols)
+                current_cols = desired_cols
+
+            if strategy == 'single_col':
+                cl = col_px.get(0, [0, img_w])[0]
+                cr = col_px.get(0, [0, img_w])[1]
+                ctx = RenderContext(
+                    coord_mapper=mapper, page=page,
+                    col_width_pt=usable_w_pt,
+                    col_left_px=cl, col_right_px=cr,
+                )
+                prev_y = 0
+                for block in zone.blocks:
+                    gap = max(0, block.bbox.y1 - prev_y)
+                    sp = self._scale(min(mapper.h(gap), 18)) if (prev_y > 0 and gap > 2) else 0
+                    self._render_block(doc, block, ctx, space_before=sp)
+                    prev_y = block.bbox.y2
+
+            elif strategy == 'strip_row':
+                self._render_strip_row_zone(doc, zone, page)
+
+            elif use_native_cols:
+                self._render_native_columns_zone(doc, zone, page, col_px)
+            else:  # multi_col_table
+                self._render_layout_table_zone(doc, zone, page, col_px)
+
+        # 清理尾部空段落
+        self._cleanup_trailing_paragraphs(doc)
+
+    # ------------------------------------------------------------------
+    # 节格式辅助
+    # ------------------------------------------------------------------
+
+    def _setup_section(self, sect, page: "Page") -> None:
+        sect.page_width = Cm(page.page_width_pt / 72 * 2.54)
+        sect.page_height = Cm(page.page_height_pt / 72 * 2.54)
+        is_landscape = page.orientation == 'landscape'
+        sect.orientation = WD_ORIENT.LANDSCAPE if is_landscape else WD_ORIENT.PORTRAIT
+        sect.left_margin = Pt(page.margin_left_pt)
+        sect.right_margin = Pt(page.margin_right_pt)
+        sect.top_margin = Pt(page.margin_top_pt)
+        sect.bottom_margin = Pt(page.margin_bottom_pt)
+
+    def _copy_section(self, src_sect, dst_sect) -> None:
+        dst_sect.page_width = src_sect.page_width
+        dst_sect.page_height = src_sect.page_height
+        dst_sect.left_margin = src_sect.left_margin
+        dst_sect.right_margin = src_sect.right_margin
+        dst_sect.top_margin = src_sect.top_margin
+        dst_sect.bottom_margin = src_sect.bottom_margin
+
+    def _set_section_columns(self, sect, num_cols: int) -> None:
+        """设置节分栏（等宽列）。"""
+        n = max(1, int(num_cols))
+        gap_twips = max(0, int(getattr(self.config, "docx_column_gap_twips", 720)))
+        sect_pr = sect._sectPr
+        cols = sect_pr.find(qn('w:cols'))
+        if cols is None:
+            cols = OxmlElement('w:cols')
+            sect_pr.append(cols)
+        for child in list(cols):
+            if child.tag == qn('w:col'):
+                cols.remove(child)
+        cols.set(qn('w:num'), str(n))
+        cols.set(qn('w:equalWidth'), '1')
+        cols.set(qn('w:space'), str(gap_twips))
+
+    def _render_strip_row_zone(self, doc: DocxDocument, zone: Zone, page: "Page") -> None:
+        """将页眉/页脚条带按单行布局渲染，避免混入正文分栏。"""
+        from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+
+        blocks = sorted(zone.blocks, key=lambda b: b.bbox.x1)
+        if not blocks:
+            return
+
+        mapper = page.coord_mapper
+        usable_w_pt = page.usable_width_pt
+        centers = [((block.bbox.x1 + block.bbox.x2) * 0.5) for block in blocks]
+        boundaries_px = [0.0]
+        for idx in range(len(centers) - 1):
+            boundaries_px.append((centers[idx] + centers[idx + 1]) * 0.5)
+        boundaries_px.append(float(page.image_width))
+        widths_pt = [
+            max(self._scale(36.0), usable_w_pt * max(boundaries_px[idx + 1] - boundaries_px[idx], 1.0) / max(float(page.image_width), 1.0))
+            for idx in range(len(blocks))
+        ]
+
+        total_width = sum(widths_pt)
+        if total_width > 0:
+            widths_pt = [width * (usable_w_pt / total_width) for width in widths_pt]
+
+        tbl = doc.add_table(rows=1, cols=len(blocks))
+        tbl.autofit = False
+        clear_table_borders(tbl)
+        set_table_col_widths(tbl, widths_pt)
+        row = tbl.rows[0]
+        for cell in row.cells:
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            reset_paragraph_format(cell.paragraphs[0])
+            set_paragraph_spacing(
+                cell.paragraphs[0],
+                line_spacing=self._scale(MIN_LINE_SPACING_PT),
+                exact=True,
+            )
+
+        for idx, block in enumerate(blocks):
+            cell = row.cells[idx]
+            ctx = RenderContext(
+                coord_mapper=mapper,
+                page=page,
+                col_width_pt=widths_pt[idx],
+                col_left_px=boundaries_px[idx],
+                col_right_px=boundaries_px[idx + 1],
+                in_table_cell=True,
+            )
+            self._render_block(cell, block, ctx, space_before=0)
+            self._prune_leading_empty_cell_paragraphs(cell)
+
+    @staticmethod
+    def _column_widths_pt(
+        num_cols: int,
+        col_px: dict,
+        page_width_px: float,
+        total_width_pt: float,
+    ) -> List[float]:
+        if num_cols <= 0 or total_width_pt <= 0:
+            return []
+        if page_width_px <= 0 or not col_px:
+            return [total_width_pt / num_cols] * num_cols
+
+        raw_widths = []
+        default_px = max(page_width_px / max(num_cols, 1), 1.0)
+        for ci in range(num_cols):
+            span = col_px.get(ci)
+            if not span:
+                raw_widths.append(default_px)
+                continue
+            raw_widths.append(max(float(span[1]) - float(span[0]), 1.0))
+
+        total_raw = sum(raw_widths)
+        if total_raw <= 0:
+            return [total_width_pt / num_cols] * num_cols
+        return [total_width_pt * width / total_raw for width in raw_widths]
+
+    @staticmethod
+    def _build_render_col_px(zone: Zone) -> dict:
+        col_px = {}
+        num_cols = max(int(getattr(zone, "col_count", 1) or 1), 1)
+        for ci in range(num_cols):
+            candidates = [
+                block for block in zone.blocks
+                if block.col_index == ci and len(getattr(block, "spanned_cols", [])) <= 1
+            ]
+            if not candidates:
+                continue
+
+            primary = [
+                block for block in candidates
+                if isinstance(block, TextBlock) and block.count_lines() >= 2
+            ]
+            selected = primary or candidates
+            x1 = min(float(block.bbox.x1) for block in selected)
+            if primary:
+                x2_values = sorted(float(block.bbox.x2) for block in selected)
+                x2 = x2_values[-2] if len(x2_values) >= 3 else x2_values[-1]
+            else:
+                x2 = max(float(block.bbox.x2) for block in selected)
+            col_px[ci] = [x1, x2]
+        return col_px
+
+    @classmethod
+    def _has_irregular_column_widths(cls, col_px: dict, page_width_px: float, num_cols: int) -> bool:
+        if num_cols <= 1 or page_width_px <= 0 or not col_px:
+            return False
+        widths_pt = cls._column_widths_pt(num_cols, col_px, page_width_px, 1.0)
+        if not widths_pt:
+            return False
+        positive = [width for width in widths_pt if width > 0]
+        if len(positive) < 2:
+            return False
+        return max(positive) / max(min(positive), 1e-6) >= 1.45
+
+    @staticmethod
+    def _column_segments(num_cols: int, spanned_cols: List[int]) -> List[Tuple[str, List[int]]]:
+        if not spanned_cols:
+            return [("standalone", [ci]) for ci in range(num_cols)]
+        spanned_set = set(spanned_cols)
+        first = min(spanned_cols)
+        last = max(spanned_cols)
+        segments: List[Tuple[str, List[int]]] = []
+        ci = 0
+        while ci < num_cols:
+            if ci == first:
+                segments.append(("spanned", list(spanned_cols)))
+                ci = last + 1
+                continue
+            if ci in spanned_set:
+                ci += 1
+                continue
+            segments.append(("standalone", [ci]))
+            ci += 1
+        return segments
+
+    def _should_use_native_columns(self, zone: Zone, col_px: Optional[dict] = None, page_width_px: float = 0.0) -> bool:
+        """无跨列时优先使用 Word 原生分栏，提升可编辑性与还原度。"""
+        if not bool(getattr(self.config, "docx_prefer_native_columns", True)):
+            return False
+        if zone.col_count <= 1:
+            return False
+        if any(len(getattr(b, "spanned_cols", [])) > 1 for b in zone.blocks):
+            return False
+        if self._has_irregular_column_widths(col_px or {}, page_width_px, zone.col_count):
+            return False
+        return True
+
+    def _config_style_defaults(self) -> dict:
+        return {
+            "font_size_pt": self.config.default_font_size_pt,
+            "font_family": self.config.default_cjk_font,
+            "font_family_western": self.config.default_font,
+            "bold": False,
+            "italic": False,
+            "underline": False,
+            "strikethrough": False,
+            "superscript": False,
+            "subscript": False,
+            "alignment": "left",
+            "line_spacing": self.config.default_line_spacing,
+            "space_after_pt": 1.0,
+        }
+
+    @staticmethod
+    def _parse_css_hex(color: Optional[str]) -> Optional[RGBColor]:
+        if not color:
+            return None
+        try:
+            hex_c = color.lstrip("#")
+            if len(hex_c) != 6:
+                return None
+            return RGBColor(int(hex_c[0:2], 16), int(hex_c[2:4], 16), int(hex_c[4:6], 16))
+        except Exception:
+            return None
+
+    def _scale(self, value: float) -> float:
+        return value * self._fit_scale
+
+    def _render_single_page_fit(
+        self, document: "Document", expected_pages: int, **build_options
+    ) -> DocxDocument:
+        """纯内置单页适配：按内容高度预算选择缩放系数。"""
+        build_options = dict(build_options)
+        build_options.pop("expected_pages", None)
+        build_options.pop("enforce_single_page", None)
+
+        scale = self._select_builtin_fit_scale(document, expected_pages)
+        logger.info("single-page builtin fit selected scale=%.3f expected_pages=%d", scale, expected_pages)
+        try:
+            self._fit_scale = scale
+            return self._build_docx(document, **build_options)
+        finally:
+            self._fit_scale = 1.0
+
+    def _select_builtin_fit_scale(self, document: "Document", expected_pages: int) -> float:
+        """基于内容高度预算选择缩放档位（纯内置，无外部依赖）。"""
+        if not document.pages:
+            return 1.0
+        if expected_pages <= 0:
+            expected_pages = len(document.pages)
+
+        est_heights = [self._estimate_page_content_height_pt(page) for page in document.pages]
+        caps = [max(page.usable_height_pt * self._PAGE_FIT_HEADROOM, 1.0) for page in document.pages]
+
+        def _est_pages(scale: float) -> int:
+            total = 0
+            for h, cap in zip(est_heights, caps):
+                used = max(h * scale, 0.0)
+                total += max(1, int(math.ceil(used / cap)))
+            return total
+
+        if _est_pages(1.0) <= expected_pages:
+            return 1.0
+
+        analytic = 1.0
+        for h, cap in zip(est_heights, caps):
+            if h > 0:
+                analytic = min(analytic, cap / h)
+        analytic = max(
+            self._PAGE_FIT_MIN_SCALE,
+            min(1.0, math.floor(analytic * 100.0) / 100.0),
+        )
+        safety_margin = self._fit_safety_margin(document)
+        if analytic < 1.0 and safety_margin > 0.0:
+            analytic = max(self._PAGE_FIT_MIN_SCALE, analytic - safety_margin)
+
+        candidates = [s for s in self._PAGE_FIT_SCALES if self._PAGE_FIT_MIN_SCALE <= s <= analytic]
+        if not candidates:
+            candidates = [self._PAGE_FIT_MIN_SCALE]
+        for scale in candidates:
+            if _est_pages(scale) <= expected_pages:
+                return scale
+        return candidates[-1]
+
+    @staticmethod
+    def _fit_safety_margin(document: "Document") -> float:
+        """为复杂版面选择更保守的单页适配安全余量。
+
+        经验上，4 栏及以上且带跨栏图片区/图注的布局，Word 渲染出的真实高度
+        会明显高于几何估算值，因此需要比普通 3+ 栏页面更强的安全收缩。
+        """
+        margin = 0.0
+        for page in document.pages:
+            for zone in getattr(page, "zones", []):
+                col_count = max(int(getattr(zone, "col_count", 1) or 1), 1)
+                has_spanned = any(
+                    len(getattr(block, "spanned_cols", [])) > 1
+                    for block in getattr(zone, "blocks", [])
+                )
+                if col_count >= 4 and has_spanned:
+                    return 0.04
+                if col_count >= 3 and has_spanned:
+                    margin = max(margin, 0.03)
+                    continue
+                if col_count >= 3:
+                    margin = max(margin, 0.01)
+        return margin
+
+    def _estimate_page_content_height_pt(self, page: "Page") -> float:
+        """估算页面渲染后的总内容高度（pt）。"""
+        mapper = page.coord_mapper
+        usable_w_pt = page.usable_width_pt
+        total = 0.0
+        for zone in page.zones:
+            total += self._estimate_zone_height_pt(zone, page, mapper, usable_w_pt)
+        return max(total, 1.0)
+
+    def _estimate_zone_height_pt(self, zone: Zone, page: "Page", mapper, usable_w_pt: float) -> float:
+        blocks = zone.blocks
+        if not blocks:
+            return 0.0
+
+        if zone.rendering_strategy == 'single_col':
+            return self._estimate_stream_height_pt(
+                blocks=blocks,
+                page=page,
+                mapper=mapper,
+                col_width_pt=usable_w_pt,
+                gap_cap_pt=18.0,
+            )
+
+        num_cols = max(zone.col_count, 1)
+        layout_factor = self._column_layout_height_factor(zone)
+        col_unit = usable_w_pt / num_cols
+        spanned_set = set()
+        for b in blocks:
+            if len(b.spanned_cols) > 1:
+                spanned_set.update(b.spanned_cols)
+
+        if not spanned_set:
+            by_col = defaultdict(list)
+            for b in blocks:
+                by_col[b.col_index].append(b)
+            return max(
+                self._estimate_stream_height_pt(
+                    blocks=by_col.get(ci, []),
+                    page=page,
+                    mapper=mapper,
+                    col_width_pt=col_unit,
+                    gap_cap_pt=12.0,
+                )
+                for ci in range(num_cols)
+            ) * layout_factor
+
+        standalone_cols = [ci for ci in range(num_cols) if ci not in spanned_set]
+        spanned_cols = sorted(spanned_set)
+        standalone_max = 0.0
+        for ci in standalone_cols:
+            col_blocks = [b for b in blocks if b.col_index == ci and len(b.spanned_cols) == 1]
+            standalone_max = max(
+                standalone_max,
+                self._estimate_stream_height_pt(
+                    blocks=col_blocks,
+                    page=page,
+                    mapper=mapper,
+                    col_width_pt=col_unit,
+                    gap_cap_pt=12.0,
+                ),
+            )
+
+        span_width = col_unit * len(spanned_cols)
+        span_blocks = [b for b in blocks if len(b.spanned_cols) > 1]
+        span_top = min((b.bbox.y1 for b in span_blocks), default=float("inf"))
+        span_bottom = max((b.bbox.y2 for b in span_blocks), default=float("-inf"))
+        merged_height = self._estimate_stream_height_pt(
+            blocks=span_blocks,
+            page=page,
+            mapper=mapper,
+            col_width_pt=span_width,
+            gap_cap_pt=12.0,
+        )
+
+        above_max = 0.0
+        below_max = 0.0
+        for ci in spanned_cols:
+            above_blocks = []
+            below_blocks = []
+            for b in blocks:
+                if b.col_index != ci or len(b.spanned_cols) != 1:
+                    continue
+                if not span_blocks:
+                    above_blocks.append(b)
+                    continue
+                if float(b.bbox.y2) <= float(span_top) + 8.0:
+                    above_blocks.append(b)
+                elif float(b.bbox.y1) >= float(span_bottom) - 8.0:
+                    below_blocks.append(b)
+                elif ((float(b.bbox.y1) + float(b.bbox.y2)) * 0.5) <= ((float(span_top) + float(span_bottom)) * 0.5):
+                    above_blocks.append(b)
+                else:
+                    below_blocks.append(b)
+            above_max = max(
+                above_max,
+                self._estimate_stream_height_pt(
+                    blocks=above_blocks,
+                    page=page,
+                    mapper=mapper,
+                    col_width_pt=col_unit,
+                    gap_cap_pt=12.0,
+                ),
+            )
+            below_max = max(
+                below_max,
+                self._estimate_stream_height_pt(
+                    blocks=below_blocks,
+                    page=page,
+                    mapper=mapper,
+                    col_width_pt=col_unit,
+                    gap_cap_pt=12.0,
+                ),
+            )
+        merged_total = above_max + merged_height + below_max
+        return max(standalone_max, merged_total) * layout_factor
+
+    @staticmethod
+    def _column_layout_height_factor(zone: Zone) -> float:
+        """为复杂多栏区添加保守高度余量。"""
+        num_cols = max(int(getattr(zone, "col_count", 1) or 1), 1)
+        if num_cols <= 2:
+            return 1.0
+        factor = 1.0 + 0.03 * (num_cols - 2)
+        if any(len(getattr(block, "spanned_cols", [])) > 1 for block in zone.blocks):
+            factor += 0.005
+        return factor
+
+    def _estimate_stream_height_pt(
+        self,
+        blocks: list,
+        page: "Page",
+        mapper,
+        col_width_pt: float,
+        gap_cap_pt: float,
+    ) -> float:
+        if not blocks:
+            return 0.0
+        total = 0.0
+        prev_y = None
+        for block in sorted(blocks, key=lambda b: b.bbox.y1):
+            if prev_y is not None:
+                gap_px = max(0.0, block.bbox.y1 - prev_y)
+                if gap_px > 2:
+                    total += min(mapper.h(gap_px), gap_cap_pt)
+            total += self._estimate_block_height_pt(
+                block=block,
+                page=page,
+                mapper=mapper,
+                col_width_pt=col_width_pt,
+            )
+            prev_y = block.bbox.y2
+        return total
+
+    def _estimate_block_height_pt(
+        self,
+        block: Block,
+        page: "Page",
+        mapper,
+        col_width_pt: float,
+    ) -> float:
+        raw_h = max(mapper.h(max(block.bbox.height, 0.0)), 0.0)
+        if isinstance(block, TextBlock):
+            return self._estimate_text_block_height_pt(block, page, mapper, col_width_pt)
+        if isinstance(block, TableBlock):
+            factor = self._TABLE_HEIGHT_RISK if block.html else self._IMAGE_HEIGHT_RISK
+            return raw_h * factor + 1.0
+        if isinstance(block, (ImageBlock, EquationBlock)):
+            if isinstance(block, EquationBlock) and not block.image_data:
+                return self.config.default_font_size_pt * 1.6
+            return raw_h * self._IMAGE_HEIGHT_RISK + 3.0
+        return raw_h
+
+    def _estimate_text_block_height_pt(
+        self,
+        block: TextBlock,
+        page: "Page",
+        mapper,
+        col_width_pt: float,
+    ) -> float:
+        rtype = block.block_type
+        page_defaults = getattr(page, "style_defaults", None)
+        config_defaults = self._config_style_defaults()
+        block_effective = resolve_textline_style(
+            page_defaults=page_defaults,
+            block_style=block.style,
+            line_style=None,
+            config_defaults=config_defaults,
+        )
+        est_h = self._estimate_text_content_height_pt(
+            block=block,
+            page=page,
+            block_effective=block_effective,
+            col_width_pt=col_width_pt,
+        )
+        bbox_h = mapper.h(max(block.bbox.height, 0.0))
+        return max(est_h, bbox_h * 0.95)
+
+    def _estimate_text_content_height_pt(
+        self,
+        block: TextBlock,
+        page: "Page",
+        block_effective: dict,
+        col_width_pt: float,
+    ) -> float:
+        rtype = block.block_type
+        mapper = page.coord_mapper
+
+        text = block.full_text().strip()
+        para_count = 1
+        is_caption = rtype in _CAPTION_TYPES
+        if block.paragraphs and len(block.paragraphs) > 1 and not is_caption:
+            para_count = sum(1 for p in block.paragraphs if ''.join(ln.text.strip() for ln in p.lines).strip())
+            para_count = max(1, para_count)
+
+        font_size = float(block_effective.get("font_size_pt") or block.estimated_font_size_pt or self.config.default_font_size_pt)
+        if rtype == BlockType.TITLE:
+            font_size = self._resolve_title_font_size_pt(
+                block=block,
+                page=page,
+                font_size_pt=font_size,
+                alignment=str(block_effective.get("alignment") or "left"),
+            )
+        elif is_caption:
+            font_size = max(font_size - 0.5, 6.0)
+        elif rtype in (BlockType.HEADER, BlockType.FOOTER, BlockType.REFERENCE):
+            font_size = max(font_size - 1.0, 6.0)
+        else:
+            font_size = self._resolve_body_font_size_pt(block, page, font_size)
+
+        line_spacing = float(block_effective.get("line_spacing") or self.config.default_line_spacing)
+        line_spacing = max(0.9, min(line_spacing, 2.2))
+        line_height = max(font_size * line_spacing, font_size * 1.05)
+        space_after = float(block_effective.get("space_after_pt", 1.0) or 1.0)
+
+        base_lines = max(block.count_lines(), 1)
+        source_width = max(mapper.w(max(block.bbox.width, 1.0)), 1.0)
+        target_width = max(col_width_pt * 0.96, 1.0)
+        wrap_ratio = self._effective_text_wrap_ratio(
+            text=text,
+            base_lines=base_lines,
+            source_width=source_width,
+            target_width=target_width,
+            is_caption=is_caption,
+        )
+
+        est_lines = max(base_lines, int(math.ceil(base_lines * wrap_ratio)))
+        return est_lines * line_height + para_count * space_after
+
+    def _effective_text_wrap_ratio(
+        self,
+        text: str,
+        base_lines: int,
+        source_width: float,
+        target_width: float,
+        is_caption: bool,
+    ) -> float:
+        """估算目标容器相对源容器的换行放大倍数。"""
+        if is_caption or base_lines <= 1:
+            return 1.0
+
+        width_ratio = max(1.0, source_width / max(target_width, 1.0))
+        # 目标列宽未明显变窄时，保留 OCR 原始行数，避免为密集 CJK 版面过度缩放。
+        if width_ratio <= 1.01:
+            return 1.0
+
+        wrap_risk = self._text_wrap_risk(text)
+        if width_ratio > 1.25:
+            wrap_risk += 0.02
+        if len(text) / max(base_lines, 1) > 45:
+            wrap_risk += 0.02
+        return max(1.0, width_ratio * wrap_risk)
+
+    @staticmethod
+    def _is_wide_centered_single_line_title(block: TextBlock, page: "Page", alignment: str) -> bool:
+        if block.block_type != BlockType.TITLE:
+            return False
+        if (alignment or "").lower() != "center":
+            return False
+        if block.count_lines() != 1:
+            return False
+        return float(block.bbox.width) >= max(float(page.image_width) * 0.55, 1.0)
+
+    @classmethod
+    def _is_masthead_title(cls, block: TextBlock, page: "Page", alignment: str) -> bool:
+        return (
+            cls._is_wide_centered_single_line_title(block, page, alignment)
+            and float(block.bbox.y1) <= max(float(page.image_height) * 0.12, 1.0)
+        )
+
+    @staticmethod
+    def _title_level(block: TextBlock) -> Optional[int]:
+        text = (block.full_text() or "").strip()
+        match = _NUMBERED_TITLE_LEVEL_RE.match(text)
+        if not match:
+            return None
+        return match.group(1).count(".") + 1
+
+    @staticmethod
+    def _is_numbered_section_title(block: TextBlock) -> bool:
+        return DocxRenderer._title_level(block) is not None
+
+    def _resolve_title_font_size_pt(
+        self,
+        block: TextBlock,
+        page: "Page",
+        font_size_pt: float,
+        alignment: str,
+    ) -> float:
+        title_level = self._title_level(block)
+        if self._is_masthead_title(block, page, alignment):
+            return min(font_size_pt * 1.35, 42.0)
+        if title_level == 1:
+            return min(font_size_pt * 1.34, font_size_pt + 2.4, 24.0)
+        if title_level == 2:
+            return min(font_size_pt * 1.22, font_size_pt + 1.2, 18.0)
+        if title_level and title_level >= 3:
+            return min(font_size_pt * 1.16, font_size_pt + 0.8, 16.0)
+        if self._is_wide_centered_single_line_title(block, page, alignment):
+            return min(font_size_pt * 1.2, 36.0)
+        return min(font_size_pt * 1.15, 28.0)
+
+    @staticmethod
+    def _cjk_ratio(text: str) -> float:
+        if not text:
+            return 0.0
+        cjk = sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff')
+        return cjk / max(len(text), 1)
+
+    def _resolve_body_font_size_pt(
+        self,
+        block: TextBlock,
+        page: "Page",
+        font_size_pt: float,
+    ) -> float:
+        """对宽幅中文正文做轻微字号校准，避免版心显得过空。"""
+        if block.block_type != BlockType.TEXT:
+            return font_size_pt
+        if block.count_lines() < 5:
+            return font_size_pt
+        if self._cjk_ratio(block.full_text()) < 0.55:
+            return font_size_pt
+        width_ratio = float(block.bbox.width) / max(float(page.image_width), 1.0)
+        if width_ratio < 0.62:
+            return font_size_pt
+        if not (8.0 <= font_size_pt <= 11.5):
+            return font_size_pt
+        return min(font_size_pt * 1.08, font_size_pt + 1.0)
+
+    def _text_wrap_risk(self, text: str) -> float:
+        if not text:
+            return self._TEXT_WRAP_RISK_LATIN
+        cjk = sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff')
+        ratio = cjk / max(len(text), 1)
+        return self._TEXT_WRAP_RISK_CJK if ratio >= 0.5 else self._TEXT_WRAP_RISK_LATIN
+
+    # ------------------------------------------------------------------
+    # 区块渲染
+    # ------------------------------------------------------------------
+
+    def _render_block(self, container, block: Block, ctx: RenderContext,
+                      space_before: float = 0) -> Tuple[Optional[object], bool]:
+        """渲染单个区块。返回 (last_paragraph, ended_sentence)。"""
+        if isinstance(block, ImageBlock):
+            return self._render_image_block(container, block, ctx, space_before), True
+        elif isinstance(block, EquationBlock):
+            return self._render_equation_block(container, block, ctx, space_before), True
+        elif isinstance(block, TableBlock):
+            self._render_table_block(container, block, ctx, space_before)
+            return None, True
+        elif isinstance(block, TextBlock):
+            return self._render_text_block(container, block, ctx, space_before)
+        else:
+            # 未知区块类型：尝试作为图片处理
+            if hasattr(block, 'image_data') and block.image_data:
+                return self._render_image_block(container, block, ctx, space_before), True
+            return None, True
+
+    def _render_image_block(self, container, block, ctx: RenderContext,
+                            space_before: float) -> Optional[object]:
+        """将图片/图像区块渲染为居中内联图片。"""
+        image_data = getattr(block, 'image_data', None)
+        if not image_data:
+            return None
+
+        mapper = ctx.coord_mapper
+        bbox = block.bbox
+        # 宽度上限：min(bbox宽度, 列宽98%)
+        pw = min(mapper.w(bbox.width), ctx.col_width_pt * 0.98)
+        # 高度校正：坐标映射 X/Y 比例可能不等（图像与目标页面宽高比不同），
+        # 若仅按宽度绘制会导致图片实际高度超出 bbox 预测值，造成内容溢出。
+        # 此处计算「使渲染高度 = mapper.h(bbox.height) 所需的宽度」作为上界。
+        if bbox.height > 0:
+            pw_by_height = mapper.h(bbox.height) * bbox.width / bbox.height
+            pw = min(pw, pw_by_height)
+        pw = self._scale(pw)
+
+        if space_before > self._scale(3):
+            add_spacing_para(container, min(space_before, self._scale(12)))
+
+        p = container.add_paragraph()
+        reset_paragraph_format(p)
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.line_spacing = 1.0
+        run = p.add_run()
+        try:
+            run.add_picture(io.BytesIO(image_data), width=Pt(pw))
+        except Exception:
+            pass
+        set_paragraph_spacing(p, space_after=self._scale(3))
+        return p
+
+    def _render_equation_block(self, container, block: EquationBlock,
+                               ctx: RenderContext, space_before: float) -> Optional[object]:
+        """渲染公式：优先使用图片回退。"""
+        image_data = block.image_data
+        if image_data:
+            return self._render_image_block(container, block, ctx, space_before)
+        # 若有 LaTeX 但无图片，则以文本方式渲染
+        if block.latex:
+            p = container.add_paragraph()
+            reset_paragraph_format(p)
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run(block.latex)
+            set_run_font(run, font_size=self._scale(self.config.default_font_size_pt), italic=True)
+            return p
+        # 无图片、无 LaTeX：插入占位符
+        p = container.add_paragraph()
+        reset_paragraph_format(p)
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = p.add_run("[公式]")
+        from docx.shared import RGBColor
+        set_run_font(run, font_size=self._scale(self.config.default_font_size_pt), italic=True,
+                     color_rgb=RGBColor(160, 160, 160))
+        return p
+
+    def _render_table_block(self, container, block: TableBlock,
+                            ctx: RenderContext, space_before: float) -> None:
+        """渲染表格：先尝试 HTML→docx，失败则回退到图片。"""
+        if space_before > self._scale(MIN_LINE_SPACING_PT):
+            add_spacing_para(container, space_before)
+
+        rendered = False
+        if block.html:
+            try:
+                parser = HtmlToDocx()
+                parser.table_style = "Table Grid"
+                parser.handle_table(
+                    block.html,
+                    container,
+                    table_image_data=block.image_data,
+                    table_width_pt=ctx.col_width_pt,
+                )
+                if hasattr(container, 'tables') and container.tables:
+                    t = container.tables[-1]
+                    t.alignment = WD_TABLE_ALIGNMENT.CENTER
+                    # 缩放列宽，防止超出可用列宽
+                    fit_table_to_width(t, ctx.col_width_pt)
+                    for row in t.rows:
+                        row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+                rendered = True
+            except Exception as e:
+                logger.warning("Table HTML rendering failed, falling back to image: %s", e)
+
+        if not rendered and block.image_data:
+            self._render_image_block(container, block, ctx, 0)
+
+    def _render_text_block(self, container, block: TextBlock,
+                           ctx: RenderContext,
+                           space_before: float = 0) -> Tuple[Optional[object], bool]:
+        """渲染文本/标题/说明区块。
+
+        完全由 ``block.style`` 驱动，不做任何样式推断。
+        所有样式字段均已由管线的 :mod:`docflow.layout.style_inferrer` 填充。
+        """
+        rtype = block.block_type
+        bs = block.style          # style_inferrer 保证非 None
+        page_defaults = getattr(ctx.page, "style_defaults", None)
+        config_defaults = self._config_style_defaults()
+        block_effective = resolve_textline_style(
+            page_defaults=page_defaults,
+            block_style=bs,
+            line_style=None,
+            config_defaults=config_defaults,
+        )
+        is_title = rtype == BlockType.TITLE
+        is_caption = rtype in _CAPTION_TYPES
+        preserve_line_breaks = bool(
+            getattr(self.config, "docx_preserve_visual_line_breaks", True)
+        )
+
+        # ── 文本内容 ─────────────────────────────────────────────────
+        text = block.full_text().strip()
+        if not text:
+            return None, True
+
+        mapper = ctx.coord_mapper
+
+        # ── 从 block.style 读取全部样式（无推断逻辑） ────────────────
+        alignment = _ALIGN_MAP.get(
+            str(block_effective.get("alignment", "left")).lower(),
+            WD_ALIGN_PARAGRAPH.LEFT,
+        )
+        sp_after = self._scale(float(block_effective.get("space_after_pt", 1.0) or 1.0))
+        line_spacing = block_effective.get("line_spacing")
+        preserve_breaks_on_ambiguous_justify = bool(
+            getattr(self.config, "docx_preserve_breaks_on_ambiguous_justify", True)
+        )
+        ambiguous_justify = (
+            alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
+            and self._is_ambiguous_justify(block, ctx.col_left_px, ctx.col_right_px)
+        )
+        bbox_h_pt = mapper.h(max(block.bbox.height, 0.0))
+        content_h_pt = self._estimate_text_content_height_pt(
+            block=block,
+            page=ctx.page,
+            block_effective=block_effective,
+            col_width_pt=ctx.col_width_pt,
+        )
+        reserve_bbox_after_pt = 0.0
+        if (
+            rtype == BlockType.TEXT
+            and bbox_h_pt > content_h_pt * 1.12
+            and self._cjk_ratio(text) >= 0.55
+            and float(block.bbox.width) / max(float(ctx.page.image_width), 1.0) >= 0.62
+        ):
+            reserve_bbox_after_pt = min(max(0.0, bbox_h_pt * 0.95 - content_h_pt), 28.0)
+
+        # ── 段落渲染内部函数 ─────────────────────────────────────────
+        def _line_effective_style(line) -> dict:
+            return resolve_textline_style(
+                page_defaults=page_defaults,
+                block_style=bs,
+                line_style=getattr(line, "style", None),
+                config_defaults=config_defaults,
+            )
+
+        def _write_one_run(p, run_text: str, run_style: dict) -> None:
+            if not run_text:
+                return
+            color = self._parse_css_hex(run_style.get("color"))
+            font_size = self._scale(float(run_style.get("font_size_pt") or self.config.default_font_size_pt))
+            bold = bool(run_style.get("bold", False))
+            italic = bool(run_style.get("italic", False))
+            underline = bool(run_style.get("underline", False))
+            strike = bool(run_style.get("strikethrough", False))
+            superscript = bool(run_style.get("superscript", False))
+            subscript = bool(run_style.get("subscript", False))
+            east_asia = str(run_style.get("font_family") or self.config.default_cjk_font)
+            font_name = str(run_style.get("font_family_western") or self.config.default_font)
+
+            run = p.add_run(run_text)
+            if is_title:
+                title_alignment = str(block_effective.get("alignment") or "left")
+                is_masthead = self._is_masthead_title(block, ctx.page, title_alignment)
+                title_level = self._title_level(block)
+                title_font_size = self._resolve_title_font_size_pt(
+                    block=block,
+                    page=ctx.page,
+                    font_size_pt=float(run_style.get("font_size_pt") or self.config.default_font_size_pt),
+                    alignment=title_alignment,
+                )
+                set_run_font(
+                    run,
+                    font_size=self._scale(title_font_size),
+                    bold=(bold or is_masthead or title_level is not None),
+                    italic=italic,
+                    underline=underline,
+                    strikethrough=strike,
+                    superscript=superscript,
+                    subscript=subscript,
+                    east_asia=self.config.title_font,
+                    font_name=font_name,
+                    color_rgb=color,
+                )
+                return
+            if is_caption:
+                font_size = max(font_size - self._scale(0.5), self._scale(6))
+            elif rtype in (BlockType.HEADER, BlockType.FOOTER, BlockType.REFERENCE):
+                font_size = max(font_size - self._scale(1), self._scale(6))
+            else:
+                body_font_size = self._resolve_body_font_size_pt(
+                    block=block,
+                    page=ctx.page,
+                    font_size_pt=float(run_style.get("font_size_pt") or self.config.default_font_size_pt),
+                )
+                font_size = self._scale(body_font_size)
+
+            if rtype in (BlockType.HEADER, BlockType.FOOTER) and color is None:
+                color = RGBColor(128, 128, 128)
+
+            set_run_font(
+                run,
+                font_size=font_size,
+                bold=bold,
+                italic=italic,
+                underline=underline,
+                strikethrough=strike,
+                superscript=superscript,
+                subscript=subscript,
+                east_asia=east_asia,
+                font_name=font_name,
+                color_rgb=color,
+            )
+
+        def _write_runs(p, txt: str, para_lines=None) -> None:
+            if para_lines:
+                clean_lines = [ln for ln in para_lines if ln.text and ln.text.strip()]
+                if not clean_lines:
+                    return
+                visual_rows = self._group_lines_into_visual_rows(clean_lines)
+                keep_visual_breaks = self._should_keep_visual_breaks(
+                    block=block,
+                    alignment=alignment,
+                    preserve_line_breaks=preserve_line_breaks,
+                    preserve_breaks_on_ambiguous_justify=preserve_breaks_on_ambiguous_justify,
+                    ambiguous_justify=ambiguous_justify,
+                    visual_rows=visual_rows,
+                )
+                for ri, row in enumerate(visual_rows):
+                    prev_text = ""
+                    for ln in row:
+                        curr_text = ln.text.strip()
+                        if not curr_text:
+                            continue
+                        if prev_text and should_insert_space(prev_text, curr_text):
+                            p.add_run(" ")
+                        _write_one_run(p, curr_text, _line_effective_style(ln))
+                        prev_text = curr_text
+                    if ri < len(visual_rows) - 1 and keep_visual_breaks:
+                        p.add_run().add_break()
+                return
+            _write_one_run(p, txt, block_effective)
+
+        def _make_para(txt: str, indent_pt: float, is_first: bool, para_lines=None) -> object:
+            p = container.add_paragraph()
+            reset_paragraph_format(p)
+            set_paragraph_spacing(p,
+                                  space_before=space_before if is_first else 0,
+                                  space_after=sp_after)
+            p.alignment = alignment
+            if indent_pt > 0 and not is_title and not is_caption:
+                p.paragraph_format.first_line_indent = Pt(indent_pt)
+            if line_spacing is not None:
+                p.paragraph_format.line_spacing = self._scale(float(line_spacing))
+            _write_runs(p, txt, para_lines=para_lines)
+            return p
+
+        # ── 多段落 vs 单段落渲染 ─────────────────────────────────────
+        # 多段落时：block.paragraphs 已由 pipeline 设置，
+        # 各段的 first_line_indent_px 已由 style_inferrer 填充
+        # Caption 类块始终走单段落路径，以便用软换行保留行间结构
+        last_p = None
+        if block.paragraphs and len(block.paragraphs) > 1 and not is_caption:
+            for pi, para in enumerate(block.paragraphs):
+                para_text = para.text.strip()
+                if not para_text.strip():
+                    continue
+                indent_pt = (round(mapper.w(para.first_line_indent_px) * 2) / 2.0
+                             if para.first_line_indent_px > 0 else 0.0)
+                indent_pt = self._scale(indent_pt)
+                last_p = _make_para(
+                    para_text,
+                    indent_pt,
+                    is_first=(pi == 0),
+                    para_lines=para.lines,
+                )
+        else:
+            indent_pt = self._scale((bs.first_line_indent_pt or 0.0) if bs else 0.0)
+            para_lines = block.lines if block.lines else None
+            last_p = _make_para(text, indent_pt, is_first=True, para_lines=para_lines)
+
+        if last_p is not None and reserve_bbox_after_pt > 0:
+            set_paragraph_spacing(last_p, space_after=sp_after + self._scale(reserve_bbox_after_pt))
+
+        ended = bool(text) and text[-1] in '。！？…；.!?'
+        return last_p, is_title or ended
+
+    @staticmethod
+    def _line_y_range(line) -> Optional[Tuple[float, float]]:
+        region = getattr(line, "text_region", None)
+        if not region:
+            return None
+        ys = [
+            float(pt[1])
+            for pt in region
+            if isinstance(pt, (list, tuple)) and len(pt) >= 2
+        ]
+        if not ys:
+            return None
+        return min(ys), max(ys)
+
+    @classmethod
+    def _group_lines_into_visual_rows(cls, lines: List[object]) -> List[List[object]]:
+        """按 y 轴重叠将 OCR 文本片段聚合为视觉行。"""
+        if not lines:
+            return []
+
+        y_ranges = [cls._line_y_range(ln) for ln in lines]
+        heights: List[float] = []
+        for yr in y_ranges:
+            if yr is None:
+                continue
+            y1, y2 = yr
+            heights.append(max(y2 - y1, 0.0))
+        avg_h = (sum(heights) / len(heights)) if heights else 0.0
+        overlap_threshold = max(avg_h * 0.35, 1.0) if avg_h > 0 else None
+
+        rows: List[List[object]] = []
+        current_row: List[object] = []
+        current_range: Optional[Tuple[float, float]] = None
+
+        for line, y_range in zip(lines, y_ranges):
+            if not current_row:
+                current_row = [line]
+                current_range = y_range
+                continue
+
+            same_row = False
+            if current_range is not None and y_range is not None and overlap_threshold is not None:
+                overlap = min(current_range[1], y_range[1]) - max(current_range[0], y_range[0])
+                if overlap > overlap_threshold:
+                    same_row = True
+
+            if same_row:
+                current_row.append(line)
+                if current_range is not None and y_range is not None:
+                    current_range = (
+                        min(current_range[0], y_range[0]),
+                        max(current_range[1], y_range[1]),
+                    )
+            else:
+                rows.append(current_row)
+                current_row = [line]
+                current_range = y_range
+
+        if current_row:
+            rows.append(current_row)
+
+        for row in rows:
+            row.sort(
+                key=lambda ln: (
+                    float("inf")
+                    if getattr(ln, "x1", None) is None
+                    else float(getattr(ln, "x1"))
+                )
+            )
+        return rows
+
+    def _is_ambiguous_justify(self, block: TextBlock, col_left: float, col_right: float) -> bool:
+        """判断当前 justify 块是否缺乏足够几何证据。"""
+        edges: List[Tuple[float, float]] = []
+        for ln in block.lines:
+            if ln.x1 is None or ln.x2 is None:
+                continue
+            edges.append((float(ln.x1), float(ln.x2)))
+        if not edges:
+            return True
+
+        col_w = max(col_right - col_left, 1.0)
+        thresh = col_w * 0.10
+        min_lines = int(max(1, getattr(self.config, "align_justify_min_lines", 3)))
+
+        left_hit = sum(1 for x1, _ in edges if abs(x1 - col_left) <= thresh) / len(edges)
+        body = edges[:-1] if len(edges) >= 3 else edges
+        right_hit = sum(1 for _, x2 in body if abs(col_right - x2) <= thresh) / max(len(body), 1)
+        ragged = sum(1 for _, x2 in body if (col_right - x2) > thresh) / max(len(body), 1)
+
+        if len(edges) < min_lines:
+            return not (left_hit >= 0.85 and right_hit >= 0.85 and ragged <= 0.25)
+        return left_hit < 0.70 or right_hit < 0.70 or ragged > 0.40
+
+    @staticmethod
+    def _is_listish_line(text: str) -> bool:
+        return bool(_LISTISH_RE.match((text or "").strip()))
+
+    def _should_keep_visual_breaks(
+        self,
+        block: TextBlock,
+        alignment,
+        preserve_line_breaks: bool,
+        preserve_breaks_on_ambiguous_justify: bool,
+        ambiguous_justify: bool,
+        visual_rows: List[List[object]],
+    ) -> bool:
+        if block.block_type in _CAPTION_TYPES:
+            return True
+        if not preserve_line_breaks:
+            return False
+
+        row_count = len(visual_rows)
+        text_len = len(block.full_text().strip())
+        has_listish = any(
+            row and self._is_listish_line(getattr(row[0], "text", ""))
+            for row in visual_rows
+        )
+
+        if alignment == WD_ALIGN_PARAGRAPH.JUSTIFY:
+            if not preserve_breaks_on_ambiguous_justify:
+                return False
+            if not ambiguous_justify:
+                return False
+            # 仅对短文本/列表维持视觉换行，避免长段正文被拆碎。
+            return row_count <= 3 or has_listish or text_len <= 120
+
+        if block.block_type in {
+            BlockType.TITLE,
+            BlockType.HEADER,
+            BlockType.FOOTER,
+            BlockType.PAGE_NUMBER,
+            BlockType.TABLE_CAPTION,
+            BlockType.FIGURE_CAPTION,
+            BlockType.FORMULA_CAPTION,
+            BlockType.TABLE_FOOTNOTE,
+        }:
+            return True
+
+        if has_listish:
+            return True
+        if (
+            alignment in {WD_ALIGN_PARAGRAPH.LEFT, WD_ALIGN_PARAGRAPH.RIGHT}
+            and self._looks_like_sparse_latin_linebreak_block(block, visual_rows)
+        ):
+            return True
+        return row_count <= 2
+
+    def _looks_like_sparse_latin_linebreak_block(
+        self,
+        block: TextBlock,
+        visual_rows: List[List[object]],
+    ) -> bool:
+        """识别应保留 OCR 视觉换行的稀疏左对齐拉丁正文。"""
+        if block.block_type != BlockType.TEXT:
+            return False
+        if len(visual_rows) < 4:
+            return False
+        text = block.full_text().strip()
+        if not text or self._cjk_ratio(text) >= 0.20:
+            return False
+
+        base_width = max(float(block.bbox.width), 1.0)
+        row_widths: List[float] = []
+        for row in visual_rows:
+            xs = [float(getattr(ln, "x1")) for ln in row if getattr(ln, "x1", None) is not None]
+            xe = [float(getattr(ln, "x2")) for ln in row if getattr(ln, "x2", None) is not None]
+            if not xs or not xe:
+                continue
+            row_widths.append((max(xe) - min(xs)) / base_width)
+
+        if len(row_widths) < 4:
+            return False
+
+        avg_ratio = sum(row_widths) / len(row_widths)
+        min_ratio = min(row_widths)
+        max_ratio = max(row_widths)
+        short_ratio = sum(1 for ratio in row_widths if ratio <= 0.60) / len(row_widths)
+        long_ratio = sum(1 for ratio in row_widths if ratio >= 0.88) / len(row_widths)
+
+        return (
+            avg_ratio <= 0.78
+            and (max_ratio - min_ratio) >= 0.40
+            and short_ratio >= 0.25
+            and long_ratio >= 0.25
+        )
+
+    # ------------------------------------------------------------------
+    # 跨列区域的布局表格
+    # ------------------------------------------------------------------
+
+    def _render_native_columns_zone(self, doc, zone: Zone, page: "Page",
+                                    col_px: dict) -> None:
+        """使用 Word 原生分栏渲染无跨列区域。"""
+        mapper = page.coord_mapper
+        usable_w_pt = page.usable_width_pt
+        img_w = page.image_width
+        num_cols = max(zone.col_count, 1)
+        col_widths = self._column_widths_pt(num_cols, col_px, img_w, usable_w_pt)
+
+        for ci in range(num_cols):
+            col_blks = sorted(
+                [b for b in zone.blocks if b.col_index == ci and len(b.spanned_cols) <= 1],
+                key=lambda b: b.bbox.y1,
+            )
+            cl = col_px.get(ci, [0, img_w])[0]
+            cr = col_px.get(ci, [0, img_w])[1]
+            ctx = RenderContext(
+                coord_mapper=mapper,
+                page=page,
+                col_width_pt=col_widths[ci],
+                col_left_px=cl,
+                col_right_px=cr,
+            )
+            prev_y = 0
+            for block in col_blks:
+                gap = max(0, block.bbox.y1 - prev_y)
+                sp = self._scale(min(mapper.h(gap), 12)) if (prev_y > 0 and gap > 2) else 0
+                self._render_block(doc, block, ctx, space_before=sp)
+                prev_y = block.bbox.y2
+
+            # 显式列断，避免后续列内容继续填充上一列剩余空间
+            if ci < num_cols - 1:
+                p = doc.add_paragraph()
+                reset_paragraph_format(p)
+                set_paragraph_spacing(p, space_before=0, space_after=0)
+                p.add_run().add_break(WD_BREAK.COLUMN)
+
+    @staticmethod
+    def _paragraph_xml_has_content(p_el) -> bool:
+        texts = p_el.findall('.//' + qn('w:t'))
+        drawings = p_el.findall('.//' + qn('a:blip'),
+                                {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'})
+        return bool(texts or drawings)
+
+    @classmethod
+    def _prune_leading_empty_cell_paragraphs(cls, cell) -> None:
+        """移除布局单元格开头的占位空段落，避免内容整体下沉。"""
+        tc = cell._tc
+        while True:
+            children = list(tc)
+            if len(children) <= 2:
+                return
+            lead_idx = 1 if children and children[0].tag == qn('w:tcPr') else 0
+            if lead_idx >= len(children) - 1:
+                return
+            lead = children[lead_idx]
+            if lead.tag != qn('w:p') or cls._paragraph_xml_has_content(lead):
+                return
+            tc.remove(lead)
+
+    def _render_layout_table_zone(self, doc, zone: Zone, page: "Page",
+                                  col_px: dict) -> None:
+        """为含跨列区块的区域创建无边框布局表格。"""
+        from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+
+        mapper = page.coord_mapper
+        usable_w_pt = page.usable_width_pt
+        img_w = page.image_width
+        blocks = zone.blocks
+        if not blocks:
+            return
+
+        num_cols = zone.col_count
+
+        # 找出跨列集合
+        spanned_set = set()
+        for b in blocks:
+            if len(b.spanned_cols) > 1:
+                spanned_set.update(b.spanned_cols)
+
+        if not spanned_set:
+            # 无跨列区块：在简单的 N 列布局表格中渲染
+            # gutter 仅作为视觉分隔（cell右边距），不从列宽中扣除，
+            # 保证内容区宽度接近原始列宽，避免文字过度换行导致列高膨胀。
+            visual_gap = min(12.0, usable_w_pt * 0.015)
+            col_widths = self._column_widths_pt(num_cols, col_px, img_w, usable_w_pt)
+
+            tbl = doc.add_table(rows=1, cols=num_cols)
+            tbl.autofit = False
+            clear_table_borders(tbl)
+            set_table_col_widths(tbl, col_widths)
+
+            row = tbl.rows[0]
+            for cell in row.cells:
+                cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+                reset_paragraph_format(cell.paragraphs[0])
+                set_paragraph_spacing(cell.paragraphs[0],
+                                      line_spacing=self._scale(MIN_LINE_SPACING_PT), exact=True)
+
+            for ci in range(num_cols):
+                cell = row.cells[ci]
+                if ci < num_cols - 1:
+                    set_cell_right_margin(cell, visual_gap)
+                col_blks = sorted([b for b in blocks if b.col_index == ci],
+                                  key=lambda b: b.bbox.y1)
+                if not col_blks:
+                    continue
+                cl = min(b.bbox.x1 for b in col_blks)
+                cr = max(b.bbox.x2 for b in col_blks)
+                ctx = RenderContext(coord_mapper=mapper, page=page,
+                                   col_width_pt=col_widths[ci],
+                                   col_left_px=cl, col_right_px=cr,
+                                   in_table_cell=True)
+                prev_y = 0
+                for block in col_blks:
+                    gap = max(0, block.bbox.y1 - prev_y)
+                    sp = self._scale(min(mapper.h(gap), 12)) if (prev_y > 0 and gap > 2) else 0
+                    self._render_block(cell, block, ctx, space_before=sp)
+                    prev_y = block.bbox.y2
+                self._prune_leading_empty_cell_paragraphs(cell)
+            return
+
+        standalone_cols = [ci for ci in range(num_cols) if ci not in spanned_set]
+        spanned_cols = sorted(spanned_set)
+
+        # 列宽：gutter 仅作视觉分隔（cell右边距），不从列宽中扣除
+        visual_gap = min(12.0, usable_w_pt * 0.015)
+        col_widths = self._column_widths_pt(num_cols, col_px, img_w, usable_w_pt)
+        segments = self._column_segments(num_cols, spanned_cols)
+
+        # 外层表格
+        outer_widths = []
+        for seg_type, cols in segments:
+            if seg_type == "spanned":
+                outer_widths.append(sum(col_widths[ci] for ci in cols))
+            else:
+                outer_widths.append(col_widths[cols[0]])
+
+        tbl = doc.add_table(rows=1, cols=len(segments))
+        tbl.autofit = False
+        clear_table_borders(tbl)
+        set_table_col_widths(tbl, outer_widths)
+
+        row = tbl.rows[0]
+        for cell in row.cells:
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            reset_paragraph_format(cell.paragraphs[0])
+            set_paragraph_spacing(cell.paragraphs[0],
+                                  line_spacing=self._scale(MIN_LINE_SPACING_PT), exact=True)
+
+        # 通过独立单元格的右边距实现列间视觉间距
+        mcell = None
+        mwidth = 0.0
+        for seg_idx, (seg_type, cols) in enumerate(segments):
+            cell = row.cells[seg_idx]
+            if seg_idx < len(segments) - 1:
+                set_cell_right_margin(cell, visual_gap)
+            if seg_type == "standalone":
+                ci = cols[0]
+                col_blks = sorted(
+                    [b for b in blocks if b.col_index == ci and len(b.spanned_cols) == 1],
+                    key=lambda b: b.bbox.y1)
+                cl = min((b.bbox.x1 for b in col_blks), default=0)
+                cr = max((b.bbox.x2 for b in col_blks), default=img_w)
+                ctx = RenderContext(coord_mapper=mapper, page=page,
+                                    col_width_pt=col_widths[ci], col_left_px=cl,
+                                    col_right_px=cr, in_table_cell=True)
+                prev_y = 0
+                for block in col_blks:
+                    gap = max(0, block.bbox.y1 - prev_y)
+                    sp = self._scale(min(mapper.h(gap), 12)) if (prev_y > 0 and gap > 2) else 0
+                    self._render_block(cell, block, ctx, space_before=sp)
+                    prev_y = block.bbox.y2
+                self._prune_leading_empty_cell_paragraphs(cell)
+            else:
+                mcell = cell
+                mwidth = outer_widths[seg_idx]
+
+        if mcell is None:
+            return
+
+        span_blks = sorted(
+            [b for b in blocks if len(b.spanned_cols) > 1],
+            key=lambda b: b.bbox.y1)
+        sl = min((b.bbox.x1 for b in span_blks), default=0)
+        sr = max((b.bbox.x2 for b in span_blks), default=img_w)
+        ctx = RenderContext(coord_mapper=mapper, page=page,
+                            col_width_pt=mwidth, col_left_px=sl,
+                            col_right_px=sr, in_table_cell=True)
+
+        span_top = min((b.bbox.y1 for b in span_blks), default=float("inf"))
+        span_bottom = max((b.bbox.y2 for b in span_blks), default=float("-inf"))
+        above = {ci: [] for ci in spanned_cols}
+        below = {ci: [] for ci in spanned_cols}
+        for ci in spanned_cols:
+            col_singletons = sorted(
+                [b for b in blocks if b.col_index == ci and len(b.spanned_cols) == 1],
+                key=lambda b: b.bbox.y1,
+            )
+            for block in col_singletons:
+                if not span_blks:
+                    above[ci].append(block)
+                    continue
+                if float(block.bbox.y2) <= float(span_top) + 8.0:
+                    above[ci].append(block)
+                elif float(block.bbox.y1) >= float(span_bottom) - 8.0:
+                    below[ci].append(block)
+                elif ((float(block.bbox.y1) + float(block.bbox.y2)) * 0.5) <= ((float(span_top) + float(span_bottom)) * 0.5):
+                    above[ci].append(block)
+                else:
+                    below[ci].append(block)
+
+        def _render_spanned_singletons(grouped_blocks: dict) -> None:
+            if not any(len(v) > 0 for v in grouped_blocks.values()):
+                return
+            n_sub = len(spanned_cols)
+            sub_widths = [col_widths[ci] for ci in spanned_cols]
+            try:
+                sub_tbl = mcell.add_table(rows=1, cols=n_sub)
+                sub_tbl.autofit = False
+                clear_table_borders(sub_tbl)
+                set_table_col_widths(sub_tbl, sub_widths)
+                sub_row = sub_tbl.rows[0]
+                for si, ci in enumerate(spanned_cols):
+                    sc = sub_row.cells[si]
+                    sc.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+                    reset_paragraph_format(sc.paragraphs[0])
+                    set_paragraph_spacing(sc.paragraphs[0],
+                                          line_spacing=self._scale(MIN_LINE_SPACING_PT), exact=True)
+                    if si < n_sub - 1:
+                        set_cell_right_margin(sc, visual_gap)
+                    sub_ctx = RenderContext(
+                        coord_mapper=mapper, page=page,
+                        col_width_pt=sub_widths[si],
+                        col_left_px=min((b.bbox.x1 for b in grouped_blocks[ci]), default=0),
+                        col_right_px=max((b.bbox.x2 for b in grouped_blocks[ci]), default=img_w),
+                        in_table_cell=True)
+                    prev_y = 0
+                    for block in grouped_blocks[ci]:
+                        gap = max(0, block.bbox.y1 - prev_y)
+                        sp = self._scale(min(mapper.h(gap), 12)) if (prev_y > 0 and gap > 2) else 0
+                        self._render_block(sc, block, sub_ctx, space_before=sp)
+                        prev_y = block.bbox.y2
+                    self._prune_leading_empty_cell_paragraphs(sc)
+            except Exception as e:
+                logger.warning("Nested table failed (%s), rendering sequentially", e)
+                ctx_fallback = RenderContext(
+                    coord_mapper=mapper, page=page,
+                    col_width_pt=mwidth, col_left_px=0,
+                    col_right_px=img_w, in_table_cell=True)
+                for ci in spanned_cols:
+                    for block in grouped_blocks[ci]:
+                        self._render_block(mcell, block, ctx_fallback, space_before=0)
+
+        _render_spanned_singletons(above)
+
+        prev_y = 0
+        for block in span_blks:
+            gap = max(0, block.bbox.y1 - prev_y)
+            sp = self._scale(min(mapper.h(gap), 12)) if (prev_y > 0 and gap > 2) else 0
+            self._render_block(mcell, block, ctx, space_before=sp)
+            prev_y = block.bbox.y2
+
+        _render_spanned_singletons(below)
+        self._prune_leading_empty_cell_paragraphs(mcell)
+
+    # ------------------------------------------------------------------
+    # 工具方法
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cleanup_trailing_paragraphs(doc: DocxDocument) -> None:
+        """移除尾部空段落并将不可避免的空段落缩小，
+        以避免产生额外的空白页。"""
+        from lxml import etree
+
+        body = doc.element.body
+        paras = body.findall(qn('w:p'))
+        last_content_idx = -1
+        for idx, p_el in enumerate(paras):
+            runs = p_el.findall('.//' + qn('w:t'))
+            blips = p_el.findall('.//' + qn('a:blip'),
+                                 {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'})
+            if runs or blips:
+                last_content_idx = idx
+
+        to_remove = []
+        for idx, p_el in enumerate(paras):
+            if idx > last_content_idx:
+                has_sect = p_el.find(qn('w:pPr') + '/' + qn('w:sectPr')) is not None
+                if not has_sect and idx > last_content_idx + 1:
+                    to_remove.append(p_el)
+        for p_el in to_remove:
+            body.remove(p_el)
+
+        # 若最后一个非 sectPr 元素是表格，Word 会自动插入一个
+        # 段落标记，可能导致空白第二页。插入一个显式的近零高度
+        # 段落来控制这种情况。
+        children = list(body)
+        sectPr_el = None
+        for ch in reversed(children):
+            if ch.tag == qn('w:sectPr'):
+                sectPr_el = ch
+            elif ch.tag == qn('w:tbl'):
+                # 最后一个内容元素是表格 – 添加微小段落
+                tiny_p = etree.SubElement(body, qn('w:p'))
+                body.remove(tiny_p)  # SubElement 会追加；我们需要插入到指定位置
+                if sectPr_el is not None:
+                    sectPr_el.addprevious(tiny_p)
+                else:
+                    body.append(tiny_p)
+                break
+            else:
+                break
+
+        # 将尾部空段落缩小到近零高度，避免 Word 必须的文档结束标记
+        # 导致产生“空白最后一页”。
+        for p_el in body.findall(qn('w:p')):
+            runs = p_el.findall('.//' + qn('w:t'))
+            blips = p_el.findall('.//' + qn('a:blip'),
+                                 {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'})
+            if runs or blips:
+                continue
+            # 检查是否位于最后一个内容元素之后
+            is_trailing = True
+            for sibling in p_el.itersiblings():
+                tag = sibling.tag
+                if tag == qn('w:p'):
+                    s_runs = sibling.findall('.//' + qn('w:t'))
+                    s_blips = sibling.findall('.//' + qn('a:blip'),
+                                              {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'})
+                    if s_runs or s_blips:
+                        is_trailing = False
+                        break
+                elif tag == qn('w:tbl'):
+                    is_trailing = False
+                    break
+            if not is_trailing:
+                continue
+
+            pPr = p_el.find(qn('w:pPr'))
+            if pPr is None:
+                pPr = etree.SubElement(p_el, qn('w:pPr'))
+                p_el.insert(0, pPr)
+            spacing = pPr.find(qn('w:spacing'))
+            if spacing is None:
+                spacing = etree.SubElement(pPr, qn('w:spacing'))
+            spacing.set(qn('w:before'), '0')
+            spacing.set(qn('w:after'), '0')
+            spacing.set(qn('w:line'), '1')
+            spacing.set(qn('w:lineRule'), 'exact')
+            rPr = pPr.find(qn('w:rPr'))
+            if rPr is None:
+                rPr = etree.SubElement(pPr, qn('w:rPr'))
+            sz = rPr.find(qn('w:sz'))
+            if sz is None:
+                sz = etree.SubElement(rPr, qn('w:sz'))
+            sz.set(qn('w:val'), '2')  # 1pt = 2 half-points
