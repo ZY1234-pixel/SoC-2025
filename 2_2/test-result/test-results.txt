@@ -1,0 +1,1 @@
+请改写runcmd中predict的输出目录为此文件夹
