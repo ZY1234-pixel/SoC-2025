@@ -2,7 +2,7 @@
 
 面向测试交付整理后的 ESDNet-Lite 工程。
 
-当前版本只保留以下内容：
+当前版本包含以下内容：
 
 - PyTorch CPU 推理
 - PyTorch GPU 推理
@@ -16,7 +16,6 @@
 - `test-result/`: 推理结果输出目录
 - `doc/`: 补充说明文档
 - `imagelist.txt`: 真实校准图片列表
-- `image_list.txt`: `imagelist.txt` 的同内容别名
 - `release_note.txt`: 本次交付整理说明
 
 ## Code 目录
