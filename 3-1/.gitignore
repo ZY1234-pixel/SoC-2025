@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+Code/__pycache__/
+Code/archs/__pycache__/
+
+test-result/*
+!test-result/README.md

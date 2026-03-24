@@ -1,0 +1,56 @@
+# -----------------------------------------------------------------------
+# ESDNet-Lite 训练配置（UHDM 数据集 + 知识蒸馏）
+#
+# 用法：
+#   python scripts/train_esdnet_lite.py --config scripts/esdnet_lite_uhdm.yaml
+#
+# 不使用蒸馏时：
+#   将 TEACHER_PATH 设为 ~ 或删除，LAM_KD 设为 0
+# -----------------------------------------------------------------------
+
+GENERAL:
+  GPU_ID: 3
+  SEED: 123
+  WORKER: 8
+  SAVE_PREFIX: './experiments/ESDNet_Lite'
+  EXP_NAME: 'uhdm_lite_s'
+
+DATA:
+  TRAIN_DATASET: '/mnt/ramdisk/UHDM/train'    # UHDM 训练集路径
+  TEST_DATASET:  '/mnt/ramdisk/UHDM/test'     # UHDM 测试集路径
+  VAL_NUM: 50                                   # 验证时使用的图片数量
+
+# ── Student 模型配置 (ESDNet-Lite-S) ──────────────────────────────────
+MODEL:
+  EN_FEATURE_NUM: 16     # Encoder 初始通道数（原始 ESDNet: 48）
+  EN_INTER_NUM: 8        # Encoder dense block 增长率（原始: 32）
+  DE_FEATURE_NUM: 20     # Decoder 通道数（原始: 64）
+  DE_INTER_NUM: 8        # Decoder dense block 增长率（原始: 32）
+  SAM_NUMBER: 1          # 每级 LightSAM 数量
+
+# ── Teacher 模型配置（知识蒸馏）──────────────────────────────────────
+TEACHER:
+  TEACHER_PATH: '../ESDNet/pretrain_model/uhdm_checkpoint.pth'   # Teacher 权重路径（~ 表示不使用蒸馏）
+  TEACHER_EN: 48
+  TEACHER_INTER: 32
+  TEACHER_DE: 64
+  TEACHER_DE_INTER: 32
+  TEACHER_SAM: 1
+
+# ── 训练参数 ──────────────────────────────────────────────────────────
+TRAIN:
+  BATCH_SIZE: 4
+  CROP_SIZE: 512         # 训练图像 crop 尺寸
+  EPOCHS: 150
+
+  # Loss 权重
+  LAM: 1.0               # L1 loss 权重
+  LAM_P: 1.0             # Perceptual loss 权重
+  LAM_KD: 1.0            # 知识蒸馏 L1 权重（0 表示不使用蒸馏）
+
+# ── 学习率调度 ────────────────────────────────────────────────────────
+SOLVER:
+  BASE_LR: 0.0002        # 初始学习率
+  ETA_MIN: 0.000001      # 最低学习率
+  T_0: 50                # CosineAnnealing 首周期长度
+  T_MULT: 1              # 周期倍增因子
