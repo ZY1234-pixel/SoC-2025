@@ -1,0 +1,198 @@
+7767517
+196 246
+Input                    in0                      0 1 in0
+Reorg                    pixelunshuffle_1         1 1 in0 1 0=2
+Convolution              convrelu_0               1 1 1 2 0=16 1=3 4=1 5=1 6=1728 9=1
+Split                    splitncnn_0              1 3 2 3 4 5
+ConvolutionDepthWise     convdw_125               1 1 5 6 0=16 1=3 4=1 6=144 7=16 8=101
+Convolution              convrelu_1               1 1 6 7 0=8 1=1 5=1 6=128 8=2 9=1
+Concat                   cat_0                    2 1 7 3 8
+Split                    splitncnn_1              1 2 8 9 10
+ConvolutionDepthWise     convdw_126               1 1 10 11 0=24 1=3 4=1 6=216 7=24 8=101
+Convolution              convrelu_2               1 1 11 12 0=8 1=1 5=1 6=192 8=2 9=1
+Concat                   cat_1                    2 1 12 9 13
+Convolution              conv_13                  1 1 13 14 0=16 1=1 5=1 6=512 8=2
+BinaryOp                 add_0                    2 1 14 4 15
+Split                    splitncnn_2              1 3 15 16 17 18
+ConvolutionDepthWise     convdw_127               1 1 18 19 0=16 1=3 4=1 6=144 7=16 8=101
+Convolution              convrelu_3               1 1 19 20 0=8 1=1 5=1 6=128 8=2 9=1
+Concat                   cat_2                    2 1 20 16 21
+Split                    splitncnn_3              1 2 21 22 23
+ConvolutionDepthWise     convdw_128               1 1 23 24 0=24 1=3 2=2 4=2 6=216 7=24 8=101
+Convolution              convrelu_4               1 1 24 25 0=8 1=1 5=1 6=192 8=2 9=1
+Concat                   cat_3                    2 1 25 22 26
+Split                    splitncnn_4              1 2 26 27 28
+ConvolutionDepthWise     convdw_129               1 1 28 29 0=32 1=3 4=1 6=288 7=32 8=101
+Convolution              convrelu_5               1 1 29 30 0=8 1=1 5=1 6=256 8=2 9=1
+Concat                   cat_4                    2 1 30 27 31
+Convolution              conv_17                  1 1 31 32 0=16 1=1 5=1 6=640 8=2
+Split                    splitncnn_5              1 2 32 33 34
+Pooling                  gap_4                    1 1 34 35 0=1 4=1
+Convolution              convrelu_6               1 1 35 36 0=4 1=1 5=1 6=64 9=1
+Convolution              convsigmoid_42           1 1 36 37 0=16 1=1 5=1 6=64 9=4
+Reshape                  reshape_119              1 1 37 38 0=1 1=1 2=-1
+BinaryOp                 mul_1                    2 1 33 38 39 0=2
+BinaryOp                 add_2                    2 1 17 39 40
+Split                    splitncnn_6              1 2 40 41 42
+Convolution              convrelu_7               1 1 42 43 0=32 1=3 3=2 4=1 5=1 6=4608 8=2 9=1
+Split                    splitncnn_7              1 3 43 44 45 46
+ConvolutionDepthWise     convdw_130               1 1 46 47 0=32 1=3 4=1 6=288 7=32 8=101
+Convolution              convrelu_8               1 1 47 48 0=8 1=1 5=1 6=256 8=2 9=1
+Concat                   cat_5                    2 1 48 44 49
+Split                    splitncnn_8              1 2 49 50 51
+ConvolutionDepthWise     convdw_131               1 1 51 52 0=40 1=3 4=1 6=360 7=40 8=101
+Convolution              convrelu_9               1 1 52 53 0=8 1=1 5=1 6=320 8=2 9=1
+Concat                   cat_6                    2 1 53 50 54
+Convolution              conv_23                  1 1 54 55 0=32 1=1 5=1 6=1536 8=2
+BinaryOp                 add_3                    2 1 55 45 56
+Split                    splitncnn_9              1 3 56 57 58 59
+ConvolutionDepthWise     convdw_132               1 1 59 60 0=32 1=3 4=1 6=288 7=32 8=101
+Convolution              convrelu_10              1 1 60 61 0=8 1=1 5=1 6=256 8=2 9=1
+Concat                   cat_7                    2 1 61 57 62
+Split                    splitncnn_10             1 2 62 63 64
+ConvolutionDepthWise     convdw_133               1 1 64 65 0=40 1=3 2=2 4=2 6=360 7=40 8=101
+Convolution              convrelu_11              1 1 65 66 0=8 1=1 5=1 6=320 8=2 9=1
+Concat                   cat_8                    2 1 66 63 67
+Split                    splitncnn_11             1 2 67 68 69
+ConvolutionDepthWise     convdw_134               1 1 69 70 0=48 1=3 4=1 6=432 7=48 8=101
+Convolution              convrelu_12              1 1 70 71 0=8 1=1 5=1 6=384 8=2 9=1
+Concat                   cat_9                    2 1 71 68 72
+Convolution              conv_27                  1 1 72 73 0=32 1=1 5=1 6=1792 8=2
+Split                    splitncnn_12             1 2 73 74 75
+Pooling                  gap_5                    1 1 75 76 0=1 4=1
+Convolution              convrelu_13              1 1 76 77 0=8 1=1 5=1 6=256 9=1
+Convolution              convsigmoid_43           1 1 77 78 0=32 1=1 5=1 6=256 9=4
+Reshape                  reshape_120              1 1 78 79 0=1 1=1 2=-1
+BinaryOp                 mul_4                    2 1 74 79 80 0=2
+BinaryOp                 add_5                    2 1 58 80 81
+Split                    splitncnn_13             1 2 81 82 83
+Convolution              convrelu_14              1 1 83 84 0=64 1=3 3=2 4=1 5=1 6=18432 8=2 9=1
+Split                    splitncnn_14             1 3 84 85 86 87
+ConvolutionDepthWise     convdw_135               1 1 87 88 0=64 1=3 4=1 6=576 7=64 8=101
+Convolution              convrelu_15              1 1 88 89 0=8 1=1 5=1 6=512 8=2 9=1
+Concat                   cat_10                   2 1 89 85 90
+Split                    splitncnn_15             1 2 90 91 92
+ConvolutionDepthWise     convdw_136               1 1 92 93 0=72 1=3 4=1 6=648 7=72 8=101
+Convolution              convrelu_16              1 1 93 94 0=8 1=1 5=1 6=576 8=2 9=1
+Concat                   cat_11                   2 1 94 91 95
+Convolution              conv_33                  1 1 95 96 0=64 1=1 5=1 6=5120 8=2
+BinaryOp                 add_6                    2 1 96 86 97
+Split                    splitncnn_16             1 3 97 98 99 100
+ConvolutionDepthWise     convdw_137               1 1 100 101 0=64 1=3 4=1 6=576 7=64 8=101
+Convolution              convrelu_17              1 1 101 102 0=8 1=1 5=1 6=512 8=2 9=1
+Concat                   cat_12                   2 1 102 98 103
+Split                    splitncnn_17             1 2 103 104 105
+ConvolutionDepthWise     convdw_138               1 1 105 106 0=72 1=3 2=2 4=2 6=648 7=72 8=101
+Convolution              convrelu_18              1 1 106 107 0=8 1=1 5=1 6=576 8=2 9=1
+Concat                   cat_13                   2 1 107 104 108
+Split                    splitncnn_18             1 2 108 109 110
+ConvolutionDepthWise     convdw_139               1 1 110 111 0=80 1=3 4=1 6=720 7=80 8=101
+Convolution              convrelu_19              1 1 111 112 0=8 1=1 5=1 6=640 8=2 9=1
+Concat                   cat_14                   2 1 112 109 113
+Convolution              conv_37                  1 1 113 114 0=64 1=1 5=1 6=5632 8=2
+Split                    splitncnn_19             1 2 114 115 116
+Pooling                  gap_6                    1 1 116 117 0=1 4=1
+Convolution              convrelu_20              1 1 117 118 0=16 1=1 5=1 6=1024 9=1
+Convolution              convsigmoid_44           1 1 118 119 0=64 1=1 5=1 6=1024 9=4
+Reshape                  reshape_121              1 1 119 120 0=1 1=1 2=-1
+BinaryOp                 mul_7                    2 1 115 120 121 0=2
+BinaryOp                 add_8                    2 1 99 121 122
+Convolution              convrelu_21              1 1 122 123 0=20 1=3 4=1 5=1 6=11520 8=2 9=1
+Split                    splitncnn_20             1 3 123 124 125 126
+ConvolutionDepthWise     convdw_140               1 1 126 127 0=20 1=3 4=1 6=180 7=20 8=101
+Convolution              convrelu_22              1 1 127 128 0=8 1=1 5=1 6=160 8=2 9=1
+Concat                   cat_15                   2 1 128 124 129
+Split                    splitncnn_21             1 2 129 130 131
+ConvolutionDepthWise     convdw_141               1 1 131 132 0=28 1=3 4=1 6=252 7=28 8=101
+Convolution              convrelu_23              1 1 132 133 0=8 1=1 5=1 6=224 8=2 9=1
+Concat                   cat_16                   2 1 133 130 134
+Convolution              conv_43                  1 1 134 135 0=20 1=1 5=1 6=720 8=2
+BinaryOp                 add_9                    2 1 135 125 136
+Split                    splitncnn_22             1 3 136 137 138 139
+ConvolutionDepthWise     convdw_142               1 1 139 140 0=20 1=3 4=1 6=180 7=20 8=101
+Convolution              convrelu_24              1 1 140 141 0=8 1=1 5=1 6=160 8=2 9=1
+Concat                   cat_17                   2 1 141 137 142
+Split                    splitncnn_23             1 2 142 143 144
+ConvolutionDepthWise     convdw_143               1 1 144 145 0=28 1=3 2=2 4=2 6=252 7=28 8=101
+Convolution              convrelu_25              1 1 145 146 0=8 1=1 5=1 6=224 8=2 9=1
+Concat                   cat_18                   2 1 146 143 147
+Split                    splitncnn_24             1 2 147 148 149
+ConvolutionDepthWise     convdw_144               1 1 149 150 0=36 1=3 4=1 6=324 7=36 8=101
+Convolution              convrelu_26              1 1 150 151 0=8 1=1 5=1 6=288 8=2 9=1
+Concat                   cat_19                   2 1 151 148 152
+Convolution              conv_47                  1 1 152 153 0=20 1=1 5=1 6=880 8=2
+Split                    splitncnn_25             1 2 153 154 155
+Pooling                  gap_7                    1 1 155 156 0=1 4=1
+Convolution              convrelu_27              1 1 156 157 0=5 1=1 5=1 6=100 9=1
+Convolution              convsigmoid_45           1 1 157 158 0=20 1=1 5=1 6=100 9=4
+Reshape                  reshape_122              1 1 158 159 0=1 1=1 2=-1
+BinaryOp                 mul_10                   2 1 154 159 160 0=2
+BinaryOp                 add_11                   2 1 138 160 161
+Interp                   upsample_2               1 1 161 162 0=2 1=2.000000e+00 2=2.000000e+00
+Concat                   cat_20                   2 1 82 162 163
+Convolution              convrelu_28              1 1 163 164 0=20 1=3 4=1 5=1 6=9360 8=2 9=1
+Split                    splitncnn_26             1 3 164 165 166 167
+ConvolutionDepthWise     convdw_145               1 1 167 168 0=20 1=3 4=1 6=180 7=20 8=101
+Convolution              convrelu_29              1 1 168 169 0=8 1=1 5=1 6=160 8=2 9=1
+Concat                   cat_21                   2 1 169 165 170
+Split                    splitncnn_27             1 2 170 171 172
+ConvolutionDepthWise     convdw_146               1 1 172 173 0=28 1=3 4=1 6=252 7=28 8=101
+Convolution              convrelu_30              1 1 173 174 0=8 1=1 5=1 6=224 8=2 9=1
+Concat                   cat_22                   2 1 174 171 175
+Convolution              conv_53                  1 1 175 176 0=20 1=1 5=1 6=720 8=2
+BinaryOp                 add_12                   2 1 176 166 177
+Split                    splitncnn_28             1 3 177 178 179 180
+ConvolutionDepthWise     convdw_147               1 1 180 181 0=20 1=3 4=1 6=180 7=20 8=101
+Convolution              convrelu_31              1 1 181 182 0=8 1=1 5=1 6=160 8=2 9=1
+Concat                   cat_23                   2 1 182 178 183
+Split                    splitncnn_29             1 2 183 184 185
+ConvolutionDepthWise     convdw_148               1 1 185 186 0=28 1=3 2=2 4=2 6=252 7=28 8=101
+Convolution              convrelu_32              1 1 186 187 0=8 1=1 5=1 6=224 8=2 9=1
+Concat                   cat_24                   2 1 187 184 188
+Split                    splitncnn_30             1 2 188 189 190
+ConvolutionDepthWise     convdw_149               1 1 190 191 0=36 1=3 4=1 6=324 7=36 8=101
+Convolution              convrelu_33              1 1 191 192 0=8 1=1 5=1 6=288 8=2 9=1
+Concat                   cat_25                   2 1 192 189 193
+Convolution              conv_57                  1 1 193 194 0=20 1=1 5=1 6=880 8=2
+Split                    splitncnn_31             1 2 194 195 196
+Pooling                  gap_8                    1 1 196 197 0=1 4=1
+Convolution              convrelu_34              1 1 197 198 0=5 1=1 5=1 6=100 9=1
+Convolution              convsigmoid_46           1 1 198 199 0=20 1=1 5=1 6=100 9=4
+Reshape                  reshape_123              1 1 199 200 0=1 1=1 2=-1
+BinaryOp                 mul_13                   2 1 195 200 201 0=2
+BinaryOp                 add_14                   2 1 179 201 202
+Interp                   upsample_3               1 1 202 203 0=2 1=2.000000e+00 2=2.000000e+00
+Concat                   cat_26                   2 1 41 203 204
+Convolution              convrelu_35              1 1 204 205 0=20 1=3 4=1 5=1 6=6480 9=1
+Split                    splitncnn_32             1 3 205 206 207 208
+ConvolutionDepthWise     convdw_150               1 1 208 209 0=20 1=3 4=1 6=180 7=20
+Convolution              convrelu_36              1 1 209 210 0=8 1=1 5=1 6=160 9=1
+Concat                   cat_27                   2 1 210 206 211
+Split                    splitncnn_33             1 2 211 212 213
+ConvolutionDepthWise     convdw_151               1 1 213 214 0=28 1=3 4=1 6=252 7=28
+Convolution              convrelu_37              1 1 214 215 0=8 1=1 5=1 6=224 9=1
+Concat                   cat_28                   2 1 215 212 216
+Convolution              conv_63                  1 1 216 217 0=20 1=1 5=1 6=720
+BinaryOp                 add_15                   2 1 217 207 218
+Split                    splitncnn_34             1 3 218 219 220 221
+ConvolutionDepthWise     convdw_152               1 1 221 222 0=20 1=3 4=1 6=180 7=20
+Convolution              convrelu_38              1 1 222 223 0=8 1=1 5=1 6=160 9=1
+Concat                   cat_29                   2 1 223 219 224
+Split                    splitncnn_35             1 2 224 225 226
+ConvolutionDepthWise     convdw_153               1 1 226 227 0=28 1=3 2=2 4=2 6=252 7=28
+Convolution              convrelu_39              1 1 227 228 0=8 1=1 5=1 6=224 9=1
+Concat                   cat_30                   2 1 228 225 229
+Split                    splitncnn_36             1 2 229 230 231
+ConvolutionDepthWise     convdw_154               1 1 231 232 0=36 1=3 4=1 6=324 7=36
+Convolution              convrelu_40              1 1 232 233 0=8 1=1 5=1 6=288 9=1
+Concat                   cat_31                   2 1 233 230 234
+Convolution              conv_67                  1 1 234 235 0=20 1=1 5=1 6=880
+Split                    splitncnn_37             1 2 235 236 237
+Pooling                  gap_9                    1 1 237 238 0=1 4=1
+Convolution              convrelu_41              1 1 238 239 0=5 1=1 5=1 6=100 9=1
+Convolution              convsigmoid_47           1 1 239 240 0=20 1=1 5=1 6=100 9=4
+Reshape                  reshape_124              1 1 240 241 0=1 1=1 2=-1
+BinaryOp                 mul_16                   2 1 236 241 242 0=2
+BinaryOp                 add_17                   2 1 220 242 243
+Convolution              conv_70                  1 1 243 244 0=12 1=3 4=1 5=1 6=2160
+PixelShuffle             pixel_shuffle_0          1 1 244 out0 0=2

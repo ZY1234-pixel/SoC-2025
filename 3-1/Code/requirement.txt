@@ -1,0 +1,10 @@
+numpy
+Pillow
+tqdm
+
+# 请按你的 CUDA / CPU 环境单独安装 PyTorch
+# torch
+# torchvision
+
+# 仅 NCNN 推理需要
+# ncnn
