@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local environments
+.venv/
+venv/
+
+# Build artifacts
+*.whl
+
+# Project data and outputs (do not commit)
+dataset/
+test-result/
+Code/models/
+Code/wheels/
