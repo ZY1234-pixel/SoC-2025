@@ -2,11 +2,12 @@
 
 面向测试交付整理后的 ESDNet-Lite 工程。
 
-当前版本包含以下内容：
+当前版本只保留以下内容：
 
 - PyTorch CPU 推理
 - PyTorch GPU 推理
 - NCNN 推理
+- TensorRT FP16 推理
 - UHDM 数据格式训练代码
 
 ## 目录结构
@@ -16,6 +17,7 @@
 - `test-result/`: 推理结果输出目录
 - `doc/`: 补充说明文档
 - `imagelist.txt`: 真实校准图片列表
+- `image_list.txt`: `imagelist.txt` 的同内容别名
 - `release_note.txt`: 本次交付整理说明
 
 ## Code 目录
@@ -44,6 +46,8 @@ pip install -r Code/requirement.txt
 - `torch`
 - `torchvision`
 - `ncnn`，仅 Python NCNN 推理需要
+- `onnx`
+- `TensorRT 8.6 GA Python bindings`，仅 TensorRT 推理需要
 
 ## 当前模型文件
 
@@ -55,6 +59,11 @@ pip install -r Code/requirement.txt
 - `uhdm_lite_s_best_hybrid_int8.ncnn.param`
 - `uhdm_lite_s_best_hybrid_int8.ncnn.bin`
 - `uhdm_lite_s_best_hybrid.table`
+
+TensorRT engine 默认会按以下顺序自动查找：
+
+- `Code/weights/*.plan`
+- `../NAFNet/output_model/*.plan`
 
 ## 常用命令
 
@@ -112,6 +121,19 @@ python Code/test.py \
   --tile 512 --tile_overlap 128
 ```
 
+TensorRT FP16 推理：
+
+```bash
+conda run -n torch25 python Code/test.py \
+  --backend tensorrt \
+  --preset lite-s \
+  --trt_engine ../NAFNet/output_model/esdnet_lite_fp16.plan \
+  --device cuda:0 \
+  --input_dir dataset/input \
+  --output_dir test-result/tensorrt_fp16 \
+  --tile 256 --tile_overlap 64
+```
+
 训练：
 
 ```bash
@@ -126,3 +148,4 @@ python Code/train.py \
 
 - 更详细的推理说明见 `doc/inference.md`
 - 更多命令示例见 `Code/runcmd.txt`
+- TensorRT 当前仅支持 `tile` 模式，且 `tile` 会自动对齐到 engine 固定输入尺寸

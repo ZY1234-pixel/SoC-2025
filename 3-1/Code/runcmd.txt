@@ -39,3 +39,13 @@ python Code/test.py \
   --input_dir dataset/input \
   --output_dir test-result/ncnn_int8 \
   --tile 512 --tile_overlap 128
+
+TensorRT FP16 inference
+conda run -n torch25 python Code/test.py \
+  --backend tensorrt \
+  --preset lite-s \
+  --trt_engine ../NAFNet/output_model/esdnet_lite_fp16.plan \
+  --device cuda:0 \
+  --input_dir dataset/input \
+  --output_dir test-result/tensorrt_fp16 \
+  --tile 256 --tile_overlap 64

@@ -1,4 +1,4 @@
-"""Inference entry for PyTorch CPU/GPU and NCNN."""
+"""Inference entry for PyTorch CPU/GPU, NCNN, and TensorRT."""
 
 from __future__ import annotations
 
@@ -17,11 +17,13 @@ from utils import (
     DEFAULT_TILE,
     MAX_SAFE_TILE,
     NcnnModel,
+    TensorRTModel,
     get_blend_window_np,
     get_blend_window_torch,
     load_checkpoint_state_dict,
     pad_tile_array,
     pad_tile_tensor,
+    resolve_tensorrt_engine_path,
 )
 
 
@@ -89,7 +91,7 @@ def infer_tile_torch(model, image: torch.Tensor, tile: int, tile_overlap: int, d
     return (output / weight.clamp(min=1e-6)).clamp(0, 1)
 
 
-def infer_tile_ncnn(model: NcnnModel, image: torch.Tensor, tile: int, tile_overlap: int, color_correct: bool = True) -> torch.Tensor:
+def infer_tile_chw_backend(model, image: torch.Tensor, tile: int, tile_overlap: int, color_correct: bool = True) -> torch.Tensor:
     _, channels, height, width = image.shape
     tile_size = max(model.padder_size, (tile // model.padder_size) * model.padder_size)
     step = tile_size - tile_overlap
@@ -126,14 +128,23 @@ def infer_tile_ncnn(model: NcnnModel, image: torch.Tensor, tile: int, tile_overl
     return torch.from_numpy(np.ascontiguousarray(fused)).unsqueeze(0)
 
 
+def infer_tile_ncnn(model: NcnnModel, image: torch.Tensor, tile: int, tile_overlap: int, color_correct: bool = True) -> torch.Tensor:
+    return infer_tile_chw_backend(model, image, tile, tile_overlap, color_correct=color_correct)
+
+
+def infer_tile_tensorrt(model: TensorRTModel, image: torch.Tensor, tile: int, tile_overlap: int, color_correct: bool = True) -> torch.Tensor:
+    return infer_tile_chw_backend(model, image, tile, tile_overlap, color_correct=color_correct)
+
+
 def build_parser():
-    parser = argparse.ArgumentParser(description='ESDNet-Lite 推理入口（仅保留 PyTorch CPU/GPU 和 NCNN）')
-    parser.add_argument('--backend', choices=['torch', 'ncnn'], required=True)
+    parser = argparse.ArgumentParser(description='ESDNet-Lite 推理入口（PyTorch / NCNN / TensorRT）')
+    parser.add_argument('--backend', choices=['torch', 'ncnn', 'tensorrt'], required=True)
     parser.add_argument('--preset', choices=['full', 'lite-s', 'lite-xs'], default='lite-s')
     parser.add_argument('--model_path', default=None, help='PyTorch checkpoint 或 TorchScript 路径')
     parser.add_argument('--ncnn_param', default=None, help='NCNN param 路径')
     parser.add_argument('--ncnn_bin', default=None, help='NCNN bin 路径')
-    parser.add_argument('--device', default='cpu', help='PyTorch 设备，例如 cpu / cuda / cuda:0')
+    parser.add_argument('--trt_engine', default=None, help='TensorRT engine 路径（.plan）')
+    parser.add_argument('--device', default='cpu', help='推理设备，例如 cpu / cuda / cuda:0')
     parser.add_argument('--mode', choices=['tile', 'whole'], default='tile')
     parser.add_argument('--input_dir', required=True, help='输入图片目录')
     parser.add_argument('--output_dir', required=True, help='输出目录')
@@ -157,7 +168,7 @@ def main():
         if args.device.startswith('cuda') and not torch.cuda.is_available():
             raise ValueError(f'CUDA 不可用，无法使用设备 {args.device}')
         model = load_torch_model(args.model_path, args.preset, args.device)
-    else:
+    elif args.backend == 'ncnn':
         if not args.ncnn_param or not args.ncnn_bin:
             raise ValueError('--backend ncnn 时必须同时指定 --ncnn_param 和 --ncnn_bin')
         if args.mode != 'tile':
@@ -165,6 +176,17 @@ def main():
         if not args.ncnn_vulkan and args.tile > MAX_SAFE_TILE:
             raise ValueError(f'NCNN CPU 模式限制 tile <= {MAX_SAFE_TILE}')
         model = NcnnModel(args.ncnn_param, args.ncnn_bin, use_vulkan=args.ncnn_vulkan)
+    else:
+        if args.mode != 'tile':
+            raise ValueError('TensorRT 仅支持 tile 模式')
+        if not args.device.startswith('cuda'):
+            print(f'[WARN] TensorRT backend 仅支持 CUDA，自动将 --device 从 {args.device} 调整为 cuda:0')
+            args.device = 'cuda:0'
+        engine_path = resolve_tensorrt_engine_path(args.trt_engine)
+        model = TensorRTModel(str(engine_path), device=args.device)
+        if args.tile != model.tile_size:
+            print(f'[WARN] TensorRT engine 固定输入为 {model.tile_size}x{model.tile_size}，自动将 --tile 从 {args.tile} 调整为 {model.tile_size}')
+            args.tile = model.tile_size
 
     image_files = list_image_files(args.input_dir)
     if not image_files:
@@ -177,8 +199,10 @@ def main():
                 output = infer_whole_torch(model, image, args.device)
             else:
                 output = infer_tile_torch(model, image, args.tile, args.tile_overlap, args.device, color_correct=color_correct)
-        else:
+        elif args.backend == 'ncnn':
             output = infer_tile_ncnn(model, image, args.tile, args.tile_overlap, color_correct=color_correct)
+        else:
+            output = infer_tile_tensorrt(model, image, args.tile, args.tile_overlap, color_correct=color_correct)
 
         save_name = f'{image_path.stem}.{args.save_format}'
         save_tensor_image(output, output_dir / save_name, image_format=args.save_format)
