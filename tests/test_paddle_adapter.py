@@ -17,7 +17,7 @@ def test_nested_same_category_figure_is_suppressed() -> None:
             "score": 0.8,
         },
     ]
-    filtered = adapter._suppress_nested_duplicates(results)
+    filtered, _report = adapter._suppress_nested_duplicates(results)
     assert len(filtered) == 1
     assert filtered[0]["bbox"] == [0, 0, 100, 100]
 
@@ -38,7 +38,7 @@ def test_caption_family_short_caption_is_suppressed_by_longer_caption() -> None:
             "res": [{"text": "表7"}, {"text": "美人蕉植株高度及开花数"}],
         },
     ]
-    filtered = adapter._suppress_nested_duplicates(results)
+    filtered, _report = adapter._suppress_nested_duplicates(results)
     assert len(filtered) == 1
     assert filtered[0]["type"] == "table_caption"
 
@@ -59,5 +59,5 @@ def test_caption_family_keeps_distinct_child_caption() -> None:
             "res": [{"text": "（a）初始状态"}],
         },
     ]
-    filtered = adapter._suppress_nested_duplicates(results)
+    filtered, _report = adapter._suppress_nested_duplicates(results)
     assert len(filtered) == 2

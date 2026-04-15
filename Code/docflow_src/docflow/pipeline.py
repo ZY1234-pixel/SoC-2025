@@ -554,6 +554,7 @@ class RecoveryPipeline:
                 next_column_top_fragment = (
                     block.col_index == prev.col_index + 1
                     and float(block.bbox.y1) < float(prev.bbox.y1)
+                    and float(prev.bbox.y1) - float(block.bbox.y1) <= 120.0
                     and 0.0 <= horizontal_gap <= 96.0
                 )
                 continuation_like = (

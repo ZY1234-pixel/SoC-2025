@@ -259,6 +259,26 @@ class PaddleAdapter(BaseAdapter):
             and existing["category"] in self._CAPTION_FAMILY
         )
         if not same_category and not same_caption_family:
+            # 跨类别：检查候选文本是否被已有文本完全包含（视觉重复）。
+            # 典型场景：低分 title 检测出 "瓦的北红海省博物馆。"，但高分 text
+            # 已包含完整段落 "瓦的北红海省博物馆。博物馆二层陈列着..."
+            if candidate["text"] and existing["text"]:
+                short_text, long_text = sorted(
+                    (candidate["text"], existing["text"]), key=len,
+                )
+                overlap_ratio = self._overlap_ratio(candidate["bbox"], existing["bbox"])
+                contain_ratio = self._contain_ratio(candidate["bbox"], existing["bbox"])
+                # 空间判定放宽：允许 bbox 邻近（adjacent），不一定严格重叠。
+                # 典型场景：低分 title 的 bbox=[1153,776,1329,797] 与高分 text 的
+                # bbox=[1154,800,1507,990] 垂直相接但不重叠，实际是同一段 OCR 内容的
+                # 不同检测粒度。
+                spatial_match = (
+                    overlap_ratio >= 0.85
+                    or contain_ratio >= 0.85
+                    or self._adjacent_ratio(candidate["bbox"], existing["bbox"]) >= 0.85
+                )
+                if len(short_text) >= 4 and short_text in long_text and spatial_match:
+                    return "cross_category_text_duplicate"
             return None
 
         cand_box = candidate["bbox"]
@@ -276,10 +296,16 @@ class PaddleAdapter(BaseAdapter):
         if cand_text and exist_text:
             short_text, long_text = sorted((cand_text, exist_text), key=len)
             min_text_len = 1 if same_caption_family else 4
+            # 空间判定同样允许邻近（adjacent）
+            spatial_match = (
+                contain_ratio >= 0.90
+                or overlap_ratio >= 0.85
+                or self._adjacent_ratio(cand_box, exist_box) >= 0.85
+            )
             if (
                 len(short_text) >= min_text_len
                 and short_text in long_text
-                and (contain_ratio >= 0.90 or overlap_ratio >= 0.85)
+                and spatial_match
             ):
                 return "nested_text_duplicate"
 
@@ -462,6 +488,34 @@ class PaddleAdapter(BaseAdapter):
         inter_area = inter_w * inter_h
         area1 = max(1.0, (b1[2] - b1[0]) * (b1[3] - b1[1]))
         return inter_area / area1
+
+    @staticmethod
+    def _adjacent_ratio(b1: List[float], b2: List[float]) -> float:
+        """计算候选框相对于目标框的“邻近覆盖率”。
+
+        与 overlap/contain 不同，此方法允许 bbox 相接但不重叠的情况，
+        只要两者在至少一个轴上的投影完全或几乎对齐。
+        """
+        # X 轴投影重合度
+        x_left = max(b1[0], b2[0])
+        x_right = min(b1[2], b2[2])
+        x_align = max(0.0, x_right - x_left) / max(min(b1[2] - b1[0], b2[2] - b2[0]), 1.0)
+
+        # Y 轴：允许 b1 的底部与 b2 的顶部相接（或相反）
+        y_gap = 0.0
+        if b1[3] < b2[1]:
+            y_gap = b2[1] - b1[3]
+        elif b2[3] < b1[1]:
+            y_gap = b1[1] - b2[3]
+        # 否则垂直重叠
+
+        min_height = min(max(b1[3] - b1[1], 1.0), max(b2[3] - b2[1], 1.0))
+        if y_gap > min_height * 0.5:
+            return 0.0  # 相距太远
+
+        # 邻近度：gap 越小越接近
+        proximity = max(0.0, 1.0 - y_gap / min_height)
+        return x_align * proximity
 
     # ------------------------------------------------------------------
     # 逐区域转换

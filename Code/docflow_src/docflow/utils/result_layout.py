@@ -79,13 +79,11 @@ class SampleResultLayout:
     sample_key: str
     source_path: Path
     sample_dir: Path
-    sample_manifest_path: Path
     json_path: Path
     render_plan_path: Path
     docx_path: Path
     markdown_path: Path
     pdf_path: Path
-    markdown_assets_dir: Path
     debug_dir: Path
 
     def debug_image_path(self, page_index: int, suffix: str) -> Path:
@@ -98,8 +96,6 @@ class ResultRunLayout:
     run_id: str
     run_dir: Path
     runtime_dir: Path
-    layout_dict_dir: Path
-    samples_dir: Path
     run_manifest_path: Path
     _sample_counts: Dict[str, int] = field(default_factory=dict)
 
@@ -113,18 +109,13 @@ class ResultRunLayout:
             run_dir = normalized_root / f"{actual_run_id}__{suffix}"
             suffix += 1
         runtime_dir = run_dir / "_runtime"
-        layout_dict_dir = runtime_dir / "layout_dicts"
-        samples_dir = run_dir / "samples"
         run_dir.mkdir(parents=True, exist_ok=True)
-        layout_dict_dir.mkdir(parents=True, exist_ok=True)
-        samples_dir.mkdir(parents=True, exist_ok=True)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
         return cls(
             output_root=normalized_root,
             run_id=actual_run_id,
             run_dir=run_dir,
             runtime_dir=runtime_dir,
-            layout_dict_dir=layout_dict_dir,
-            samples_dir=samples_dir,
             run_manifest_path=run_dir / "run_manifest.json",
         )
 
@@ -133,19 +124,17 @@ class ResultRunLayout:
         count = self._sample_counts.get(base_key, 0) + 1
         self._sample_counts[base_key] = count
         sample_key = base_key if count == 1 else f"{base_key}__{count}"
-        sample_dir = self.samples_dir / sample_key
+        sample_dir = self.run_dir / sample_key
         sample_dir.mkdir(parents=True, exist_ok=True)
         return SampleResultLayout(
             sample_key=sample_key,
             source_path=source_path.resolve(),
             sample_dir=sample_dir,
-            sample_manifest_path=sample_dir / "sample_manifest.json",
             json_path=sample_dir / f"{sample_key}.json",
             render_plan_path=sample_dir / f"{sample_key}.render_plan.json",
             docx_path=sample_dir / f"{sample_key}.docx",
             markdown_path=sample_dir / f"{sample_key}.md",
             pdf_path=sample_dir / f"{sample_key}.pdf",
-            markdown_assets_dir=sample_dir / f"{sample_key}_assets",
             debug_dir=sample_dir / "debug",
         )
 

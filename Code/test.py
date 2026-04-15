@@ -233,28 +233,6 @@ def save_debug_images(
     cv2.imwrite(str(sorted_path), vis_sorted)
 
 
-def write_sample_manifest(sample_layout, sample_path: Path, page_count: int, formats: list[str]) -> None:
-    write_json(
-        sample_layout.sample_manifest_path,
-        {
-            "sample_key": sample_layout.sample_key,
-            "source_path": str(sample_path),
-            "source_name": sample_path.name,
-            "page_count": page_count,
-            "formats": formats,
-            "artifacts": {
-                "json": str(sample_layout.json_path),
-                "render_plan": str(sample_layout.render_plan_path),
-                "docx": str(sample_layout.docx_path) if "docx" in formats else None,
-                "markdown": str(sample_layout.markdown_path) if "markdown" in formats else None,
-                "pdf": str(sample_layout.pdf_path) if "pdf" in formats else None,
-                "markdown_assets": str(sample_layout.markdown_assets_dir) if "markdown" in formats else None,
-                "debug_dir": str(sample_layout.debug_dir),
-            },
-        },
-    )
-
-
 def _sample_cleanup_removed_count(merged_document: dict) -> int:
     total = 0
     for page in merged_document.get("pages") or []:
@@ -292,22 +270,69 @@ def run_sample(
         print(f"[分析] {sample_path.name} p{page_index + 1}: 检测到 {len(result)} 个区域，耗时 {elapsed:.2f}s")
         print_regions(result)
         if save_debug_vis:
+            # TEMP: dump raw result for debugging visualization
+            import numpy as np
+            def _to_serializable(obj):
+                if hasattr(obj, 'tolist'):
+                    return obj.tolist()
+                if isinstance(obj, dict):
+                    return {k: _to_serializable(v) for k, v in obj.items()}
+                if isinstance(obj, (list, tuple)):
+                    return [_to_serializable(v) for v in obj]
+                return obj
+            with open(sample_layout.sample_dir / "raw_result.json", 'w') as _f:
+                json.dump(_to_serializable(result), _f, ensure_ascii=False, indent=2)
             save_debug_images(pipeline, image, result, page_document, sample_layout, page_index)
         page_documents.append(page_document)
 
     merged_document = merge_page_documents(page_documents, source_path=str(sample_path))
     document = pipeline.build_document(merged_document)
-    write_json(sample_layout.json_path, merged_document)
-    write_json(sample_layout.render_plan_path, build_render_plan(document, output_format="docx"))
+    render_plan = build_render_plan(document, output_format="docx")
+    write_json(sample_layout.render_plan_path, render_plan)
+
+    # 将 RenderPlan 的 per-page render_mode 注入 document 和 merged_document，
+    # 使 docx renderer 和 pipeline.recover() 中的 renderer 都可以消费该提示。
+    for page_info in render_plan.get("pages", []):
+        idx = page_info["page_index"]
+        render_mode = page_info.get("render_mode", "")
+        # 注入到 merged_document（供 pipeline.recover 使用）
+        if idx < len(merged_document["pages"]):
+            page_entry = merged_document["pages"][idx]
+            if page_entry.get("attributes") is None:
+                page_entry["attributes"] = {}
+            page_entry["attributes"]["render_mode"] = render_mode
+        # 注入到 document（供 docx renderer 使用）
+        if idx < len(document.pages):
+            if document.pages[idx].attributes is None:
+                document.pages[idx].attributes = {}
+            document.pages[idx].attributes["render_mode"] = render_mode
+
     native_docx_table_count = 0
     if "docx" in formats:
-        pipeline.recover(merged_document, str(sample_layout.docx_path), format="docx")
+        renderer = pipeline._get_renderer("docx")
+        renderer.render(document, str(sample_layout.docx_path))
+        # 将 renderer 记录的 render_fit 与 style_inferred 回写到 JSON（设计文档 §2.2）
+        for page_index, page in enumerate(document.pages):
+            if page_index >= len(merged_document["pages"]):
+                continue
+            page_entry = merged_document["pages"][page_index]
+            if page_entry.get("attributes") is None:
+                page_entry["attributes"] = {}
+            attrs = page_entry["attributes"]
+            render_fit = page.attributes.get("render_fit")
+            if render_fit:
+                attrs["render_fit"] = render_fit
+            style_inferred = page.attributes.get("style_inferred")
+            if style_inferred:
+                attrs["style_inferred"] = style_inferred
+        write_json(sample_layout.json_path, merged_document)
         native_docx_table_count = _native_docx_table_count(sample_layout.docx_path)
+    else:
+        write_json(sample_layout.json_path, merged_document)
     if "markdown" in formats:
         pipeline.recover(merged_document, str(sample_layout.markdown_path), format="markdown")
     if "pdf" in formats:
         pipeline.recover(merged_document, str(sample_layout.pdf_path), format="pdf")
-    write_sample_manifest(sample_layout, sample_path, page_count=len(page_documents), formats=formats)
     return len(page_documents), native_docx_table_count
 
 
@@ -339,7 +364,7 @@ def main() -> int:
     print_list("样本列表：", [str(path) for path in samples])
     print(f"输出格式：{formats}")
     print(f"运行目录：{run_layout.run_dir}")
-    engine = make_engine(paths, run_layout.layout_dict_dir)
+    engine = make_engine(paths, run_layout.runtime_dir)
     adapter = PaddleAdapter()
     pipeline = RecoveryPipeline()
 
