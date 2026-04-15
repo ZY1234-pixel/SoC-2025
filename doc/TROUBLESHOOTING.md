@@ -16,7 +16,7 @@ python -m pip install wheels/docflow-0.3.0-py3-none-any.whl
 - `Code/third_party/paddle_runtime/ppstructure`
 - `Code/third_party/paddle_runtime/ppocr`
 - `Code/third_party/paddle_runtime/tools`
-- `Code/models/layout/picodet_lcnet_x1_0_fgd_layout_cdla_infer`
+- `Code/models/layout/doclayout_yolo_docstructbench_headfloat100_runtime`
 - `Code/models/det/ch/PP-OCRv5_mobile_det_infer`
 - `Code/models/rec/ch/PP-OCRv5_mobile_rec_infer`
 - `Code/models/table/SLANet_plus_infer`

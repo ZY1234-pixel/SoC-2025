@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
 from pathlib import Path
 
 import cv2
+from docx import Document as DocxDocument
 
 CODE_ROOT = Path(__file__).resolve().parent
 DOCFLOW_SRC_ROOT = CODE_ROOT / "docflow_src"
@@ -28,6 +30,7 @@ from docflow.utils.result_layout import (
     merge_page_documents,
     write_json,
 )
+from docflow.utils.render_plan import build_render_plan
 
 
 TEXT_TYPES = {
@@ -39,6 +42,19 @@ TEXT_TYPES = {
     "figure_caption",
     "table_caption",
 }
+
+DOCLAYOUT_YOLO_LABELS = [
+    "title",
+    "plain text",
+    "abandon",
+    "figure",
+    "figure_caption",
+    "table",
+    "table_caption",
+    "table_footnote",
+    "isolate_formula",
+    "formula_caption",
+]
 
 
 def bootstrap_import_paths(paths: RuntimePaths) -> None:
@@ -66,6 +82,27 @@ def build_layout_dict_from_inference(layout_model_dir: Path, fallback_dict_path:
     """按模型 inference.yml 自动生成 layout 字典文件。"""
     inference_yml = layout_model_dir / "inference.yml"
     if not inference_yml.is_file():
+        metadata_yml = layout_model_dir / "metadata.yaml"
+        if metadata_yml.is_file():
+            try:
+                import yaml
+
+                metadata = yaml.safe_load(metadata_yml.read_text(encoding="utf-8")) or {}
+                names = metadata.get("names")
+                if isinstance(names, dict):
+                    ordered = [names[idx] for idx in sorted(names)]
+                    if ordered:
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        out_path = out_dir / f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
+                        out_path.write_text("\n".join(ordered) + "\n", encoding="utf-8")
+                        return out_path
+            except Exception:
+                pass
+        if "doclayout_yolo" in layout_model_dir.name.lower():
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
+            out_path.write_text("\n".join(DOCLAYOUT_YOLO_LABELS) + "\n", encoding="utf-8")
+            return out_path
         return fallback_dict_path
 
     labels = []
@@ -116,6 +153,8 @@ def make_engine(paths: RuntimePaths, layout_dict_dir: Path):
         "False",
         "--layout_model_dir",
         str(paths.layout_model),
+        "--layout_score_threshold",
+        "0.25" if "doclayout_yolo" in paths.layout_model.name.lower() else "0.5",
         "--layout_dict_path",
         str(layout_dict),
         "--det_model_dir",
@@ -205,6 +244,7 @@ def write_sample_manifest(sample_layout, sample_path: Path, page_count: int, for
             "formats": formats,
             "artifacts": {
                 "json": str(sample_layout.json_path),
+                "render_plan": str(sample_layout.render_plan_path),
                 "docx": str(sample_layout.docx_path) if "docx" in formats else None,
                 "markdown": str(sample_layout.markdown_path) if "markdown" in formats else None,
                 "pdf": str(sample_layout.pdf_path) if "pdf" in formats else None,
@@ -213,6 +253,24 @@ def write_sample_manifest(sample_layout, sample_path: Path, page_count: int, for
             },
         },
     )
+
+
+def _sample_cleanup_removed_count(merged_document: dict) -> int:
+    total = 0
+    for page in merged_document.get("pages") or []:
+        attrs = page.get("attributes") or {}
+        total += int(attrs.get("cleanup_removed_count") or 0)
+    return total
+
+
+def _native_docx_table_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    try:
+        document = DocxDocument(path)
+        return len(document.tables)
+    except Exception:
+        return 0
 
 
 def run_sample(
@@ -238,15 +296,19 @@ def run_sample(
         page_documents.append(page_document)
 
     merged_document = merge_page_documents(page_documents, source_path=str(sample_path))
+    document = pipeline.build_document(merged_document)
     write_json(sample_layout.json_path, merged_document)
+    write_json(sample_layout.render_plan_path, build_render_plan(document, output_format="docx"))
+    native_docx_table_count = 0
     if "docx" in formats:
         pipeline.recover(merged_document, str(sample_layout.docx_path), format="docx")
+        native_docx_table_count = _native_docx_table_count(sample_layout.docx_path)
     if "markdown" in formats:
         pipeline.recover(merged_document, str(sample_layout.markdown_path), format="markdown")
     if "pdf" in formats:
         pipeline.recover(merged_document, str(sample_layout.pdf_path), format="pdf")
     write_sample_manifest(sample_layout, sample_path, page_count=len(page_documents), formats=formats)
-    return len(page_documents)
+    return len(page_documents), native_docx_table_count
 
 
 def main() -> int:
@@ -284,6 +346,14 @@ def main() -> int:
     failures: list[str] = []
     sample_records = []
     total_pages = 0
+    quality_summary = {
+        "layout_profiles": {},
+        "native_docx_table_count": 0,
+        "cleanup_removed_total": 0,
+    }
+    strategy_stats = {
+        "rendering_strategies": {},
+    }
     for sample_path in samples:
         sample_layout = run_layout.create_sample(sample_path)
         try:
@@ -297,13 +367,30 @@ def main() -> int:
                 pdf_dpi=args.pdf_dpi,
                 save_debug_vis=not args.no_debug_vis,
             )
+            if isinstance(page_count, tuple):
+                page_count, native_docx_table_count = page_count
+            else:
+                native_docx_table_count = 0
             total_pages += page_count
+            cleanup_removed = _sample_cleanup_removed_count(
+                json.loads(sample_layout.json_path.read_text(encoding="utf-8"))
+            )
+            quality_summary["cleanup_removed_total"] += cleanup_removed
+            quality_summary["native_docx_table_count"] += native_docx_table_count
+            render_plan = json.loads(sample_layout.render_plan_path.read_text(encoding="utf-8"))
+            for key, value in render_plan["summary"]["layout_profiles"].items():
+                quality_summary["layout_profiles"][key] = quality_summary["layout_profiles"].get(key, 0) + value
+            for key, value in render_plan["summary"]["rendering_strategies"].items():
+                strategy_stats["rendering_strategies"][key] = strategy_stats["rendering_strategies"].get(key, 0) + value
             sample_records.append(
                 {
                     "sample_key": sample_layout.sample_key,
                     "source_path": str(sample_path),
                     "sample_dir": str(sample_layout.sample_dir),
                     "page_count": page_count,
+                    "cleanup_removed_count": cleanup_removed,
+                    "native_docx_table_count": native_docx_table_count,
+                    "render_plan_path": str(sample_layout.render_plan_path),
                     "status": "ok",
                 }
             )
@@ -315,6 +402,9 @@ def main() -> int:
                     "source_path": str(sample_path),
                     "sample_dir": str(sample_layout.sample_dir),
                     "page_count": 0,
+                    "cleanup_removed_count": 0,
+                    "native_docx_table_count": 0,
+                    "render_plan_path": str(sample_layout.render_plan_path),
                     "status": "failed",
                     "error": str(ex),
                 }
@@ -329,6 +419,8 @@ def main() -> int:
             layout_model_dir=paths.layout_model,
             samples=sample_records,
             total_pages=total_pages,
+            quality_summary=quality_summary,
+            strategy_stats=strategy_stats,
             failures=failures,
         )
     )

@@ -358,13 +358,17 @@ def _estimate_line_spacing(
     font_size_pt: float,
     mapper: "CoordMapper",
 ) -> Optional[float]:
-    """从 bbox 高度和行数估算行距乘数。
+    """从文本行几何分布估算行距乘数。
+
+    优先使用相邻文本行之间的平均间距来估算行距，
+    比 bbox 高度法更准确——bbox 高度会混入段间距，
+    导致行距乘数被高估。
 
     行距乘数定义为 ``每行平均高度（pt） / font_size_pt``，
     与 python-docx ``paragraph_format.line_spacing = float`` 语义一致
     （即 MULTIPLE 模式下乘以 font_size_pt 后的绝对行高）。
 
-    仅在 **行数 ≥ 3** 时信任 bbox 派生值（两行区块的 bbox 膨胀较大），
+    仅在 **行数 ≥ 3** 时信任几何派生值（两行区块的 bbox 膨胀较大），
     且乘数上限为 1.6（防止异常值导致大行距）。
 
     Returns
@@ -376,11 +380,33 @@ def _estimate_line_spacing(
     num_lines = block.count_lines()
     if num_lines < 3:
         return None
-    height_pt = mapper.h(block.bbox.height)
-    lh_pt = height_pt / num_lines
-    multiplier = lh_pt / font_size_pt
-    if 0.9 < multiplier < 1.6:
-        return round(multiplier * 100) / 100  # 精度 0.01
+
+    # 优先方法：使用相邻文本行的平均垂直间距估算行距
+    line_heights: List[float] = []
+    lines = block.lines or []
+    for ln in lines:
+        if ln.text_region:
+            ys = [float(pt[1]) for pt in ln.text_region if len(pt) >= 2]
+            if len(ys) >= 2:
+                line_heights.append(max(ys) - min(ys))
+
+    if len(line_heights) >= 2:
+        # 使用中位数行高（对异常值更鲁棒）
+        sorted_h = sorted(line_heights)
+        median_line_h = sorted_h[len(sorted_h) // 2]
+        if median_line_h > 0:
+            lh_pt = mapper.h(median_line_h)
+            multiplier = lh_pt / font_size_pt
+            if 0.9 < multiplier < 1.6:
+                return round(multiplier * 100) / 100
+
+    # 回退：bbox 高度法（仅在文本行几何不可用时）
+    if not line_heights:
+        height_pt = mapper.h(block.bbox.height)
+        lh_pt = height_pt / num_lines
+        multiplier = lh_pt / font_size_pt
+        if 0.9 < multiplier < 1.6:
+            return round(multiplier * 100) / 100
     return None
 
 

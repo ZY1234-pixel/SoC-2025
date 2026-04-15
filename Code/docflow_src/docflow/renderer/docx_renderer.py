@@ -448,13 +448,14 @@ class DocxRenderer(BaseRenderer):
         for h, cap in zip(est_heights, caps):
             if h > 0:
                 analytic = min(analytic, cap / h)
+        # 截断到两位小数以避免浮点误差
         analytic = max(
             self._PAGE_FIT_MIN_SCALE,
-            min(1.0, math.floor(analytic * 100.0) / 100.0),
+            min(1.0, round(math.floor(analytic * 100.0) / 100.0, 2)),
         )
         safety_margin = self._fit_safety_margin(document)
         if analytic < 1.0 and safety_margin > 0.0:
-            analytic = max(self._PAGE_FIT_MIN_SCALE, analytic - safety_margin)
+            analytic = round(max(self._PAGE_FIT_MIN_SCALE, analytic - safety_margin), 2)
 
         candidates = [s for s in self._PAGE_FIT_SCALES if self._PAGE_FIT_MIN_SCALE <= s <= analytic]
         if not candidates:
@@ -503,12 +504,15 @@ class DocxRenderer(BaseRenderer):
             return 0.0
 
         if zone.rendering_strategy == 'single_col':
-            return self._estimate_stream_height_pt(
-                blocks=blocks,
-                page=page,
-                mapper=mapper,
-                col_width_pt=usable_w_pt,
-                gap_cap_pt=18.0,
+            return self._cap_zone_height(
+                self._estimate_stream_height_pt(
+                    blocks=blocks,
+                    page=page,
+                    mapper=mapper,
+                    col_width_pt=usable_w_pt,
+                    gap_cap_pt=18.0,
+                ),
+                blocks, mapper,
             )
 
         num_cols = max(zone.col_count, 1)
@@ -523,16 +527,19 @@ class DocxRenderer(BaseRenderer):
             by_col = defaultdict(list)
             for b in blocks:
                 by_col[b.col_index].append(b)
-            return max(
-                self._estimate_stream_height_pt(
-                    blocks=by_col.get(ci, []),
-                    page=page,
-                    mapper=mapper,
-                    col_width_pt=col_unit,
-                    gap_cap_pt=12.0,
-                )
-                for ci in range(num_cols)
-            ) * layout_factor
+            return self._cap_zone_height(
+                max(
+                    self._estimate_stream_height_pt(
+                        blocks=by_col.get(ci, []),
+                        page=page,
+                        mapper=mapper,
+                        col_width_pt=col_unit,
+                        gap_cap_pt=12.0,
+                    )
+                    for ci in range(num_cols)
+                ) * layout_factor,
+                blocks, mapper,
+            )
 
         standalone_cols = [ci for ci in range(num_cols) if ci not in spanned_set]
         spanned_cols = sorted(spanned_set)
@@ -602,7 +609,20 @@ class DocxRenderer(BaseRenderer):
                 ),
             )
         merged_total = above_max + merged_height + below_max
-        return max(standalone_max, merged_total) * layout_factor
+        est = max(standalone_max, merged_total) * layout_factor
+        return self._cap_zone_height(est, blocks, mapper)
+
+    def _cap_zone_height(self, est: float, blocks: list, mapper) -> float:
+        """以区块的实际 bbox 垂直范围约束估算高度。
+
+        防止间隙/段落间距累积导致估算过高，从而触发不必要的 fit_scale。
+        """
+        all_y1 = min((b.bbox.y1 for b in blocks), default=0.0)
+        all_y2 = max((b.bbox.y2 for b in blocks), default=0.0)
+        bbox_span_pt = mapper.h(max(all_y2 - all_y1, 0.0))
+        if bbox_span_pt > 0:
+            est = min(est, bbox_span_pt * 1.12)
+        return est
 
     @staticmethod
     def _column_layout_height_factor(zone: Zone) -> float:
@@ -829,6 +849,8 @@ class DocxRenderer(BaseRenderer):
             return font_size_pt
         if self._cjk_ratio(block.full_text()) < 0.55:
             return font_size_pt
+        if block.col_count >= 3 and 8.0 <= font_size_pt <= 11.5:
+            return min(font_size_pt * 1.06, font_size_pt + 0.6)
         width_ratio = float(block.bbox.width) / max(float(page.image_width), 1.0)
         if width_ratio < 0.62:
             return font_size_pt
@@ -876,12 +898,14 @@ class DocxRenderer(BaseRenderer):
         bbox = block.bbox
         # 宽度上限：min(bbox宽度, 列宽98%)
         pw = min(mapper.w(bbox.width), ctx.col_width_pt * 0.98)
-        # 高度校正：坐标映射 X/Y 比例可能不等（图像与目标页面宽高比不同），
-        # 若仅按宽度绘制会导致图片实际高度超出 bbox 预测值，造成内容溢出。
-        # 此处计算「使渲染高度 = mapper.h(bbox.height) 所需的宽度」作为上界。
-        if bbox.height > 0:
-            pw_by_height = mapper.h(bbox.height) * bbox.width / bbox.height
-            pw = min(pw, pw_by_height)
+        # 高度校正：仅对极宽的图片（宽高比 > 1.8，如横幅/全景图）才用高度约束，
+        # 避免报纸/杂志中常见的横图（宽高比 ~1.2~1.6）被不必要地缩小。
+        # 对于这类图片，目标列/跨列单元格通常足够高，按宽度渲染不会溢出。
+        if bbox.height > 0 and bbox.width > 0 and ctx.col_width_pt > 0:
+            src_aspect = bbox.width / bbox.height
+            if src_aspect > 1.8:
+                pw_by_height = mapper.h(bbox.height) * bbox.width / bbox.height
+                pw = min(pw, pw_by_height)
         pw = self._scale(pw)
 
         if space_before > self._scale(3):
@@ -925,7 +949,7 @@ class DocxRenderer(BaseRenderer):
 
     def _render_table_block(self, container, block: TableBlock,
                             ctx: RenderContext, space_before: float) -> None:
-        """渲染表格：先尝试 HTML→docx，失败则回退到图片。"""
+        """渲染表格：先尝试 HTML→docx，失败则退回纯文本摘要。"""
         if space_before > self._scale(MIN_LINE_SPACING_PT):
             add_spacing_para(container, space_before)
 
@@ -949,10 +973,25 @@ class DocxRenderer(BaseRenderer):
                         row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
                 rendered = True
             except Exception as e:
-                logger.warning("Table HTML rendering failed, falling back to image: %s", e)
+                logger.warning("Table HTML rendering failed, falling back to plain text: %s", e)
+
+        if not rendered and block.html:
+            plain = re.sub(r"<[^>]+>", " ", block.html)
+            plain = re.sub(r"\s+", " ", plain).strip()
+            if plain:
+                p = container.add_paragraph()
+                reset_paragraph_format(p)
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                run = p.add_run(plain)
+                set_run_font(run, font_size=self._scale(self.config.default_font_size_pt))
+                rendered = True
 
         if not rendered and block.image_data:
-            self._render_image_block(container, block, ctx, 0)
+            p = container.add_paragraph()
+            reset_paragraph_format(p)
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run("[表格渲染失败]")
+            set_run_font(run, font_size=self._scale(self.config.default_font_size_pt))
 
     def _render_text_block(self, container, block: TextBlock,
                            ctx: RenderContext,

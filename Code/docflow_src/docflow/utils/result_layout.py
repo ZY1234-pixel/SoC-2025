@@ -81,6 +81,7 @@ class SampleResultLayout:
     sample_dir: Path
     sample_manifest_path: Path
     json_path: Path
+    render_plan_path: Path
     docx_path: Path
     markdown_path: Path
     pdf_path: Path
@@ -140,6 +141,7 @@ class ResultRunLayout:
             sample_dir=sample_dir,
             sample_manifest_path=sample_dir / "sample_manifest.json",
             json_path=sample_dir / f"{sample_key}.json",
+            render_plan_path=sample_dir / f"{sample_key}.render_plan.json",
             docx_path=sample_dir / f"{sample_key}.docx",
             markdown_path=sample_dir / f"{sample_key}.md",
             pdf_path=sample_dir / f"{sample_key}.pdf",
@@ -158,9 +160,11 @@ def build_main_run_manifest(
     layout_model_dir: Path,
     samples: Sequence[dict],
     total_pages: int,
+    quality_summary: Optional[dict],
+    strategy_stats: Optional[dict],
     failures: Sequence[str],
 ) -> dict:
-    return {
+    payload = {
         "run_id": run_layout.run_id,
         "run_dir": str(run_layout.run_dir),
         "input_path": str(input_path),
@@ -172,6 +176,11 @@ def build_main_run_manifest(
         "failures": list(failures),
         "samples": list(samples),
     }
+    if quality_summary:
+        payload["quality_summary"] = dict(quality_summary)
+    if strategy_stats:
+        payload["strategy_stats"] = dict(strategy_stats)
+    return payload
 
 
 def build_eval_run_manifest(

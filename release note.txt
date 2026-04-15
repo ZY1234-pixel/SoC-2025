@@ -37,7 +37,7 @@
 
 六、默认模型配置
 --------------
-- layout: picodet_lcnet_x1_0_fgd_layout_cdla_infer
+- layout: doclayout_yolo_docstructbench_headfloat100_runtime
 - det: PP-OCRv5_mobile_det_infer
 - rec: PP-OCRv5_mobile_rec_infer
 - table: SLANet_plus_infer

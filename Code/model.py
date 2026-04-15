@@ -39,7 +39,7 @@ class RuntimePaths:
             docflow_src=docflow_src,
             paddle_root=paddle_root,
             models_root=models_root,
-            layout_model=models_root / "layout" / "picodet_lcnet_x1_0_fgd_layout_cdla_infer",
+            layout_model=models_root / "layout" / "doclayout_yolo_docstructbench_headfloat100_runtime",
             det_model=models_root / "det" / "ch" / "PP-OCRv5_mobile_det_infer",
             rec_model=models_root / "rec" / "ch" / "PP-OCRv5_mobile_rec_infer",
             table_model=models_root / "table" / "SLANet_plus_infer",

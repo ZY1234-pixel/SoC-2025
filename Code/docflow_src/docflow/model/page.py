@@ -158,7 +158,22 @@ class Page:
         #（如 A3 与 A4，均为 √2:1）视为相等，较小的（更常见的）尺寸胜出。
         _RATIO_TOL = 0.001
         candidates.sort(key=lambda c: (round(c[0] / _RATIO_TOL), c[1]))
-        _, _, best_name, best_portrait = candidates[0]
+        best_diff, best_area, best_name, best_portrait = candidates[0]
+
+        if best_diff > 0.06:
+            ratio = max(img_ratio, 1e-6)
+            if ratio >= 1.0:
+                width_mm = (best_area * ratio) ** 0.5
+                height_mm = best_area / max(width_mm, 1e-6)
+                self.orientation = "landscape"
+            else:
+                height_mm = (best_area / ratio) ** 0.5
+                width_mm = best_area / max(height_mm, 1e-6)
+                self.orientation = "portrait"
+            self.page_width_pt = width_mm / MM_PER_INCH * PT_PER_INCH
+            self.page_height_pt = height_mm / MM_PER_INCH * PT_PER_INCH
+            self._coord_mapper = None
+            return
 
         # 将胜出的尺寸从毫米转换为磅值
         for name, w_mm, h_mm in PAGE_SIZES:
@@ -190,7 +205,8 @@ class Page:
         if not blocks:
             return
 
-        # 使用全页缩放（无页边距）进行初始估算
+        # 使用全页缩放（无页边距）将像素距离转换为磅值。
+        # 注意：x 与 y 分别用对应的页面/图像尺寸，确保纵横比正确。
         sx = self.page_width_pt / max(self.image_width, 1)
         sy = self.page_height_pt / max(self.image_height, 1)
 
