@@ -1,0 +1,51 @@
+PyTorch CPU inference
+python Code/test.py \
+  --backend torch \
+  --preset lite-s \
+  --model_path Code/weights/uhdm_lite_s_best.pt \
+  --device cpu \
+  --mode tile \
+  --input_dir dataset/input \
+  --output_dir test-result/torch_cpu \
+  --tile 512 --tile_overlap 128
+
+PyTorch GPU inference
+python Code/test.py \
+  --backend torch \
+  --preset lite-s \
+  --model_path Code/weights/uhdm_lite_s_best.pt \
+  --device cuda:0 \
+  --mode tile \
+  --input_dir dataset/input \
+  --output_dir test-result/torch_gpu \
+  --tile 512 --tile_overlap 128
+
+NCNN FP16 inference
+python Code/test.py \
+  --backend ncnn \
+  --preset lite-s \
+  --ncnn_param Code/weights/uhdm_lite_s_best.ncnn.param \
+  --ncnn_bin Code/weights/uhdm_lite_s_best.ncnn.bin \
+  --input_dir dataset/input \
+  --output_dir test-result/ncnn_fp16 \
+  --tile 512 --tile_overlap 128
+
+NCNN hybrid INT8 inference
+python Code/test.py \
+  --backend ncnn \
+  --preset lite-s \
+  --ncnn_param Code/weights/uhdm_lite_s_best_hybrid_int8.ncnn.param \
+  --ncnn_bin Code/weights/uhdm_lite_s_best_hybrid_int8.ncnn.bin \
+  --input_dir dataset/input \
+  --output_dir test-result/ncnn_int8 \
+  --tile 512 --tile_overlap 128
+
+TensorRT FP16 inference
+conda run -n torch25 python Code/test.py \
+  --backend tensorrt \
+  --preset lite-s \
+  --trt_engine ../NAFNet/output_model/esdnet_lite_fp16.plan \
+  --device cuda:0 \
+  --input_dir dataset/input \
+  --output_dir test-result/tensorrt_fp16 \
+  --tile 256 --tile_overlap 64

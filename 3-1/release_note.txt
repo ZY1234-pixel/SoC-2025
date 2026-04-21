@@ -1,0 +1,8 @@
+ESDNet-Lite release note
+========================
+
+1. 项目目录已按交付结构重新整理为 dataset / Code / test-result / doc。
+2. 推理入口统一为 Code/test.py，只保留 PyTorch CPU/GPU 和 NCNN。
+3. 模型定义统一通过 Code/model.py 管理，现成权重移动到 Code/weights/。
+4. UHDM 数据读取、预处理和公共工具已拆分为独立文件，便于阅读和维护。
+5. test-result 目录保留为空目录，方便测试人员直接输出结果。

@@ -1,0 +1,38 @@
+========================
+Linux 执行命令
+========================
+cd Code
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirement.txt
+
+# 运行前请先从百度网盘下载模型到 ./models/
+# 运行前请先将测试数据放到 ../dataset/
+
+# 常规全量测试（含 PDF；要求系统已安装 libreoffice/soffice）
+python test.py --input ../dataset --output ../test-result --formats docx,markdown,pdf
+
+# 输出会进入 ../test-result/run_时间戳/samples/<样例名>/
+
+========================
+Windows（PowerShell）执行命令
+========================
+cd Code
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirement.txt
+
+# 运行前请先从百度网盘下载模型到 .\models\
+# 运行前请先将测试数据放到 ..\dataset\
+
+# 常规全量测试（含 PDF；要求系统已安装 soffice.exe）
+python test.py --input ..\dataset --output ..\test-result --formats docx,markdown,pdf
+
+# 输出会进入 ..\test-result\run_时间戳\samples\<样例名>\
+
+========================
+快速冒烟测试（单样本，不测 PDF）
+========================
+python test.py --input ../dataset/<样例文件> --output ../test-result --formats docx,markdown
