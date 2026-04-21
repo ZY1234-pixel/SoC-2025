@@ -23,6 +23,7 @@ from docflow.renderer.base import BaseRenderer
 from docflow.renderer.docx_utils.paragraph_fmt import (
     reset_paragraph_format, set_paragraph_spacing, add_spacing_para,
 )
+from docflow.renderer.docx_utils.section_fmt import set_section_columns as _set_section_columns_fmt
 from docflow.renderer.docx_utils.run_fmt import set_run_font
 from docflow.renderer.docx_utils.table_fmt import (
     clear_table_borders, set_table_col_widths, set_cell_right_margin,
@@ -79,18 +80,24 @@ class DocxRenderer(BaseRenderer):
 
     _PAGE_FIT_SCALES = (
         1.00, 0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93, 0.92, 0.91,
-        0.90, 0.89, 0.88, 0.87, 0.86, 0.85, 0.84, 0.83, 0.82,
+        0.90, 0.89, 0.88, 0.87, 0.86, 0.85, 0.84, 0.83, 0.82, 0.81,
+        0.80, 0.79, 0.78,
     )
-    _PAGE_FIT_MIN_SCALE = 0.82
-    _PAGE_FIT_HEADROOM = 0.99
+    _PAGE_FIT_MIN_SCALE = 0.78
+    _PAGE_FIT_HEADROOM = 1.00
     _TEXT_WRAP_RISK_CJK = 1.04
     _TEXT_WRAP_RISK_LATIN = 1.08
-    _TABLE_HEIGHT_RISK = 1.10
-    _IMAGE_HEIGHT_RISK = 1.03
+    _TABLE_HEIGHT_RISK = 1.07
+    _IMAGE_HEIGHT_RISK = 1.05
 
     def __init__(self, config=None) -> None:
         super().__init__(config=config)
         self._fit_scale: float = 1.0
+        # Hierarchical correction budget (设计文档 §5.2):
+        # Before applying global fit_scale, try local corrections first.
+        self._corr_space_after_pt: float = 0.0  # 段后间距削减量
+        self._corr_line_spacing: float = 0.0    # 行距削减比例
+        self._corr_gap_pt: float = 0.0          # 区块间隙削减量
 
     def render(self, document: "Document", output_path: str, **options) -> None:
         expected_pages = int(options.get("expected_pages", len(document.pages)))
@@ -148,21 +155,43 @@ class DocxRenderer(BaseRenderer):
         usable_w_pt = page.usable_width_pt
         img_w = page.image_width
 
+        # RenderPlan 提示（通过 test.py 注入到 page.attributes）
+        page_render_mode = ""
+        if page.attributes:
+            page_render_mode = page.attributes.get("render_mode", "")
+
         for zi, zone in enumerate(page.zones):
             # 预计算每个区域的列像素边界
             col_px = self._build_render_col_px(zone)
 
             strategy = zone.rendering_strategy
+            # RenderPlan 模式覆盖
+            if page_render_mode == "reflow":
+                strategy = "single_col"
+
             use_native_cols = self._should_use_native_columns(
                 zone,
                 col_px=col_px,
                 page_width_px=img_w,
             )
+            # RenderPlan 信任 native_columns 模式
+            if page_render_mode == "native_columns" and zone.col_count > 1:
+                use_native_cols = True
+            # RenderPlan 强制 grid 模式（禁用 native columns，走布局表格）
+            if page_render_mode == "grid":
+                use_native_cols = False
+
             desired_cols = zone.col_count if use_native_cols else 1
             if desired_cols != current_cols:
                 new_sect = doc.add_section(WD_SECTION.CONTINUOUS)
                 self._copy_section(base_sect, new_sect)
-                self._set_section_columns(new_sect, desired_cols)
+                if use_native_cols:
+                    col_widths = self._column_widths_pt(
+                        zone.col_count, col_px, img_w, usable_w_pt,
+                    )
+                    self._set_section_columns(new_sect, desired_cols, col_widths_pt=col_widths)
+                else:
+                    self._set_section_columns(new_sect, desired_cols)
                 current_cols = desired_cols
 
             if strategy == 'single_col':
@@ -176,7 +205,7 @@ class DocxRenderer(BaseRenderer):
                 prev_y = 0
                 for block in zone.blocks:
                     gap = max(0, block.bbox.y1 - prev_y)
-                    sp = self._scale(min(mapper.h(gap), 18)) if (prev_y > 0 and gap > 2) else 0
+                    sp = self._scale(max(min(mapper.h(gap), 18) - self._corr_gap_pt, 0)) if (prev_y > 0 and gap > 2) else 0
                     self._render_block(doc, block, ctx, space_before=sp)
                     prev_y = block.bbox.y2
 
@@ -187,6 +216,20 @@ class DocxRenderer(BaseRenderer):
                 self._render_native_columns_zone(doc, zone, page, col_px)
             else:  # multi_col_table
                 self._render_layout_table_zone(doc, zone, page, col_px)
+
+        # 记录 render_fit 与 style_inferred 元数据（设计文档 §2.2）
+        if page.attributes is None:
+            page.attributes = {}
+        if self._fit_scale < 1.0:
+            est_h = self._estimate_page_content_height_pt(page)
+            page.attributes["render_fit"] = {
+                "page_scale": self._fit_scale,
+                "reason": "content_exceeds_page",
+                "estimated_content_pt": round(est_h, 1),
+                "usable_height_pt": round(page.usable_height_pt, 1),
+                "excess_pt": round(est_h - page.usable_height_pt, 1),
+            }
+        page.attributes["style_inferred"] = self._build_page_style_inferred(page)
 
         # 清理尾部空段落
         self._cleanup_trailing_paragraphs(doc)
@@ -213,21 +256,12 @@ class DocxRenderer(BaseRenderer):
         dst_sect.top_margin = src_sect.top_margin
         dst_sect.bottom_margin = src_sect.bottom_margin
 
-    def _set_section_columns(self, sect, num_cols: int) -> None:
-        """设置节分栏（等宽列）。"""
+    def _set_section_columns(self, sect, num_cols: int, col_widths_pt=None) -> None:
+        """设置节分栏，委托 section_fmt 处理（支持等宽/自定义列宽）。"""
         n = max(1, int(num_cols))
-        gap_twips = max(0, int(getattr(self.config, "docx_column_gap_twips", 720)))
-        sect_pr = sect._sectPr
-        cols = sect_pr.find(qn('w:cols'))
-        if cols is None:
-            cols = OxmlElement('w:cols')
-            sect_pr.append(cols)
-        for child in list(cols):
-            if child.tag == qn('w:col'):
-                cols.remove(child)
-        cols.set(qn('w:num'), str(n))
-        cols.set(qn('w:equalWidth'), '1')
-        cols.set(qn('w:space'), str(gap_twips))
+        gap_twips = int(getattr(self.config, "docx_column_gap_twips", 720))
+        spacing_pt = max(0, gap_twips) / 20.0
+        _set_section_columns_fmt(sect._sectPr, n, col_widths_pt=col_widths_pt, spacing_pt=spacing_pt)
 
     def _render_strip_row_zone(self, doc: DocxDocument, zone: Zone, page: "Page") -> None:
         """将页眉/页脚条带按单行布局渲染，避免混入正文分栏。"""
@@ -394,6 +428,50 @@ class DocxRenderer(BaseRenderer):
         }
 
     @staticmethod
+    def _build_page_style_inferred(page: "Page") -> dict:
+        """构建页面级 style_inferred 摘要（设计文档 §2.2）。
+
+        记录从源页面坐标系推断出的真实样式，与 render_fit 严格分离。
+        """
+        from collections import defaultdict
+
+        # 收集各 block 类型的字号/行距中位数
+        by_type: dict = defaultdict(list)
+        by_type_ls: dict = defaultdict(list)
+        for zone in getattr(page, "zones", []):
+            for block in getattr(zone, "blocks", []):
+                if isinstance(block, TextBlock) and block.style:
+                    if block.style.font_size_pt is not None:
+                        by_type[block.block_type].append(block.style.font_size_pt)
+                    if block.style.line_spacing is not None:
+                        by_type_ls[block.block_type].append(block.style.line_spacing)
+
+        def _median(values):
+            if not values:
+                return None
+            s = sorted(values)
+            return round(s[len(s) // 2] * 2) / 2.0
+
+        canonical_styles = {}
+        for btype, sizes in by_type.items():
+            canonical_styles[str(btype)] = {
+                "font_size_pt": _median(sizes),
+                "line_spacing": _median(by_type_ls.get(btype, [])),
+            }
+
+        return {
+            "page_margin": {
+                "top": round(page.margin_top_pt, 1),
+                "bottom": round(page.margin_bottom_pt, 1),
+                "left": round(page.margin_left_pt, 1),
+                "right": round(page.margin_right_pt, 1),
+            },
+            "default_font_size_pt": page.style_defaults.get("font_size_pt") if page.style_defaults else None,
+            "default_line_spacing": page.style_defaults.get("line_spacing") if page.style_defaults else None,
+            "block_styles": canonical_styles,
+        }
+
+    @staticmethod
     def _parse_css_hex(color: Optional[str]) -> Optional[RGBColor]:
         if not color:
             return None
@@ -411,18 +489,73 @@ class DocxRenderer(BaseRenderer):
     def _render_single_page_fit(
         self, document: "Document", expected_pages: int, **build_options
     ) -> DocxDocument:
-        """纯内置单页适配：按内容高度预算选择缩放系数。"""
+        """纯内置单页适配：按内容高度预算选择缩放系数。
+
+        分级修正策略（设计文档 §5.2）：
+        1. 先应用局部修正（段后间距、行距、区块间隙）
+        2. 对剩余溢出才应用全局 fit_scale
+        """
         build_options = dict(build_options)
         build_options.pop("expected_pages", None)
         build_options.pop("enforce_single_page", None)
 
         scale = self._select_builtin_fit_scale(document, expected_pages)
-        logger.info("single-page builtin fit selected scale=%.3f expected_pages=%d", scale, expected_pages)
+        if scale < 1.0:
+            # 计算溢出量，尝试用局部修正减少部分溢出
+            for page in document.pages:
+                est_h = self._estimate_page_content_height_pt(page)
+                excess = est_h - page.usable_height_pt
+                if excess > 0:
+                    # 局部修正预算（从最不敏感的属性开始）
+                    # 设计文档 §5.2：分级修正，先改不敏感属性
+                    space_after_budget = min(excess * 0.15, 12.0)    # 段后间距：最多 12pt
+                    line_spacing_budget = min(excess * 0.10, 0.06)   # 行距：最多 -0.06
+                    gap_budget = min(excess * 0.10, 6.0)             # 区块间隙：最多 6pt
+                    # 实际高度缩减估算：
+                    #   - 段后间距：直接削减（每段一次）
+                    #   - 行距：修正量 × 行高 ≈ budget × font_size，但需保守估算
+                    #   - 区块间隙：直接削减
+                    n_paragraphs = self._count_paragraphs(page)
+                    space_saving = min(space_after_budget, n_paragraphs * 1.0)
+                    ls_saving = line_spacing_budget * 10.0  # 假设平均 10pt 字号 × 行数
+                    gap_saving = gap_budget
+                    local_reduction = space_saving + ls_saving + gap_saving
+                    self._corr_space_after_pt = space_after_budget
+                    self._corr_line_spacing = line_spacing_budget
+                    self._corr_gap_pt = gap_budget
+                    # 重新计算剩余溢出所需的 fit_scale
+                    remaining_excess = max(0, excess - local_reduction)
+                    if remaining_excess > 0:
+                        remaining_scale = page.usable_height_pt / max(est_h - remaining_excess, 1.0)
+                    else:
+                        remaining_scale = 1.0
+                    scale = min(scale, remaining_scale)
+                    break  # 单页文档，只需处理第一页
+
+        logger.info("single-page builtin fit selected scale=%.3f expected_pages=%d corr_space=%.1f corr_ls=%.3f corr_gap=%.1f",
+                    scale, expected_pages,
+                    self._corr_space_after_pt, self._corr_line_spacing, self._corr_gap_pt)
         try:
             self._fit_scale = scale
             return self._build_docx(document, **build_options)
         finally:
             self._fit_scale = 1.0
+            self._corr_space_after_pt = 0.0
+            self._corr_line_spacing = 0.0
+            self._corr_gap_pt = 0.0
+
+    def _count_paragraphs(self, page: "Page") -> int:
+        """估算页面段落数，用于计算间距修正的实际效果。"""
+        count = 0
+        for zone in page.zones:
+            for block in zone.blocks:
+                from docflow.model.blocks.text_block import TextBlock
+                if isinstance(block, TextBlock):
+                    if block.paragraphs:
+                        count += max(1, len(block.paragraphs))
+                    else:
+                        count += 1
+        return max(count, 1)
 
     def _select_builtin_fit_scale(self, document: "Document", expected_pages: int) -> float:
         """基于内容高度预算选择缩放档位（纯内置，无外部依赖）。"""
@@ -448,13 +581,14 @@ class DocxRenderer(BaseRenderer):
         for h, cap in zip(est_heights, caps):
             if h > 0:
                 analytic = min(analytic, cap / h)
+        # 截断到两位小数以避免浮点误差
         analytic = max(
             self._PAGE_FIT_MIN_SCALE,
-            min(1.0, math.floor(analytic * 100.0) / 100.0),
+            min(1.0, round(math.floor(analytic * 100.0) / 100.0, 2)),
         )
         safety_margin = self._fit_safety_margin(document)
         if analytic < 1.0 and safety_margin > 0.0:
-            analytic = max(self._PAGE_FIT_MIN_SCALE, analytic - safety_margin)
+            analytic = round(max(self._PAGE_FIT_MIN_SCALE, analytic - safety_margin), 2)
 
         candidates = [s for s in self._PAGE_FIT_SCALES if self._PAGE_FIT_MIN_SCALE <= s <= analytic]
         if not candidates:
@@ -468,8 +602,8 @@ class DocxRenderer(BaseRenderer):
     def _fit_safety_margin(document: "Document") -> float:
         """为复杂版面选择更保守的单页适配安全余量。
 
-        经验上，4 栏及以上且带跨栏图片区/图注的布局，Word 渲染出的真实高度
-        会明显高于几何估算值，因此需要比普通 3+ 栏页面更强的安全收缩。
+        经验上，多栏布局表格（multi_col_table）渲染的 Word 表格
+        会产生额外的行高/单元格开销，即使没有跨列区块也需要更多余量。
         """
         margin = 0.0
         for page in document.pages:
@@ -480,22 +614,42 @@ class DocxRenderer(BaseRenderer):
                     for block in getattr(zone, "blocks", [])
                 )
                 if col_count >= 4 and has_spanned:
-                    return 0.04
+                    return 0.06
                 if col_count >= 3 and has_spanned:
-                    margin = max(margin, 0.03)
+                    margin = max(margin, 0.04)
                     continue
                 if col_count >= 3:
+                    margin = max(margin, 0.02)
+                if col_count >= 2:
+                    # 2+ 栏的 multi_col_table 即使无跨列也有显著表格开销
                     margin = max(margin, 0.01)
         return margin
 
     def _estimate_page_content_height_pt(self, page: "Page") -> float:
-        """估算页面渲染后的总内容高度（pt）。"""
+        """估算页面渲染后的总内容高度（pt）。
+
+        估算结果乘以安全系数，以涵盖区块间开销（节断点、分栏切换、
+        节格式差异等）在单区域估算中未被计入的部分。
+        """
         mapper = page.coord_mapper
         usable_w_pt = page.usable_width_pt
         total = 0.0
         for zone in page.zones:
             total += self._estimate_zone_height_pt(zone, page, mapper, usable_w_pt)
-        return max(total, 1.0)
+        # 布局表格 zone 额外开销：表格结构、单元格边距、行最小高度等
+        # 在 Word 中，布局表格每行即使无内容也有约 8-12pt 的单元格开销，
+        # 加上表格自身的顶部/底部间隙和列分隔线开销。
+        # 此外，表格内段落的 space_before/space_after 在单元格中
+        # 会有额外的渲染开销（比非表格上下文多出约 1-2pt/段）。
+        for zone in page.zones:
+            if zone.rendering_strategy == 'multi_col_table':
+                n_blocks = sum(1 for _ in zone.blocks)
+                total += 50.0 + max(n_blocks - 10, 0) * 3.0
+        # 全局安全系数：覆盖 zone 间开销（节断点、分栏切换等）
+        # 以及 Word 渲染引擎本身的额外开销（最小行距、单元格边距等）
+        # multi_col_table 布局因表格结构开销，需要更高的安全系数
+        _PAGE_ESTIMATE_SAFETY = 1.08
+        return max(total * _PAGE_ESTIMATE_SAFETY, 1.0)
 
     def _estimate_zone_height_pt(self, zone: Zone, page: "Page", mapper, usable_w_pt: float) -> float:
         blocks = zone.blocks
@@ -503,37 +657,50 @@ class DocxRenderer(BaseRenderer):
             return 0.0
 
         if zone.rendering_strategy == 'single_col':
-            return self._estimate_stream_height_pt(
-                blocks=blocks,
-                page=page,
-                mapper=mapper,
-                col_width_pt=usable_w_pt,
-                gap_cap_pt=18.0,
+            return self._cap_zone_height(
+                self._estimate_stream_height_pt(
+                    blocks=blocks,
+                    page=page,
+                    mapper=mapper,
+                    col_width_pt=usable_w_pt,
+                    gap_cap_pt=18.0,
+                ),
+                blocks, mapper,
             )
 
         num_cols = max(zone.col_count, 1)
         layout_factor = self._column_layout_height_factor(zone)
         col_unit = usable_w_pt / num_cols
-        spanned_set = set()
-        for b in blocks:
-            if len(b.spanned_cols) > 1:
-                spanned_set.update(b.spanned_cols)
 
-        if not spanned_set:
+        # 检查是否存在真正跨列（跨越 >1 列）的区块
+        has_spanned = any(
+            len(getattr(b, "spanned_cols", [])) > 1 for b in blocks
+        )
+
+        if not has_spanned:
+            # 无跨列：各列内容并行渲染，高度取最高列
             by_col = defaultdict(list)
             for b in blocks:
                 by_col[b.col_index].append(b)
-            return max(
-                self._estimate_stream_height_pt(
-                    blocks=by_col.get(ci, []),
-                    page=page,
-                    mapper=mapper,
-                    col_width_pt=col_unit,
-                    gap_cap_pt=12.0,
-                )
-                for ci in range(num_cols)
-            ) * layout_factor
+            return self._cap_zone_height(
+                max(
+                    self._estimate_stream_height_pt(
+                        blocks=by_col.get(ci, []),
+                        page=page,
+                        mapper=mapper,
+                        col_width_pt=col_unit,
+                        gap_cap_pt=18.0,
+                    )
+                    for ci in range(num_cols)
+                ) * layout_factor,
+                blocks, mapper,
+            )
 
+        # 有跨列区块：需要按垂直顺序估算
+        spanned_set = set()
+        for b in blocks:
+            if len(getattr(b, "spanned_cols", [])) > 1:
+                spanned_set.update(b.spanned_cols)
         standalone_cols = [ci for ci in range(num_cols) if ci not in spanned_set]
         spanned_cols = sorted(spanned_set)
         standalone_max = 0.0
@@ -546,7 +713,7 @@ class DocxRenderer(BaseRenderer):
                     page=page,
                     mapper=mapper,
                     col_width_pt=col_unit,
-                    gap_cap_pt=12.0,
+                    gap_cap_pt=18.0,
                 ),
             )
 
@@ -559,7 +726,7 @@ class DocxRenderer(BaseRenderer):
             page=page,
             mapper=mapper,
             col_width_pt=span_width,
-            gap_cap_pt=12.0,
+            gap_cap_pt=18.0,
         )
 
         above_max = 0.0
@@ -588,7 +755,7 @@ class DocxRenderer(BaseRenderer):
                     page=page,
                     mapper=mapper,
                     col_width_pt=col_unit,
-                    gap_cap_pt=12.0,
+                    gap_cap_pt=18.0,
                 ),
             )
             below_max = max(
@@ -598,21 +765,41 @@ class DocxRenderer(BaseRenderer):
                     page=page,
                     mapper=mapper,
                     col_width_pt=col_unit,
-                    gap_cap_pt=12.0,
+                    gap_cap_pt=18.0,
                 ),
             )
         merged_total = above_max + merged_height + below_max
-        return max(standalone_max, merged_total) * layout_factor
+        est = max(standalone_max, merged_total) * layout_factor
+        return self._cap_zone_height(est, blocks, mapper)
+
+    def _cap_zone_height(self, est: float, blocks: list, mapper) -> float:
+        """以区块的实际 bbox 垂直范围约束估算高度。
+
+        防止间隙/段落间距累积导致估算过高，从而触发不必要的 fit_scale。
+
+        但源 bbox 是 OCR 紧密边界框（无内边距），而 Word 渲染为每个元素
+        增加额外开销（表格单元格间距、图片段落后间距、段落最小行距等）。
+        因此乘数需要留有足够余量。
+        """
+        all_y1 = min((b.bbox.y1 for b in blocks), default=0.0)
+        all_y2 = max((b.bbox.y2 for b in blocks), default=0.0)
+        bbox_span_pt = mapper.h(max(all_y2 - all_y1, 0.0))
+        if bbox_span_pt > 0:
+            # 区块越多，累积开销越大；多栏布局乘数更大
+            n = len(blocks)
+            cap_mult = 1.12 + 0.008 * min(n, 20)  # 1.12 ~ 1.28，随区块数线性增长
+            est = min(est, bbox_span_pt * cap_mult)
+        return est
 
     @staticmethod
     def _column_layout_height_factor(zone: Zone) -> float:
         """为复杂多栏区添加保守高度余量。"""
         num_cols = max(int(getattr(zone, "col_count", 1) or 1), 1)
-        if num_cols <= 2:
+        if num_cols <= 1:
             return 1.0
-        factor = 1.0 + 0.03 * (num_cols - 2)
+        factor = 1.0 + 0.02 * max(0, num_cols - 1)  # 2 栏 1.02，3 栏 1.04，...
         if any(len(getattr(block, "spanned_cols", [])) > 1 for block in zone.blocks):
-            factor += 0.005
+            factor += 0.02
         return factor
 
     def _estimate_stream_height_pt(
@@ -657,7 +844,7 @@ class DocxRenderer(BaseRenderer):
         if isinstance(block, (ImageBlock, EquationBlock)):
             if isinstance(block, EquationBlock) and not block.image_data:
                 return self.config.default_font_size_pt * 1.6
-            return raw_h * self._IMAGE_HEIGHT_RISK + 3.0
+            return raw_h * self._IMAGE_HEIGHT_RISK + 5.0
         return raw_h
 
     def _estimate_text_block_height_pt(
@@ -796,18 +983,19 @@ class DocxRenderer(BaseRenderer):
         font_size_pt: float,
         alignment: str,
     ) -> float:
+        cfg = self.config
         title_level = self._title_level(block)
         if self._is_masthead_title(block, page, alignment):
-            return min(font_size_pt * 1.35, 42.0)
+            return min(font_size_pt * cfg.title_masthead_scale, cfg.title_masthead_cap)
         if title_level == 1:
-            return min(font_size_pt * 1.34, font_size_pt + 2.4, 24.0)
+            return min(font_size_pt * cfg.title_level1_scale, font_size_pt + cfg.title_level1_add, cfg.title_level1_cap)
         if title_level == 2:
-            return min(font_size_pt * 1.22, font_size_pt + 1.2, 18.0)
+            return min(font_size_pt * cfg.title_level2_scale, font_size_pt + cfg.title_level2_add, cfg.title_level2_cap)
         if title_level and title_level >= 3:
-            return min(font_size_pt * 1.16, font_size_pt + 0.8, 16.0)
+            return min(font_size_pt * cfg.title_level3_scale, font_size_pt + cfg.title_level3_add, cfg.title_level3_cap)
         if self._is_wide_centered_single_line_title(block, page, alignment):
-            return min(font_size_pt * 1.2, 36.0)
-        return min(font_size_pt * 1.15, 28.0)
+            return min(font_size_pt * cfg.title_wide_centered_scale, cfg.title_wide_centered_cap)
+        return min(font_size_pt * cfg.title_default_scale, cfg.title_default_cap)
 
     @staticmethod
     def _cjk_ratio(text: str) -> float:
@@ -829,12 +1017,15 @@ class DocxRenderer(BaseRenderer):
             return font_size_pt
         if self._cjk_ratio(block.full_text()) < 0.55:
             return font_size_pt
+        cfg = self.config
+        if block.col_count >= 3 and 8.0 <= font_size_pt <= 11.5:
+            return min(font_size_pt * cfg.body_wide_cjk_scale, font_size_pt + cfg.body_wide_cjk_add)
         width_ratio = float(block.bbox.width) / max(float(page.image_width), 1.0)
         if width_ratio < 0.62:
             return font_size_pt
         if not (8.0 <= font_size_pt <= 11.5):
             return font_size_pt
-        return min(font_size_pt * 1.08, font_size_pt + 1.0)
+        return min(font_size_pt * cfg.body_wide_cjk_scale, font_size_pt + cfg.body_wide_cjk_add)
 
     def _text_wrap_risk(self, text: str) -> float:
         if not text:
@@ -876,12 +1067,14 @@ class DocxRenderer(BaseRenderer):
         bbox = block.bbox
         # 宽度上限：min(bbox宽度, 列宽98%)
         pw = min(mapper.w(bbox.width), ctx.col_width_pt * 0.98)
-        # 高度校正：坐标映射 X/Y 比例可能不等（图像与目标页面宽高比不同），
-        # 若仅按宽度绘制会导致图片实际高度超出 bbox 预测值，造成内容溢出。
-        # 此处计算「使渲染高度 = mapper.h(bbox.height) 所需的宽度」作为上界。
-        if bbox.height > 0:
-            pw_by_height = mapper.h(bbox.height) * bbox.width / bbox.height
-            pw = min(pw, pw_by_height)
+        # 高度校正：仅对极宽的图片（宽高比 > 1.8，如横幅/全景图）才用高度约束，
+        # 避免报纸/杂志中常见的横图（宽高比 ~1.2~1.6）被不必要地缩小。
+        # 对于这类图片，目标列/跨列单元格通常足够高，按宽度渲染不会溢出。
+        if bbox.height > 0 and bbox.width > 0 and ctx.col_width_pt > 0:
+            src_aspect = bbox.width / bbox.height
+            if src_aspect > 1.8:
+                pw_by_height = mapper.h(bbox.height) * bbox.width / bbox.height
+                pw = min(pw, pw_by_height)
         pw = self._scale(pw)
 
         if space_before > self._scale(3):
@@ -925,7 +1118,7 @@ class DocxRenderer(BaseRenderer):
 
     def _render_table_block(self, container, block: TableBlock,
                             ctx: RenderContext, space_before: float) -> None:
-        """渲染表格：先尝试 HTML→docx，失败则回退到图片。"""
+        """渲染表格：先尝试 HTML→docx，失败则退回纯文本摘要。"""
         if space_before > self._scale(MIN_LINE_SPACING_PT):
             add_spacing_para(container, space_before)
 
@@ -949,10 +1142,25 @@ class DocxRenderer(BaseRenderer):
                         row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
                 rendered = True
             except Exception as e:
-                logger.warning("Table HTML rendering failed, falling back to image: %s", e)
+                logger.warning("Table HTML rendering failed, falling back to plain text: %s", e)
+
+        if not rendered and block.html:
+            plain = re.sub(r"<[^>]+>", " ", block.html)
+            plain = re.sub(r"\s+", " ", plain).strip()
+            if plain:
+                p = container.add_paragraph()
+                reset_paragraph_format(p)
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                run = p.add_run(plain)
+                set_run_font(run, font_size=self._scale(self.config.default_font_size_pt))
+                rendered = True
 
         if not rendered and block.image_data:
-            self._render_image_block(container, block, ctx, 0)
+            p = container.add_paragraph()
+            reset_paragraph_format(p)
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run("[表格渲染失败]")
+            set_run_font(run, font_size=self._scale(self.config.default_font_size_pt))
 
     def _render_text_block(self, container, block: TextBlock,
                            ctx: RenderContext,
@@ -990,8 +1198,10 @@ class DocxRenderer(BaseRenderer):
             str(block_effective.get("alignment", "left")).lower(),
             WD_ALIGN_PARAGRAPH.LEFT,
         )
-        sp_after = self._scale(float(block_effective.get("space_after_pt", 1.0) or 1.0))
+        sp_after = self._scale(max(float(block_effective.get("space_after_pt", 1.0) or 1.0) - self._corr_space_after_pt, 0))
         line_spacing = block_effective.get("line_spacing")
+        if line_spacing is not None and self._corr_line_spacing > 0:
+            line_spacing = max(0.9, float(line_spacing) - self._corr_line_spacing)
         preserve_breaks_on_ambiguous_justify = bool(
             getattr(self.config, "docx_preserve_breaks_on_ambiguous_justify", True)
         )
@@ -1130,6 +1340,8 @@ class DocxRenderer(BaseRenderer):
             p.alignment = alignment
             if indent_pt > 0 and not is_title and not is_caption:
                 p.paragraph_format.first_line_indent = Pt(indent_pt)
+            if is_title:
+                p.paragraph_format.keep_with_next = True
             if line_spacing is not None:
                 p.paragraph_format.line_spacing = self._scale(float(line_spacing))
             _write_runs(p, txt, para_lines=para_lines)
@@ -1382,7 +1594,7 @@ class DocxRenderer(BaseRenderer):
             prev_y = 0
             for block in col_blks:
                 gap = max(0, block.bbox.y1 - prev_y)
-                sp = self._scale(min(mapper.h(gap), 12)) if (prev_y > 0 and gap > 2) else 0
+                sp = self._scale(max(min(mapper.h(gap), 12) - self._corr_gap_pt, 0)) if (prev_y > 0 and gap > 2) else 0
                 self._render_block(doc, block, ctx, space_before=sp)
                 prev_y = block.bbox.y2
 
@@ -1472,7 +1684,7 @@ class DocxRenderer(BaseRenderer):
                 prev_y = 0
                 for block in col_blks:
                     gap = max(0, block.bbox.y1 - prev_y)
-                    sp = self._scale(min(mapper.h(gap), 12)) if (prev_y > 0 and gap > 2) else 0
+                    sp = self._scale(max(min(mapper.h(gap), 12) - self._corr_gap_pt, 0)) if (prev_y > 0 and gap > 2) else 0
                     self._render_block(cell, block, ctx, space_before=sp)
                     prev_y = block.bbox.y2
                 self._prune_leading_empty_cell_paragraphs(cell)
@@ -1526,7 +1738,7 @@ class DocxRenderer(BaseRenderer):
                 prev_y = 0
                 for block in col_blks:
                     gap = max(0, block.bbox.y1 - prev_y)
-                    sp = self._scale(min(mapper.h(gap), 12)) if (prev_y > 0 and gap > 2) else 0
+                    sp = self._scale(max(min(mapper.h(gap), 12) - self._corr_gap_pt, 0)) if (prev_y > 0 and gap > 2) else 0
                     self._render_block(cell, block, ctx, space_before=sp)
                     prev_y = block.bbox.y2
                 self._prune_leading_empty_cell_paragraphs(cell)
@@ -1596,7 +1808,7 @@ class DocxRenderer(BaseRenderer):
                     prev_y = 0
                     for block in grouped_blocks[ci]:
                         gap = max(0, block.bbox.y1 - prev_y)
-                        sp = self._scale(min(mapper.h(gap), 12)) if (prev_y > 0 and gap > 2) else 0
+                        sp = self._scale(max(min(mapper.h(gap), 12) - self._corr_gap_pt, 0)) if (prev_y > 0 and gap > 2) else 0
                         self._render_block(sc, block, sub_ctx, space_before=sp)
                         prev_y = block.bbox.y2
                     self._prune_leading_empty_cell_paragraphs(sc)

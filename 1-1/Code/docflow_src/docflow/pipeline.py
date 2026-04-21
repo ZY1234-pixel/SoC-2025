@@ -29,6 +29,7 @@ from docflow.renderer.pdf_renderer import PdfRenderer
 from docflow.model.blocks.image_block import ImageBlock
 from docflow.model.blocks.equation_block import EquationBlock
 from docflow.model.blocks.table_block import TableBlock
+from docflow.utils.constants import FIGURE_TYPES
 
 _ZONE_STRIP_TYPES = {
     BlockType.HEADER,
@@ -230,7 +231,7 @@ class RecoveryPipeline:
         blocks: List[Block] = [BlockFactory.create(bd) for bd in raw_blocks]
 
         # -- 纠正常见的分类错误 ------------------------------------------
-        self._fix_block_categories(
+        category_fix_count = self._fix_block_categories(
             blocks,
             page_width=page.image_width,
             page_height=page.image_height,
@@ -255,18 +256,22 @@ class RecoveryPipeline:
             )
 
         # -- 提升顶部作者署名/导语短行，避免误落入正文分栏 --------------------
-        self._promote_top_byline_rows(
+        byline_promotions = self._promote_top_byline_rows(
             blocks,
             page_width=page.image_width,
             page_height=page.image_height,
         )
 
         # -- 纠正 OCR/版面分析未识别出的局部并排图文带 ----------------------
-        self._promote_side_by_side_hero_bands(
+        hero_band_promotions = self._promote_side_by_side_hero_bands(
             blocks,
             page_width=page.image_width,
             page_height=page.image_height,
         )
+
+        blocks = self._merge_short_continuation_fragments(blocks)
+
+        blocks = self._merge_short_continuation_fragments(blocks)
 
         # -- 检测文本区块中的段落 ------------------------------
         for block in blocks:
@@ -302,6 +307,17 @@ class RecoveryPipeline:
             page_width_px=page.image_width,
         )
 
+        self._annotate_page_profile(page, blocks)
+        if page.attributes is None:
+            page.attributes = {}
+        page.attributes["rule_stats"] = {
+            "category_fix_count": category_fix_count,
+            "byline_promotions": byline_promotions,
+            "hero_band_promotions": hero_band_promotions,
+            "zone_count": len(page.zones),
+        }
+        page.attributes["quality_metrics"] = self._page_quality_metrics(page, blocks)
+
         return page
 
     # ------------------------------------------------------------------
@@ -313,7 +329,7 @@ class RecoveryPipeline:
         blocks: List[Block],
         page_width: int = 0,
         page_height: int = 0,
-    ) -> None:
+    ) -> int:
         """纠正常见的版面分析分类错误。
 
         例如 PaddleOCR 有时将表格标题（"TABLE I ..."）识别为 header。
@@ -321,6 +337,7 @@ class RecoveryPipeline:
         section_title_re = re.compile(
             r"^\s*(\d+(?:\.\d+)*[\.、]|\d+[)）]|\(?\d+\)|[（(]?[一二三四五六七八九十百]+[)）\.、])\s*\S+"
         )
+        changes = 0
         for block in blocks:
             if not isinstance(block, TextBlock):
                 continue
@@ -335,8 +352,10 @@ class RecoveryPipeline:
             if block.block_type == BlockType.HEADER:
                 if re.match(r'TABLE\s', upper):
                     block.block_type = BlockType.TABLE_CAPTION
+                    changes += 1
                 elif re.match(r'FIG(URE|\.)\s', upper):
                     block.block_type = BlockType.FIGURE_CAPTION
+                    changes += 1
                 else:
                     is_numbered_section = bool(section_title_re.match(text))
                     shortish = len(text) <= 28
@@ -346,6 +365,7 @@ class RecoveryPipeline:
                     )
                     if is_numbered_section and shortish and narrow and near_top:
                         block.block_type = BlockType.TITLE
+                        changes += 1
             elif block.block_type == BlockType.FOOTER:
                 footer_like = bool(_FOOTER_LIKE_RE.search(text))
                 title_like = (
@@ -358,6 +378,7 @@ class RecoveryPipeline:
                 )
                 if title_like:
                     block.block_type = BlockType.TITLE
+                    changes += 1
             elif block.block_type == BlockType.TEXT:
                 near_bottom = (
                     page_height > 0
@@ -366,6 +387,7 @@ class RecoveryPipeline:
                 footer_like = bool(_FOOTER_LIKE_RE.search(text))
                 if near_bottom and footer_like and len(text) <= 120:
                     block.block_type = BlockType.FOOTER
+                    changes += 1
 
             if block.block_type == BlockType.TITLE:
                 level = _infer_title_heading_level(text)
@@ -373,20 +395,22 @@ class RecoveryPipeline:
                     if block.attributes is None:
                         block.attributes = {}
                     block.attributes.setdefault("heading_level", level)
+        return changes
 
     @staticmethod
     def _promote_side_by_side_hero_bands(
         blocks: List[Block],
         page_width: int = 0,
         page_height: int = 0,
-    ) -> None:
+    ) -> int:
         """将被漏判的“左图右文/右图左文”图文带提升为局部双栏结构。
 
         仅处理当前仍是单栏的块，并要求一侧为较大的图像块，另一侧为与其
         垂直重叠的标题/正文块，避免误伤普通单栏页面。
         """
         if page_width <= 0 or len(blocks) < 2:
-            return
+            return 0
+        promoted = 0
 
         figure_like = (BlockType.FIGURE, BlockType.IMAGE if hasattr(BlockType, "IMAGE") else BlockType.FIGURE)
         candidates = sorted(
@@ -441,27 +465,31 @@ class RecoveryPipeline:
                 block.col_count = 2
                 block.col_index = 0
                 block.spanned_cols = [0]
+                promoted += 1
             for block in right_col_blocks:
                 block.col_count = 2
                 block.col_index = 1
                 block.spanned_cols = [1]
+                promoted += 1
+        return promoted
 
     @staticmethod
     def _promote_top_byline_rows(
         blocks: List[Block],
         page_width: int = 0,
         page_height: int = 0,
-    ) -> None:
+    ) -> int:
         """将顶部居中的署名短行从正文分栏中提升为单栏行。
 
         典型场景：报纸主标题下方的作者行、地点行、导语短行。
         """
         if page_width <= 0 or page_height <= 0:
-            return
+            return 0
         page_center = float(page_width) * 0.5
         top_limit = float(page_height) * 0.22
         min_width = float(page_width) * 0.12
         max_width = float(page_width) * 0.32
+        promoted = 0
 
         for block in blocks:
             if not isinstance(block, TextBlock):
@@ -487,10 +515,116 @@ class RecoveryPipeline:
             if block.attributes is None:
                 block.attributes = {}
             block.attributes["is_byline_row"] = True
+            promoted += 1
             if block.col_count > 1:
                 block.col_count = 1
                 block.col_index = 0
                 block.spanned_cols = [0]
+        return promoted
+
+    @staticmethod
+    def _merge_short_continuation_fragments(blocks: List[Block]) -> List[Block]:
+        """吸收被错误切成独立块的短续接文本。"""
+        if len(blocks) < 2:
+            return blocks
+
+        merged: List[Block] = []
+
+        def _norm(text: str) -> str:
+            return re.sub(r"\s+", " ", (text or "")).strip()
+
+        def _ends_sentence(text: str) -> bool:
+            return bool(re.search(r"[。！？!?\.][”\"']?\s*$", text or ""))
+
+        for block in blocks:
+            if (
+                merged
+                and isinstance(block, TextBlock)
+                and isinstance(merged[-1], TextBlock)
+                and block.block_type in {BlockType.TEXT, BlockType.TITLE}
+                and merged[-1].block_type in {BlockType.TEXT, BlockType.TITLE, BlockType.REFERENCE}
+                and block.lines
+                and block.count_lines() == 1
+            ):
+                prev = merged[-1]
+                prev_text = _norm(prev.full_text())
+                curr_text = _norm(block.full_text())
+                horizontal_gap = float(block.bbox.x1) - float(prev.bbox.x2)
+                same_row = abs(float(block.bbox.y1) - float(prev.bbox.y1)) <= 28.0
+                next_column_top_fragment = (
+                    block.col_index == prev.col_index + 1
+                    and float(block.bbox.y1) < float(prev.bbox.y1)
+                    and float(prev.bbox.y1) - float(block.bbox.y1) <= 120.0
+                    and 0.0 <= horizontal_gap <= 96.0
+                )
+                continuation_like = (
+                    prev_text
+                    and curr_text
+                    and len(curr_text) <= 24
+                    and not _ends_sentence(prev_text)
+                    and (
+                        (0.0 <= horizontal_gap <= 96.0 and same_row)
+                        or next_column_top_fragment
+                    )
+                )
+                if continuation_like:
+                    prev.lines.extend(block.lines)
+                    prev.bbox = prev.bbox.union(block.bbox)
+                    continue
+
+            merged.append(block)
+
+        return merged
+
+    @staticmethod
+    def _annotate_page_profile(page: Page, blocks: List[Block]) -> None:
+        if page.attributes is None:
+            page.attributes = {}
+        page.attributes["layout_profile"] = RecoveryPipeline._infer_layout_profile(page, blocks)
+
+    @staticmethod
+    def _infer_layout_profile(page: Page, blocks: List[Block]) -> str:
+        max_cols = max((zone.col_count for zone in page.zones), default=1)
+        table_count = sum(1 for b in blocks if b.block_type == BlockType.TABLE)
+        figure_count = sum(1 for b in blocks if b.block_type in FIGURE_TYPES or b.block_type == BlockType.FIGURE)
+        title_count = sum(1 for b in blocks if b.block_type == BlockType.TITLE)
+        cjk_chars = 0
+        total_chars = 0
+        for b in blocks:
+            if isinstance(b, TextBlock):
+                text = b.full_text()
+                total_chars += len(text)
+                cjk_chars += sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff')
+        cjk_ratio = (cjk_chars / total_chars) if total_chars else 0.0
+
+        if table_count >= 2 and len(blocks) <= 12:
+            return "table_heavy"
+        if max_cols <= 1:
+            return "single_column"
+        if max_cols == 2 and cjk_ratio < 0.25 and title_count <= 4:
+            return "academic_two_col"
+        if max_cols >= 3 and figure_count >= 1 and title_count >= 2:
+            return "newspaper_mixed"
+        if cjk_ratio >= 0.35 and (table_count >= 1 or figure_count >= 1):
+            return "textbook_mixed"
+        return "generic_complex"
+
+    @staticmethod
+    def _page_quality_metrics(page: Page, blocks: List[Block]) -> dict:
+        max_cols = max((zone.col_count for zone in page.zones), default=1)
+        table_count = sum(1 for b in blocks if b.block_type == BlockType.TABLE)
+        figure_count = sum(1 for b in blocks if b.block_type in FIGURE_TYPES or b.block_type == BlockType.FIGURE)
+        title_count = sum(1 for b in blocks if b.block_type == BlockType.TITLE)
+        block_area = sum(max(float(b.bbox.area), 0.0) for b in blocks)
+        page_area = max(float(page.image_width * page.image_height), 1.0)
+        return {
+            "zone_count": len(page.zones),
+            "max_cols": max_cols,
+            "table_count": table_count,
+            "figure_count": figure_count,
+            "title_count": title_count,
+            "content_density": round(block_area / page_area, 4),
+        }
 
     @staticmethod
     def _fill_missing_images(blocks: List[Block], image_path: Optional[str]) -> None:

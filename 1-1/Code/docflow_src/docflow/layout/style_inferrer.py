@@ -108,6 +108,10 @@ def infer_block_styles(
     # 对同类别区块的字号离群值归一化
     _normalize_category_styles(all_text_blocks)
 
+    # 使用推断出的行距修正字号（设计文档 §4.1：字号应在源页面坐标系中推断）
+    # 初始估算假设 line_spacing ≈ 1.15，现用实际推断值修正
+    _refine_font_size_from_line_spacing(all_text_blocks, mapper)
+
 
 # ---------------------------------------------------------------------------
 # 单区块推断
@@ -358,14 +362,18 @@ def _estimate_line_spacing(
     font_size_pt: float,
     mapper: "CoordMapper",
 ) -> Optional[float]:
-    """从 bbox 高度和行数估算行距乘数。
+    """从文本行几何分布估算行距乘数。
+
+    优先使用相邻文本行之间的平均间距来估算行距，
+    比 bbox 高度法更准确——bbox 高度会混入段间距，
+    导致行距乘数被高估。
 
     行距乘数定义为 ``每行平均高度（pt） / font_size_pt``，
     与 python-docx ``paragraph_format.line_spacing = float`` 语义一致
     （即 MULTIPLE 模式下乘以 font_size_pt 后的绝对行高）。
 
-    仅在 **行数 ≥ 3** 时信任 bbox 派生值（两行区块的 bbox 膨胀较大），
-    且乘数上限为 1.6（防止异常值导致大行距）。
+    仅在 **行数 ≥ 2** 时信任几何派生值，但对两行区块使用更严格的
+    上下限（1.0–1.4），防止异常值导致行距偏大。
 
     Returns
     -------
@@ -374,13 +382,39 @@ def _estimate_line_spacing(
     if font_size_pt <= 0:
         return None
     num_lines = block.count_lines()
-    if num_lines < 3:
+    if num_lines < 2:
         return None
-    height_pt = mapper.h(block.bbox.height)
-    lh_pt = height_pt / num_lines
-    multiplier = lh_pt / font_size_pt
-    if 0.9 < multiplier < 1.6:
-        return round(multiplier * 100) / 100  # 精度 0.01
+
+    # 两行区块使用更严格的乘数范围
+    ls_low = 1.0 if num_lines >= 3 else 1.05
+    ls_high = 1.6 if num_lines >= 3 else 1.4
+
+    # 优先方法：使用相邻文本行的平均垂直间距估算行距
+    line_heights: List[float] = []
+    lines = block.lines or []
+    for ln in lines:
+        if ln.text_region:
+            ys = [float(pt[1]) for pt in ln.text_region if len(pt) >= 2]
+            if len(ys) >= 2:
+                line_heights.append(max(ys) - min(ys))
+
+    if len(line_heights) >= 2:
+        # 使用中位数行高（对异常值更鲁棒）
+        sorted_h = sorted(line_heights)
+        median_line_h = sorted_h[len(sorted_h) // 2]
+        if median_line_h > 0:
+            lh_pt = mapper.h(median_line_h)
+            multiplier = lh_pt / font_size_pt
+            if ls_low < multiplier < ls_high:
+                return round(multiplier * 100) / 100
+
+    # 回退：bbox 高度法（仅在文本行几何不可用时）
+    if not line_heights:
+        height_pt = mapper.h(block.bbox.height)
+        lh_pt = height_pt / num_lines
+        multiplier = lh_pt / font_size_pt
+        if ls_low < multiplier < ls_high:
+            return round(multiplier * 100) / 100
     return None
 
 
@@ -523,3 +557,55 @@ def _cluster_normalize_line_spacing(
     if largest_median is not None:
         for i in no_ls:
             cat_blocks[i].style.line_spacing = largest_median
+
+
+# ---------------------------------------------------------------------------
+# 字号修正：利用推断的行距反向修正初始字号估算
+# ---------------------------------------------------------------------------
+
+def _refine_font_size_from_line_spacing(
+    blocks: List[TextBlock],
+    mapper: "CoordMapper",
+) -> None:
+    """使用已推断的行距修正初始字号估算。
+
+    初始估算假设 line_height = font_size × 1.05（text_region）
+    或 1.20（bbox）。若实际推断的行距与假设偏差较大，
+    说明初始字号需要修正。
+
+    修正公式：font_size_corrected = font_size_initial × (ls_inferred / ls_assumed)
+
+    仅在行距置信度足够高时修正，避免用噪声数据污染字号。
+    """
+    ls_assumed_text = 1.05  # text_region 使用的除数
+    ls_assumed_bbox = 1.20  # bbox 回退使用的除数
+
+    for block in blocks:
+        if block.style is None or block.style.line_spacing is None:
+            continue
+        ls = block.style.line_spacing
+        if not (0.95 < ls < 1.55):
+            continue
+
+        # 估算初始字号使用的是哪种假设
+        has_text_region = any(
+            ln.text_region for ln in (block.lines or []) if ln.text_region
+        )
+        ls_assumed = ls_assumed_text if has_text_region else ls_assumed_bbox
+
+        # 若行距与假设接近（误差 < 15%），说明字号估算基本准确，不需修正
+        ratio = ls / ls_assumed
+        if abs(ratio - 1.0) < 0.15:
+            continue
+
+        # 修正：将字号乘以比例因子，但限制单次修正幅度
+        current_fs = block.style.font_size_pt
+        if current_fs is None or current_fs <= 0:
+            continue
+
+        correction = min(max(ratio, 0.85), 1.18)
+        new_fs = current_fs * correction
+        new_fs = max(6.0, min(36.0, new_fs))
+        new_fs = TextBlock._snap_to_font_grid(new_fs)
+
+        block.style.font_size_pt = new_fs

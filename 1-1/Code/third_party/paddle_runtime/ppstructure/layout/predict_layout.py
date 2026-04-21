@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+import re
 import sys
 
 __dir__ = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +40,17 @@ logger = get_logger()
 class LayoutPredictor(object):
     # PP-DocLayout 系列 23 类 -> ppstructure 恢复链路使用的兼容标签
     _DOC_LAYOUT_LABEL_MAP = {
+        "title": "title",
+        "plain text": "text",
+        "plain_text": "text",
+        "abandon": None,
+        "figure": "figure",
+        "figure_caption": "figure_caption",
+        "table": "table",
+        "table_caption": "table_caption",
+        "table_footnote": "table_footnote",
+        "isolate_formula": "equation",
+        "formula_caption": "figure_caption",
         "doc_title": "title",
         "paragraph_title": "title",
         "text": "text",
@@ -63,6 +75,10 @@ class LayoutPredictor(object):
         "footer_image": "figure",
         "aside_text": "text",
     }
+
+    _NCNN_MAX_DET = 300
+    _V10_REG_MAX = 16
+    _V10_STRIDES = (8, 16, 32)
 
     def __init__(self, args):
         resize_size = [800, 608]
@@ -96,6 +112,11 @@ class LayoutPredictor(object):
                     e,
                 )
 
+        if not os.path.isfile(inference_cfg):
+            inferred_imgsz = self._infer_ncnn_imgsz(args.layout_model_dir)
+            if inferred_imgsz is not None:
+                resize_size = [inferred_imgsz, inferred_imgsz]
+
         pre_process_list = [
             {"Resize": {"size": resize_size}},
             {
@@ -118,17 +139,198 @@ class LayoutPredictor(object):
 
         self.preprocess_op = create_operators(pre_process_list)
         self.postprocess_op = build_post_process(postprocess_params)
-        (
-            self.predictor,
-            self.input_tensor,
-            self.output_tensors,
-            self.config,
-        ) = utility.create_predictor(args, "layout", logger)
-        self.use_onnx = args.use_onnx
-        self.input_names = None if self.use_onnx else self.predictor.get_input_names()
+        self.ncnn_param_path, self.ncnn_model_path = self._discover_ncnn_model(
+            args.layout_model_dir
+        )
+        self.use_ncnn = self.ncnn_param_path is not None and self.ncnn_model_path is not None
+        self.ncnn_input_size = resize_size
+        self.ncnn_conf_threshold = min(float(args.layout_score_threshold), 0.25)
+        self.predictor = None
+        self.input_tensor = None
+        self.output_tensors = None
+        self.config = None
+        self.use_onnx = False
+        self.input_names = None
+        self.ncnn_net = None
+        if self.use_ncnn:
+            try:
+                import ncnn
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Detected NCNN layout model assets, but Python package `ncnn` is not installed."
+                ) from exc
+
+            self.ncnn = ncnn
+            self.ncnn_net = ncnn.Net()
+            self.ncnn_net.load_param(self.ncnn_param_path)
+            self.ncnn_net.load_model(self.ncnn_model_path)
+        else:
+            (
+                self.predictor,
+                self.input_tensor,
+                self.output_tensors,
+                self.config,
+            ) = utility.create_predictor(args, "layout", logger)
+            self.use_onnx = args.use_onnx
+            self.input_names = None if self.use_onnx else self.predictor.get_input_names()
 
     def _map_label(self, label):
         return self._DOC_LAYOUT_LABEL_MAP.get(str(label).lower(), str(label).lower())
+
+    @staticmethod
+    def _infer_ncnn_imgsz(layout_model_dir):
+        if not layout_model_dir:
+            return None
+        metadata_path = os.path.join(layout_model_dir, "metadata.yaml")
+        if os.path.isfile(metadata_path):
+            try:
+                with open(metadata_path, "r", encoding="utf-8") as f:
+                    metadata = yaml.safe_load(f) or {}
+                imgsz = metadata.get("imgsz")
+                if isinstance(imgsz, (list, tuple)) and len(imgsz) >= 2:
+                    return int(imgsz[0])
+            except Exception:
+                pass
+        match = re.search(r"imgsz(\d+)", os.path.basename(layout_model_dir))
+        return int(match.group(1)) if match else None
+
+    @staticmethod
+    def _discover_ncnn_model(layout_model_dir):
+        if not layout_model_dir or not os.path.isdir(layout_model_dir):
+            return None, None
+        stems = ["model.ncnn", "model", "inference"]
+        for stem in stems:
+            param_path = os.path.join(layout_model_dir, f"{stem}.param")
+            model_path = os.path.join(layout_model_dir, f"{stem}.bin")
+            if os.path.isfile(param_path) and os.path.isfile(model_path):
+                return param_path, model_path
+        return None, None
+
+    def _letterbox_image(self, img):
+        new_shape = (self.ncnn_input_size[1], self.ncnn_input_size[0])
+        shape = img.shape[:2]
+        r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+        new_unpad = (int(round(shape[1] * r)), int(round(shape[0] * r)))
+        dw = new_shape[1] - new_unpad[0]
+        dh = new_shape[0] - new_unpad[1]
+        dw /= 2
+        dh /= 2
+        if shape[::-1] != new_unpad:
+            img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+        top = int(round(dh - 0.1))
+        bottom = int(round(dh + 0.1))
+        left = int(round(dw - 0.1))
+        right = int(round(dw + 0.1))
+        img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+        return img, (r, r), (left, top)
+
+    def _decode_v10_raw_head(self, preds):
+        nc = len(self.postprocess_op.labels)
+        box_logits = preds[:, : self._V10_REG_MAX * 4].astype(np.float32)
+        cls_logits = preds[:, self._V10_REG_MAX * 4 :].astype(np.float32)
+        if cls_logits.shape[1] != nc:
+            return None, None
+        total_positions = preds.shape[0]
+        input_w, input_h = self.ncnn_input_size[0], self.ncnn_input_size[1]
+        expected_counts, anchor_points, stride_values = [], [], []
+        for stride in self._V10_STRIDES:
+            feat_h = input_h // stride
+            feat_w = input_w // stride
+            count = feat_h * feat_w
+            expected_counts.append(count)
+            sy = np.arange(feat_h, dtype=np.float32) + 0.5
+            sx = np.arange(feat_w, dtype=np.float32) + 0.5
+            grid_x, grid_y = np.meshgrid(sx, sy)
+            anchor_points.append(np.stack([grid_x.reshape(-1), grid_y.reshape(-1)], axis=1))
+            stride_values.append(np.full((count, 1), stride, dtype=np.float32))
+        if sum(expected_counts) != total_positions:
+            return None, None
+        anchor_points = np.concatenate(anchor_points, axis=0)
+        stride_values = np.concatenate(stride_values, axis=0)
+        box_logits = box_logits.reshape(-1, 4, self._V10_REG_MAX)
+        box_logits = box_logits - np.max(box_logits, axis=2, keepdims=True)
+        np.exp(box_logits, out=box_logits)
+        box_logits /= np.sum(box_logits, axis=2, keepdims=True)
+        reg_range = np.arange(self._V10_REG_MAX, dtype=np.float32)
+        distances = np.sum(box_logits * reg_range[None, None, :], axis=2)
+        x1y1 = anchor_points - distances[:, :2]
+        x2y2 = anchor_points + distances[:, 2:]
+        centers = (x1y1 + x2y2) / 2.0
+        wh = x2y2 - x1y1
+        boxes = np.concatenate([centers, wh], axis=1) * stride_values
+        scores = 1.0 / (1.0 + np.exp(-cls_logits))
+        return boxes, scores
+
+    def _postprocess_predecoded_cxcywh_outputs(self, raw_preds, ori_shape, ratio_pad):
+        preds = np.asarray(raw_preds)
+        if preds.ndim != 2:
+            return None
+        if preds.shape[0] in (
+            4 + len(self.postprocess_op.labels),
+            self._V10_REG_MAX * 4 + len(self.postprocess_op.labels),
+        ) and preds.shape[1] not in (
+            4 + len(self.postprocess_op.labels),
+            self._V10_REG_MAX * 4 + len(self.postprocess_op.labels),
+        ):
+            preds = preds.T
+        box_dims = preds.shape[1] - len(self.postprocess_op.labels)
+        if box_dims == 4:
+            boxes = preds[:, :4]
+            scores = preds[:, 4:]
+        elif box_dims == self._V10_REG_MAX * 4:
+            boxes, scores = self._decode_v10_raw_head(preds)
+            if boxes is None:
+                return None
+        else:
+            return None
+        max_det = min(self._NCNN_MAX_DET, preds.shape[0], preds.shape[0] * scores.shape[1])
+        max_scores = scores.max(axis=1)
+        topk_candidate_idx = np.argsort(max_scores)[-max_det:][::-1]
+        boxes = boxes[topk_candidate_idx]
+        scores = scores[topk_candidate_idx]
+        flat_scores = scores.reshape(-1)
+        topk_score_idx = np.argsort(flat_scores)[-max_det:][::-1]
+        labels = topk_score_idx % scores.shape[1]
+        box_idx = topk_score_idx // scores.shape[1]
+        boxes = boxes[box_idx]
+        scores = flat_scores[topk_score_idx]
+        boxes = boxes.astype(np.float32).copy()
+        boxes[:, 0] -= boxes[:, 2] / 2.0
+        boxes[:, 1] -= boxes[:, 3] / 2.0
+        boxes[:, 2] += boxes[:, 0]
+        boxes[:, 3] += boxes[:, 1]
+        gain = ratio_pad[0][0]
+        pad_x, pad_y = ratio_pad[1]
+        boxes[:, [0, 2]] -= pad_x
+        boxes[:, [1, 3]] -= pad_y
+        boxes[:, :4] /= gain
+        ori_h, ori_w = ori_shape[:2]
+        boxes[:, 0::2] = np.clip(boxes[:, 0::2], 0, ori_w)
+        boxes[:, 1::2] = np.clip(boxes[:, 1::2], 0, ori_h)
+        results = []
+        for box, score, label_idx in zip(boxes, scores, labels):
+            if float(score) <= self.ncnn_conf_threshold:
+                continue
+            raw_label = self.postprocess_op.labels[int(label_idx)]
+            mapped_label = self._map_label(raw_label)
+            if mapped_label is None:
+                continue
+            results.append({"bbox": box, "label": mapped_label, "score": float(score)})
+        return results
+
+    def _predict_with_ncnn(self, img):
+        letterboxed, ratio, pad = self._letterbox_image(img)
+        chw = np.ascontiguousarray(letterboxed[..., ::-1].transpose(2, 0, 1), dtype=np.float32)
+        chw /= 255.0
+        mat = self.ncnn.Mat(chw)
+        extractor = self.ncnn_net.create_extractor()
+        input_name = self.ncnn_net.input_names()[0]
+        output_name = self.ncnn_net.output_names()[0]
+        extractor.input(input_name, mat)
+        ret, out = extractor.extract(output_name)
+        if ret != 0:
+            raise RuntimeError(f"NCNN layout inference failed with code {ret}")
+        return np.array(out), (ratio, pad)
 
     def _parse_predecoded_outputs(self, outputs, ori_shape):
         """兼容 PP-DocLayout-S 等直接输出 NMS 后 boxes 的模型。"""
@@ -168,6 +370,15 @@ class LayoutPredictor(object):
         return results
 
     def __call__(self, img):
+        if self.use_ncnn:
+            starttime = time.time()
+            outputs, ratio_pad = self._predict_with_ncnn(img)
+            results = self._postprocess_predecoded_cxcywh_outputs(outputs, img.shape, ratio_pad)
+            elapse = time.time() - starttime
+            if results is None:
+                raise RuntimeError("Unsupported NCNN layout output shape")
+            return results, elapse
+
         ori_im = img.copy()
         data = {"image": img}
         data = transform(data, self.preprocess_op)

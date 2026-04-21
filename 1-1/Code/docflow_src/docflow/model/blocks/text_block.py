@@ -171,7 +171,11 @@ class TextBlock(Block):
         当 text_region 可用时，使用中位行高来获取更准确的估算
         （避免 bbox 内边距膨胀影响）。否则回退为 bbox 高度 / 行数。
 
-        结果被限制在 [6, 28] pt 范围内，并四舍五入到最近的 0.5 pt。
+        行高 = font_size × line_spacing，其中 line_spacing 通常在 1.0–1.15 之间。
+        因此除数用 1.15 而非 1.25，避免系统性地低估字号。
+
+        结果被限制在 [6, 36] pt 范围内，并四舍五入到最近的 0.5 pt，
+        最后吸附到常见字号网格（9/9.5/10/10.5/11/12/14/16/18/20/24/28/36）。
         """
         # 先尝试使用实际 text_region 高度
         line_heights: List[float] = []
@@ -184,16 +188,30 @@ class TextBlock(Block):
             # 使用中位行高以提高对异常值的鲁棒性
             line_heights.sort()
             median_h = line_heights[len(line_heights) // 2]
-            fs = mapper.h(median_h) / 1.25
+            # text_region 测量的是文本行的实际高度（含升部/降部），
+            # 不是行间距。除数 1.05 仅补偿行内额外空间，不混入行间空白。
+            fs = mapper.h(median_h) / 1.05
         else:
             n_lines = self.count_lines()
             if n_lines <= 0:
                 return
-            fs = (mapper.h(self.bbox.height) / n_lines) / 1.3
+            # bbox 高度包含行间空白，用更大的除数补偿
+            fs = (mapper.h(self.bbox.height) / n_lines) / 1.20
 
-        fs = max(6.0, min(28.0, fs))
+        fs = max(6.0, min(36.0, fs))
         fs = round(fs * 2.0) / 2.0
+        fs = self._snap_to_font_grid(fs)
         self.estimated_font_size_pt = fs
+
+    @staticmethod
+    def _snap_to_font_grid(raw_pt: float) -> float:
+        """将字号吸附到常见字号值。"""
+        grid = [9.0, 9.5, 10.0, 10.5, 11.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 28.0, 36.0]
+        if raw_pt < 9.0:
+            return max(raw_pt, 6.0)
+        best = min(grid, key=lambda v: abs(v - raw_pt))
+        # 仅当差值 < 1.5 pt 时才吸附，避免过度修正
+        return best if abs(best - raw_pt) < 1.5 else raw_pt
 
     def detect_alignment(
         self,

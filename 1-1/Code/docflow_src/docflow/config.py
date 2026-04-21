@@ -27,6 +27,27 @@ class RecoveryConfig:
     docx_preserve_visual_line_breaks: bool = True
     docx_preserve_breaks_on_ambiguous_justify: bool = True
 
+    # 标题字号缩放（multiplier / additive / cap）
+    title_masthead_scale: float = 1.35
+    title_masthead_cap: float = 42.0
+    title_level1_scale: float = 1.34
+    title_level1_add: float = 2.4
+    title_level1_cap: float = 24.0
+    title_level2_scale: float = 1.22
+    title_level2_add: float = 1.2
+    title_level2_cap: float = 18.0
+    title_level3_scale: float = 1.16
+    title_level3_add: float = 0.8
+    title_level3_cap: float = 16.0
+    title_wide_centered_scale: float = 1.20
+    title_wide_centered_cap: float = 36.0
+    title_default_scale: float = 1.15
+    title_default_cap: float = 28.0
+
+    # 正文宽幅 CJK 微调
+    body_wide_cjk_scale: float = 1.08
+    body_wide_cjk_add: float = 1.0
+
     # 页面布局
     min_margin_pt: float = 36.0
     max_margin_pt: float = 90.0

@@ -15,28 +15,38 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 _TYPE_PALETTE = [
-    (80, 127, 255),   # blue-ish
+    (231, 76, 60),    # red
+    (80, 127, 255),   # blue
     (46, 204, 113),   # green
     (241, 196, 15),   # yellow
-    (231, 76, 60),    # red
     (155, 89, 182),   # purple
     (26, 188, 156),   # cyan
     (230, 126, 34),   # orange
-]
-
-_COL_PALETTE = [
-    (220, 80, 50),
-    (50, 180, 80),
-    (50, 130, 220),
-    (180, 50, 180),
-    (50, 200, 200),
-    (200, 130, 50),
+    (192, 57, 43),    # dark red
+    (39, 174, 96),    # dark green
+    (211, 84, 0),     # dark orange
+    (142, 68, 173),   # dark purple
+    (41, 128, 185),   # dark blue
 ]
 
 
 def _type_color(type_name: str) -> tuple[int, int, int]:
-    idx = abs(hash(type_name)) % len(_TYPE_PALETTE)
-    return _TYPE_PALETTE[idx]
+    """DJB2 字符串哈希 + 12 色调色板，相同类型颜色稳定，碰撞率低。"""
+    h = 5381
+    for ch in type_name:
+        h = ((h * 33) + ord(ch)) & 0xFFFFFFFF
+    return _TYPE_PALETTE[h % len(_TYPE_PALETTE)]
+
+
+# 列索引调色板（BGR 格式，适配 cv2.rectangle）
+_COL_PALETTE = [
+    (50, 80, 220),    # blue
+    (80, 180, 50),    # green
+    (220, 130, 50),   # orange
+    (180, 50, 180),   # purple
+    (200, 200, 50),   # yellow
+    (50, 130, 200),   # brown
+]
 
 
 def _as_int_bbox(bbox: Sequence[float]) -> tuple[int, int, int, int]:
@@ -102,7 +112,10 @@ def draw_layout_ocr(
         color = _type_color(rtype)
         x1, y1, x2, y2 = _as_int_bbox(region.get("bbox", []))
 
+        # 区块边界框：加粗描边
         draw.rectangle((x1, y1, x2, y2), outline=color, width=3)
+
+        # 区域标签
         label = f"{idx}:{rtype} {score:.2f}"
         tw, th = _text_size(draw, label, font)
         ly1 = max(0, y1 - th - 4)
@@ -119,7 +132,9 @@ def draw_layout_ocr(
             pts = [(int(p[0]), int(p[1])) for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2]
             if len(pts) < 2:
                 continue
+
             draw.line(pts + [pts[0]], fill=(255, 255, 0), width=1)
+
             if show_text_preview and txt:
                 preview = txt[:max_preview_chars]
                 px, py = pts[0]

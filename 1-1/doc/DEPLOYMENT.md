@@ -2,11 +2,10 @@
 
 ## 1. 适用范围
 
-本目录用于本地验证以下能力：
+本交付包用于本地验证以下能力：
 
 `图片 / PDF -> OCR + 版面分析 -> DocFlow 恢复 -> docx / markdown / pdf`
 
-当前 GitHub 提交只包含代码与文档，不包含模型权重、测试数据和测试输出。
 
 ## 2. 环境要求
 
@@ -16,19 +15,14 @@
   - Linux: `libreoffice` 或 `soffice`
   - Windows: `soffice.exe`
 
-## 3. 运行前准备
+## 3. 目录确认
 
-进入本目录后，先确认以下路径存在：
+进入交付包后，先确认以下目录存在：
 
 - `Code/`
 - `dataset/`
 - `test-result/`
 - `doc/`
-
-其中：
-
-- `dataset/` 中请放入从百度网盘下载的测试输入
-- `Code/models/` 中请放入从百度网盘下载的模型文件
 
 再进入代码目录：
 
@@ -50,6 +44,7 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirement.txt
+python -m pip install wheels/docflow-0.3.0-py3-none-any.whl
 ```
 
 ### 4.3 Windows PowerShell 安装命令
@@ -58,25 +53,21 @@ python -m pip install -r requirement.txt
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirement.txt
+python -m pip install wheels\docflow-0.3.0-py3-none-any.whl
 ```
-
-说明：
-
-- 当前仓库不包含 `Code/wheels/`，因此不再执行 wheel 安装
-- `test.py` 会直接将 `Code/docflow_src/` 加入运行时路径
 
 ## 5. 安装完成后的最小验证
 
 在 `Code/` 目录执行：
 
 ```bash
-python test.py --input ../dataset/<样例文件> --output ../test-result --formats docx,markdown
+python test.py --input ../dataset/exam_paper_02.png --output ../test-result --formats docx,markdown
 ```
 
 如果需要验证 PDF 导出：
 
 ```bash
-python test.py --input ../dataset/<样例文件> --output ../test-result --formats docx,markdown,pdf
+python test.py --input ../dataset/exam_paper_02.png --output ../test-result --formats docx,markdown,pdf
 ```
 
 ## 6. 输出位置说明
