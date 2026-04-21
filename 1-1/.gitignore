@@ -1,21 +1,16 @@
-dataset/*
-!dataset/README.txt
-test-result/*
-!test-result/README.txt
-Code/models/*
-!Code/models/README.md
-Code/wheels/
-**/__pycache__/
-*.pyc
-*.pyo
-*.pyd
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local environments
+.venv/
+venv/
+
+# Build artifacts
 *.whl
-*.onnx
-*.pt
-*.pth
-*.ckpt
-*.bin
-*.pdmodel
-*.pdparams
-*.pdiparams
-*.pdiparams.info
+
+# Project data and outputs (do not commit)
+dataset/
+test-result/
+Code/models/
+Code/wheels/

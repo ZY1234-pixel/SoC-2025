@@ -1,12 +1,12 @@
 # 测试操作手册
 
+
 ## 1. 测试前检查
 
 开始前请确认：
 
 - 已按 `DEPLOYMENT.md` 完成环境安装
 - `dataset/` 目录中已放入待测图片或 PDF
-- `Code/models/` 中已放入百度网盘下载的模型文件
 - 若要测试 PDF 输出，系统命令行可直接调用 `soffice`
 
 ## 2. 主测试命令
@@ -32,7 +32,7 @@ python test.py --input <输入路径> --output <输出路径> --formats <格式�
 用于确认环境、模型和主流程可跑通：
 
 ```bash
-python test.py --input ../dataset/<样例文件> --output ../test-result --formats docx,markdown
+python test.py --input ../dataset/exam_paper_02.png --output ../test-result --formats docx,markdown
 ```
 
 通过标准：

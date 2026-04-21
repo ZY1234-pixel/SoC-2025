@@ -6,16 +6,17 @@
 
 ```bash
 python -m pip install -r requirement.txt
+python -m pip install wheels/docflow-0.3.0-py3-none-any.whl
 ```
 
 ## 2. 报错“缺少必要运行资产”
 
-通常表示目录不完整，或者百度网盘中的模型文件还没有放回本地。请确认以下路径存在：
+通常表示打包目录不完整或文件被移动。请确认以下路径存在：
 
 - `Code/third_party/paddle_runtime/ppstructure`
 - `Code/third_party/paddle_runtime/ppocr`
 - `Code/third_party/paddle_runtime/tools`
-- `Code/models/layout/picodet_lcnet_x1_0_fgd_layout_cdla_infer`
+- `Code/models/layout/doclayout_yolo_docstructbench_headfloat100_runtime`
 - `Code/models/det/ch/PP-OCRv5_mobile_det_infer`
 - `Code/models/rec/ch/PP-OCRv5_mobile_rec_infer`
 - `Code/models/table/SLANet_plus_infer`

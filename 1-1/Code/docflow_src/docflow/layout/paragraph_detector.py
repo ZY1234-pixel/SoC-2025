@@ -42,6 +42,20 @@ def _ends_sentence(text: str) -> bool:
     return bool(_SENTENCE_END_RE.search((text or "").strip()))
 
 
+def _looks_like_continuation(prev_text: str, curr_text: str) -> bool:
+    prev = (prev_text or "").strip()
+    curr = (curr_text or "").strip()
+    if not prev or not curr or _ends_sentence(prev) or _is_list_marker_line(curr):
+        return False
+    if curr[:1] in ",.;:)]}，；：、》」】":
+        return True
+    if curr[:1].islower():
+        return True
+    if len(prev) <= 24 or len(curr) <= 24:
+        return True
+    return False
+
+
 # ------------------------------------------------------------------
 # 首行缩进检测
 # ------------------------------------------------------------------
@@ -181,6 +195,7 @@ def split_into_paragraphs(
         # 条目符号起段：1. / A. / （一）等
         curr_text = (curr.text or "").strip()
         is_list_break = bool(list_marker_enabled and _is_list_marker_line(curr_text))
+        continuation_hint = _looks_like_continuation(prev.text, curr_text)
 
         # 句末后左对齐重启：上一行句末 + 当前行回到段首左边界
         para_xs = [ln.x1 for ln in current_para if ln.x1 is not None]
@@ -195,6 +210,11 @@ def split_into_paragraphs(
             and left_restart
             and vertical_gap > avg_height * 0.08
         )
+
+        if continuation_hint:
+            is_indent_break = False
+            is_gap_break = False
+            is_sentence_break = False
 
         if is_indent_break or is_gap_break or is_list_break or is_sentence_break:
             paragraphs.append(current_para)

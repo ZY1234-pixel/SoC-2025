@@ -1,17 +1,16 @@
+
 日期：2026-03-19
 
 一、发布目标
 ------------
-本版本用于提交“图片文本解析及矢量化转换”项目的代码与文档。
-
-主链路如下：
-图片 / PDF 输入 -> 版面分析 + OCR -> 标准 JSON -> DOCX / Markdown / PDF 输出
+本版本用于离线本地验证以下主链路：
+图片 / PDF 输入 -> 版面分析 + OCR -> 标准 JSON -> DOCX / Markdown / PDF 输出。
 
 二、本版本包含内容
 ----------------
 1) 核心源码
 - `Code/docflow_src/docflow`
-- 当前布局恢复、段落/分栏推断、DOCX/Markdown/PDF 渲染实现
+- 当前布局恢复、段落/分栏推断、DOCX/Markdown 渲染实现
 
 2) 全流程运行测试代码
 - `Code/test.py`
@@ -20,31 +19,25 @@
 - `Code/model.py`
 - `Code/utils.py`
 
-3) 运行时代码
-- `Code/third_party/paddle_runtime`
+3) 运行资产
+- 最小 Paddle 运行时：`Code/third_party/paddle_runtime`
+- 默认模型：`Code/models`
+- 当前 wheel：`Code/wheels/docflow-0.3.0-py3-none-any.whl`
 
 4) 配套文档
-- `doc/DEPLOYMENT.md`
-- `doc/TESTING.md`
-- `doc/TROUBLESHOOTING.md`
+- 部署指南：`doc/DEPLOYMENT.md`
+- 测试手册：`doc/TESTING.md`
+- 故障排查：`doc/TROUBLESHOOTING.md`
 
-三、本版本不包含内容
-------------------
-- `dataset/` 下真实测试数据
-- `Code/models/` 下模型权重与推理参数
-- `Code/wheels/` 下 wheel 包
-- `test-result/` 下测试输出
-
-以上内容统一通过百度网盘提供。
-
-四、默认模型配置
+五、结果目录说明
 --------------
-- layout: picodet_lcnet_x1_0_fgd_layout_cdla_infer
+- 每次测试都会在 `test-result/` 下生成一个新的 `run_时间戳/`
+- 每个样例的正式结果位于 `samples/<样例名>/`
+- 最终文档名直接使用原始样例文件名，不再使用 `recovery` / `rendered`
+
+六、默认模型配置
+--------------
+- layout: doclayout_yolo_docstructbench_headfloat100_runtime
 - det: PP-OCRv5_mobile_det_infer
 - rec: PP-OCRv5_mobile_rec_infer
 - table: SLANet_plus_infer
-
-五、备注
-------
-- 当前 `train.py` 为占位入口，不包含实际训练逻辑
-- 当前 GitHub 提交重点为推理、测试与恢复链路代码

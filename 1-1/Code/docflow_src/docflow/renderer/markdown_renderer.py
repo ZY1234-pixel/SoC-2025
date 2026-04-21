@@ -180,8 +180,6 @@ class MarkdownRenderer(BaseRenderer):
             md = self._html_table_to_markdown(block.html)
             if md:
                 return md
-        if block.image_data:
-            return self._render_image_markdown(block.image_data, "table")
         return ""
 
     def _render_figure(self, block: ImageBlock) -> str:
