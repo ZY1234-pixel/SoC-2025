@@ -1,0 +1,18 @@
+# 核心运行依赖
+numpy>=1.23
+opencv-python-headless>=4.8
+pymupdf>=1.23
+python-docx>=0.8.11
+beautifulsoup4>=4.9
+lxml>=4.9
+Pillow>=9.0
+pyyaml>=6.0
+tqdm>=4.66
+requests>=2.31
+
+# OCR 运行依赖（CPU）
+paddlepaddle>=3.0.0
+pyclipper>=1.3.0
+shapely>=2.0.0
+scikit-image>=0.21.0
+imgaug>=0.4.0
