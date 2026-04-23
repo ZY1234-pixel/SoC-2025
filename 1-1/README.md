@@ -1,98 +1,115 @@
-# 图片文本解析及矢量化转换交付包说明
+# 图片文本解析及矢量化转换
 
-本交付包用于本地验证图片文本解析及矢量化转换的完整恢复链路：
+图片型文档的版面分析与结构化还原项目。输入扫描图片 / PDF，输出保留原始排版结构的 DOCX、Markdown 与 PDF。
 
-`图片 / PDF -> 版面分析 + OCR -> 标准 JSON -> DOCX / Markdown / PDF`
+![pipeline](https://img.shields.io/badge/pipeline-OCR--%3ELayout--%3EReconstruction-blue)
 
+## 效果展示
 
-## 1. 目录结构
+### 学术期刊论文（双栏 + 公式 + 表格）
 
-```text
-DocFlow_FullFlow_Package/
-├── dataset/                # 测试输入目录
-├── Code/                   # 核心源码、运行测试脚本、模型和运行时
-├── test-result/            # 测试输出目录
-├── doc/                    # 详细文档
-├── README.md               # 本说明
-└── release note.txt        # 版本发布说明
-```
+| 原图 | 版面分析 | 还原输出 |
+|:----:|:--------:|:--------:|
+| <img src="test-result/.examples/academic-paper/01_original.png" width="320"> | <img src="test-result/.examples/academic-paper/02_layout.png" width="320"> | <img src="test-result/.examples/academic-paper/03_rendered.png" width="320"> |
 
-`Code/` 目录中的关键内容如下：
+### 报纸版面（多栏 + 混排）
 
-```text
-Code/
-├── docflow_src/            # 当前版本核心源码
-├── models/                 # 版面/检测/识别/表格模型
-├── third_party/            # PaddleOCR 最小运行时
-├── wheels/                 # 当前版本 wheel 包
-├── test.py                 # 主测试入口
-├── dataset.py              # 输入收集脚本
-├── preprocess.py           # 图片/PDF 预处理脚本
-├── model.py                # 包内路径配置
-├── utils.py                # 运行工具函数
-├── requirement.txt         # Python 依赖
-└── runcmd.txt              # 常用命令清单
-```
+| 原图 | 版面分析 | 还原输出 |
+|:----:|:--------:|:--------:|
+| <img src="test-result/.examples/newspaper/01_original.png" width="320"> | <img src="test-result/.examples/newspaper/02_layout.png" width="320"> | <img src="test-result/.examples/newspaper/03_rendered.png" width="320"> |
 
-## 2. 推荐阅读顺序
+### 杂志图文（图文混排 + 双栏）
 
-1. 阅读 `doc/DEPLOYMENT.md`，完成环境安装。
-2. 阅读 `doc/TESTING.md`，按统一流程执行测试。
-3. 出现异常时查看 `doc/TROUBLESHOOTING.md`。
+| 原图 | 版面分析 | 还原输出 |
+|:----:|:--------:|:--------:|
+| <img src="test-result/.examples/magazine/01_original.png" width="320"> | <img src="test-result/.examples/magazine/02_layout.png" width="320"> | <img src="test-result/.examples/magazine/03_rendered.png" width="320"> |
 
-## 3. 快速开始
+### 中文图书（段落 + 图片）
 
-### 3.1 Linux
+| 原图 | 版面分析 | 还原输出 |
+|:----:|:--------:|:--------:|
+| <img src="test-result/.examples/book/01_original.png" width="320"> | <img src="test-result/.examples/book/02_layout.png" width="320"> | <img src="test-result/.examples/book/03_rendered.png" width="320"> |
+
+---
+
+## 快速开始
+
+### 环境准备
 
 ```bash
 cd Code
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirement.txt
-python -m pip install wheels/docflow-0.3.0-py3-none-any.whl
-python test.py --input ../dataset --output ../test-result --formats docx,markdown
+pip install -r requirement.txt
+pip install wheels/docflow-0.3.0-py3-none-any.whl
 ```
 
-### 3.2 Windows PowerShell
+### 运行测试
 
-```powershell
-cd Code
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirement.txt
-python -m pip install wheels\docflow-0.3.0-py3-none-any.whl
-python test.py --input ..\dataset --output ..\test-result --formats docx,markdown
+```bash
+python test.py -i ../dataset -o ../test-result -f docx,markdown
 ```
 
-如果需要输出 PDF，请把 `--formats` 改为 `docx,markdown,pdf`，并先安装 LibreOffice / soffice。
+输出会按时间戳归档到 `test-result/run_YYYYMMDD_HHMMSS/` 目录下，每个样本包含 JSON 中间结果、DOCX / Markdown / PDF 输出文件以及 debug 可视化图。
 
-## 4. 常用输出
+**Windows (PowerShell)** 只需将路径分隔符改为 `\`，虚拟环境激活改为 `.\.venv\Scripts\Activate.ps1`，其余命令相同。
 
-默认输出目录为 `test-result/`。每次运行都会生成一个新的 `run_时间戳/` 目录，结果按样例分层存放：
+需要 PDF 输出的话，加上 `pdf` 格式并确保系统已安装 LibreOffice。
 
-```text
-test-result/
-└── run_YYYYMMDD_HHMMSS/
-    ├── run_manifest.json
-    └── samples/
-        └── <样例名>/
-            ├── <样例名>.json
-            ├── <样例名>.docx
-            ├── <样例名>.md
-            ├── <样例名>.pdf
-            ├── <样例名>_assets/
-            └── debug/
+## 流水线
+
+```
+图片 / PDF
+  → 版面检测（DocLayout-YOLO）
+  → OCR 文字识别（PaddleOCR v5）
+  → 表格结构识别
+  → 版面排序与分栏分析
+  → 样式推断（字号 / 对齐 / 行距 / 缩进）
+  → DOCX / Markdown / PDF 还原
 ```
 
-说明：
-- 多页 PDF 只生成一个合并后的正式结果文件
-- `debug/` 中会按页保存调试可视化图
+每一步的中间结果都会写入 JSON，可以单独拿出来做二次处理。
 
-## 5. 文档索引
+## 输出格式
 
-- 部署说明：`doc/DEPLOYMENT.md`
-- 测试流程：`doc/TESTING.md`
-- 故障排查：`doc/TROUBLESHOOTING.md`
-- 发布说明：`release note.txt`
+| 格式 | 说明 |
+|------|------|
+| **DOCX** | 保留字号、对齐、多栏、表格、图片等排版信息，可直接用 Word 编辑 |
+| **Markdown** | 适合二次加工，标题层级、表格、图片引用均保留 |
+| **PDF** | 通过 LibreOffice 从 DOCX 转换 |
+
+## 目录结构
+
+```
+DocFlow/
+├── dataset/              # 测试样本
+├── Code/                 # 源码与运行时
+│   ├── docflow_src/      # DocFlow 核心源码
+│   ├── models/           # 版面 / 检测 / 识别 / 表格模型
+│   ├── third_party/      # PaddleOCR 最小运行时
+│   ├── wheels/           # Wheel 包
+│   ├── test.py           # 测试入口
+│   └── requirement.txt   # Python 依赖
+├── test-result/          # 运行输出
+├── doc/                  # 详细文档
+│   ├── DEPLOYMENT.md     # 部署说明
+│   ├── TESTING.md        # 测试流程
+│   └── TROUBLESHOOTING.md
+└── README.md
+```
+
+## 模型与数据
+
+版面检测、OCR 识别、表格结构等模型文件：
+
+- 百度网盘：[SoC_1-1](https://pan.baidu.com/s/12ouE5owq8Ii_KigQzOeirQ) 提取码：`4phe`
+
+解压后放入 `Code/models/` 目录。
+
+## 常见问题
+
+- **模型找不到**：确认 `Code/models/` 下模型目录结构正确，可参考 `doc/DEPLOYMENT.md`
+- **PDF 输出失败**：检查 LibreOffice 是否安装且 `soffice` 在 PATH 中
+- **版面还原偏差**：debug 目录下的 `*_layout_ocr.jpg` 和 `*_sorted_layout.jpg` 会展示版面检测和排序结果，有助于定位问题
+
+更多细节见 `doc/` 目录。

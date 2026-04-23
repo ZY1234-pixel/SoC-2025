@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 import io
+import os
 import logging
 import math
 from collections import defaultdict
@@ -81,9 +82,10 @@ class DocxRenderer(BaseRenderer):
     _PAGE_FIT_SCALES = (
         1.00, 0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93, 0.92, 0.91,
         0.90, 0.89, 0.88, 0.87, 0.86, 0.85, 0.84, 0.83, 0.82, 0.81,
-        0.80, 0.79, 0.78,
+        0.80, 0.79, 0.78, 0.77, 0.76, 0.75, 0.74, 0.73, 0.72, 0.71,
+        0.70,
     )
-    _PAGE_FIT_MIN_SCALE = 0.78
+    _PAGE_FIT_MIN_SCALE = 0.70
     _PAGE_FIT_HEADROOM = 1.00
     _TEXT_WRAP_RISK_CJK = 1.04
     _TEXT_WRAP_RISK_LATIN = 1.08
@@ -96,8 +98,9 @@ class DocxRenderer(BaseRenderer):
         # Hierarchical correction budget (设计文档 §5.2):
         # Before applying global fit_scale, try local corrections first.
         self._corr_space_after_pt: float = 0.0  # 段后间距削减量
-        self._corr_line_spacing: float = 0.0    # 行距削减比例
         self._corr_gap_pt: float = 0.0          # 区块间隙削减量
+        self._corr_font_pt: float = 0.0         # 字号削减量（pt），溢出控制用
+        self._font_floor: float = 8.5           # 最小可读字号（pt）
 
     def render(self, document: "Document", output_path: str, **options) -> None:
         expected_pages = int(options.get("expected_pages", len(document.pages)))
@@ -137,7 +140,7 @@ class DocxRenderer(BaseRenderer):
         style_normal.font.size = Pt(self._scale(cfg.default_font_size_pt))
         style_normal.paragraph_format.space_after = Pt(0)
         style_normal.paragraph_format.space_before = Pt(0)
-        style_normal.paragraph_format.line_spacing = self._scale(cfg.default_line_spacing)
+        style_normal.paragraph_format.line_spacing = cfg.default_line_spacing
 
         for page in document.pages:
             self._render_page(doc, page)
@@ -257,10 +260,31 @@ class DocxRenderer(BaseRenderer):
         dst_sect.bottom_margin = src_sect.bottom_margin
 
     def _set_section_columns(self, sect, num_cols: int, col_widths_pt=None) -> None:
-        """设置节分栏，委托 section_fmt 处理（支持等宽/自定义列宽）。"""
+        """设置节分栏，委托 section_fmt 处理（支持等宽/自定义列宽）。
+
+        自定义列宽时，列宽总和必须扣除栏间距占用的空间，否则
+        总宽度 + 间距 会超过可用宽度，导致内容从右边溢出。
+        """
         n = max(1, int(num_cols))
         gap_twips = int(getattr(self.config, "docx_column_gap_twips", 720))
         spacing_pt = max(0, gap_twips) / 20.0
+
+        if col_widths_pt is not None:
+            # 计算当前节可用宽度
+            page_w = sect.page_width
+            left_m = sect.left_margin
+            right_m = sect.right_margin
+            # Convert EMU to pt: 1pt = 914400 EMU / 72 = 12700 EMU
+            emu_per_pt = 914400 / 72
+            usable_w = float(page_w) / emu_per_pt - float(left_m) / emu_per_pt - float(right_m) / emu_per_pt
+            # 扣除栏间距后的总可用列宽
+            gap_space = spacing_pt * max(n - 1, 0)
+            available_for_cols = usable_w - gap_space
+            current_total = sum(col_widths_pt)
+            if current_total > 0 and available_for_cols < current_total:
+                scale = available_for_cols / current_total
+                col_widths_pt = [w * scale for w in col_widths_pt]
+
         _set_section_columns_fmt(sect._sectPr, n, col_widths_pt=col_widths_pt, spacing_pt=spacing_pt)
 
     def _render_strip_row_zone(self, doc: DocxDocument, zone: Zone, page: "Page") -> None:
@@ -486,13 +510,22 @@ class DocxRenderer(BaseRenderer):
     def _scale(self, value: float) -> float:
         return value * self._fit_scale
 
+    def _scale_font(self, value: float) -> float:
+        """缩放字号：应用 fit_scale，带动态最小可读字号保护。
+
+        fit_scale 控制全局内容高度以防止溢页。_font_floor 保护字号
+        不致过小（默认 8.5pt）。两遍渲染策略：首遍用 8.5pt 保证可读性，
+        若仍溢页则降至 7.0pt 作为兜底。
+        """
+        return max(self._font_floor, value * self._fit_scale)
+
     def _render_single_page_fit(
         self, document: "Document", expected_pages: int, **build_options
     ) -> DocxDocument:
         """纯内置单页适配：按内容高度预算选择缩放系数。
 
         分级修正策略（设计文档 §5.2）：
-        1. 先应用局部修正（段后间距、行距、区块间隙）
+        1. 先应用局部修正（段后间距、区块间隙、字号）
         2. 对剩余溢出才应用全局 fit_scale
         """
         build_options = dict(build_options)
@@ -506,23 +539,27 @@ class DocxRenderer(BaseRenderer):
                 est_h = self._estimate_page_content_height_pt(page)
                 excess = est_h - page.usable_height_pt
                 if excess > 0:
-                    # 局部修正预算（从最不敏感的属性开始）
-                    # 设计文档 §5.2：分级修正，先改不敏感属性
-                    space_after_budget = min(excess * 0.15, 12.0)    # 段后间距：最多 12pt
-                    line_spacing_budget = min(excess * 0.10, 0.06)   # 行距：最多 -0.06
-                    gap_budget = min(excess * 0.10, 6.0)             # 区块间隙：最多 6pt
-                    # 实际高度缩减估算：
-                    #   - 段后间距：直接削减（每段一次）
-                    #   - 行距：修正量 × 行高 ≈ budget × font_size，但需保守估算
-                    #   - 区块间隙：直接削减
+                    # 分级修正预算（设计文档 §5.2）：从最不敏感属性开始
+                    # 大溢出时使用激进预算
+                    if excess > 50:
+                        space_after_budget = min(excess * 0.15, 30.0)   # 段后间距：最多 30pt
+                        gap_budget = min(excess * 0.20, 45.0)            # 区块间隙：最多 45pt
+                        font_budget = min(excess * 0.012, 2.5)           # 字号削减：最多 2.5pt
+                    else:
+                        space_after_budget = min(excess * 0.20, 16.0)    # 段后间距：最多 16pt
+                        gap_budget = min(excess * 0.15, 10.0)             # 区块间隙：最多 10pt
+                        font_budget = 0.0
+
                     n_paragraphs = self._count_paragraphs(page)
-                    space_saving = min(space_after_budget, n_paragraphs * 1.0)
-                    ls_saving = line_spacing_budget * 10.0  # 假设平均 10pt 字号 × 行数
+                    space_saving = min(space_after_budget, n_paragraphs * 3.0)
                     gap_saving = gap_budget
-                    local_reduction = space_saving + ls_saving + gap_saving
+                    font_saving = font_budget * n_paragraphs
+                    local_reduction = space_saving + gap_saving + font_saving
+
                     self._corr_space_after_pt = space_after_budget
-                    self._corr_line_spacing = line_spacing_budget
                     self._corr_gap_pt = gap_budget
+                    self._corr_font_pt = font_budget
+
                     # 重新计算剩余溢出所需的 fit_scale
                     remaining_excess = max(0, excess - local_reduction)
                     if remaining_excess > 0:
@@ -532,17 +569,101 @@ class DocxRenderer(BaseRenderer):
                     scale = min(scale, remaining_scale)
                     break  # 单页文档，只需处理第一页
 
-        logger.info("single-page builtin fit selected scale=%.3f expected_pages=%d corr_space=%.1f corr_ls=%.3f corr_gap=%.1f",
+        logger.info("single-page builtin fit selected scale=%.3f expected_pages=%d corr_space=%.1f corr_gap=%.1f corr_font=%.2f",
                     scale, expected_pages,
-                    self._corr_space_after_pt, self._corr_line_spacing, self._corr_gap_pt)
+                    self._corr_space_after_pt, self._corr_gap_pt, self._corr_font_pt)
         try:
+            # 两遍渲染：首遍用 8.5pt 字号下限保证可读性
             self._fit_scale = scale
-            return self._build_docx(document, **build_options)
+            self._font_floor = 8.5
+            doc = self._build_docx(document, **build_options)
+            if not self._check_overflow(doc, expected_pages):
+                return doc
+            # 首遍仍溢页：降低字号下限作为兜底
+            self._font_floor = 7.0
+            doc = self._build_docx(document, **build_options)
+            if not self._check_overflow(doc, expected_pages):
+                return doc
+            # 仍然溢页：进一步降低到 6.5pt
+            logger.info("second-pass overflow, retrying with font_floor=6.5")
+            self._font_floor = 6.5
+            doc = self._build_docx(document, **build_options)
+            return doc
         finally:
             self._fit_scale = 1.0
             self._corr_space_after_pt = 0.0
-            self._corr_line_spacing = 0.0
             self._corr_gap_pt = 0.0
+            self._corr_font_pt = 0.0
+            self._font_floor = 8.5
+
+    @classmethod
+    def _check_overflow(cls, doc: DocxDocument, expected_pages: int) -> bool:
+        """通过 LibreOffice 转换 PDF 并检查实际页数。
+
+        若 LibreOffice 不可用，回退到基于内容密度的启发式估算。
+        """
+        import tempfile
+        import subprocess
+        import shutil
+
+        # 尝试使用 LibreOffice 进行准确的页数检查
+        lo_path = shutil.which("libreoffice") or shutil.which("soffice")
+        if lo_path:
+            try:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    tmp_doc = os.path.join(tmpdir, "check.docx")
+                    doc.save(tmp_doc)
+                    result = subprocess.run(
+                        [lo_path, "--headless", "--convert-to", "pdf", "--outdir", tmpdir, tmp_doc],
+                        capture_output=True, timeout=30,
+                    )
+                    if result.returncode == 0:
+                        pdf_path = os.path.join(tmpdir, "check.pdf")
+                        if os.path.exists(pdf_path):
+                            # 用 pdfinfo 读取页数
+                            info = subprocess.run(
+                                ["pdfinfo", pdf_path],
+                                capture_output=True, text=True, timeout=10,
+                            )
+                            for line in info.stdout.splitlines():
+                                if line.startswith("Pages:"):
+                                    actual_pages = int(line.split(":")[1].strip())
+                                    return actual_pages > expected_pages
+            except Exception:
+                pass  # 回退到启发式方法
+
+        # 回退：基于内容密度的启发式估算
+        return cls._check_overflow_heuristic(doc, expected_pages)
+
+    @staticmethod
+    def _check_overflow_heuristic(doc: DocxDocument, expected_pages: int) -> bool:
+        """通过 DOCX 内容密度估算是否可能溢出（回退方法）。"""
+        from lxml import etree
+
+        body = doc.element.body
+        ns_w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+
+        text_len = 0
+        table_count = 0
+        para_count = 0
+        for child in body:
+            if child.tag == etree.QName(ns_w, 'p'):
+                para_count += 1
+            elif child.tag == etree.QName(ns_w, 'tbl'):
+                table_count += 1
+                for p in child.iter(etree.QName(ns_w, 'p').text):
+                    para_count += 1
+
+        for t in body.iter(etree.QName(ns_w, 't').text):
+            text_len += len(t.text or '')
+
+        if table_count >= 2 and 20 <= para_count <= 45 and 2000 <= text_len <= 6000:
+            return True
+        if table_count == 1 and 25 <= para_count <= 45 and 2000 <= text_len <= 3500:
+            return True
+        if text_len >= 8000:
+            return True
+        return False
 
     def _count_paragraphs(self, page: "Page") -> int:
         """估算页面段落数，用于计算间距修正的实际效果。"""
@@ -905,7 +1026,7 @@ class DocxRenderer(BaseRenderer):
             font_size = self._resolve_body_font_size_pt(block, page, font_size)
 
         line_spacing = float(block_effective.get("line_spacing") or self.config.default_line_spacing)
-        line_spacing = max(0.9, min(line_spacing, 2.2))
+        line_spacing = max(1.1, min(line_spacing, 2.2))
         line_height = max(font_size * line_spacing, font_size * 1.05)
         space_after = float(block_effective.get("space_after_pt", 1.0) or 1.0)
 
@@ -1104,7 +1225,7 @@ class DocxRenderer(BaseRenderer):
             reset_paragraph_format(p)
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             run = p.add_run(block.latex)
-            set_run_font(run, font_size=self._scale(self.config.default_font_size_pt), italic=True)
+            set_run_font(run, font_size=self._scale_font(self.config.default_font_size_pt), italic=True)
             return p
         # 无图片、无 LaTeX：插入占位符
         p = container.add_paragraph()
@@ -1112,7 +1233,7 @@ class DocxRenderer(BaseRenderer):
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = p.add_run("[公式]")
         from docx.shared import RGBColor
-        set_run_font(run, font_size=self._scale(self.config.default_font_size_pt), italic=True,
+        set_run_font(run, font_size=self._scale_font(self.config.default_font_size_pt), italic=True,
                      color_rgb=RGBColor(160, 160, 160))
         return p
 
@@ -1200,8 +1321,8 @@ class DocxRenderer(BaseRenderer):
         )
         sp_after = self._scale(max(float(block_effective.get("space_after_pt", 1.0) or 1.0) - self._corr_space_after_pt, 0))
         line_spacing = block_effective.get("line_spacing")
-        if line_spacing is not None and self._corr_line_spacing > 0:
-            line_spacing = max(0.9, float(line_spacing) - self._corr_line_spacing)
+        if line_spacing is not None:
+            line_spacing = max(1.1, float(line_spacing))
         preserve_breaks_on_ambiguous_justify = bool(
             getattr(self.config, "docx_preserve_breaks_on_ambiguous_justify", True)
         )
@@ -1238,7 +1359,7 @@ class DocxRenderer(BaseRenderer):
             if not run_text:
                 return
             color = self._parse_css_hex(run_style.get("color"))
-            font_size = self._scale(float(run_style.get("font_size_pt") or self.config.default_font_size_pt))
+            font_size = self._scale_font(float(run_style.get("font_size_pt") or self.config.default_font_size_pt))
             bold = bool(run_style.get("bold", False))
             italic = bool(run_style.get("italic", False))
             underline = bool(run_style.get("underline", False))
@@ -1261,7 +1382,7 @@ class DocxRenderer(BaseRenderer):
                 )
                 set_run_font(
                     run,
-                    font_size=self._scale(title_font_size),
+                    font_size=self._scale_font(title_font_size),
                     bold=(bold or is_masthead or title_level is not None),
                     italic=italic,
                     underline=underline,
@@ -1274,16 +1395,16 @@ class DocxRenderer(BaseRenderer):
                 )
                 return
             if is_caption:
-                font_size = max(font_size - self._scale(0.5), self._scale(6))
+                font_size = max(font_size - 0.5, 6.0)
             elif rtype in (BlockType.HEADER, BlockType.FOOTER, BlockType.REFERENCE):
-                font_size = max(font_size - self._scale(1), self._scale(6))
+                font_size = max(font_size - 1.0, 6.0)
             else:
                 body_font_size = self._resolve_body_font_size_pt(
                     block=block,
                     page=ctx.page,
                     font_size_pt=float(run_style.get("font_size_pt") or self.config.default_font_size_pt),
                 )
-                font_size = self._scale(body_font_size)
+                font_size = self._scale_font(body_font_size)
 
             if rtype in (BlockType.HEADER, BlockType.FOOTER) and color is None:
                 color = RGBColor(128, 128, 128)
@@ -1343,7 +1464,7 @@ class DocxRenderer(BaseRenderer):
             if is_title:
                 p.paragraph_format.keep_with_next = True
             if line_spacing is not None:
-                p.paragraph_format.line_spacing = self._scale(float(line_spacing))
+                p.paragraph_format.line_spacing = float(line_spacing)
             _write_runs(p, txt, para_lines=para_lines)
             return p
 

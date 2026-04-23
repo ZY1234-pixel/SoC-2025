@@ -275,7 +275,9 @@ class Page:
             return max(36.0, min(120.0, val))
 
         def _clamp_tb(val: float) -> float:
-            return max(24.0, min(120.0, val))
+            # 短幅横版页面（报纸等）内容密集，需要更多可用高度
+            min_tb = 24.0 if self.page_height_pt < 700 else 36.0
+            return max(min_tb, min(120.0, val))
 
         self.margin_left_pt = _clamp_lr(margin_lr)
         self.margin_right_pt = _clamp_lr(margin_lr)
