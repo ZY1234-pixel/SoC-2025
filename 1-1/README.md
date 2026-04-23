@@ -4,6 +4,9 @@
 
 `图片 / PDF -> 版面分析 + OCR -> 标准 JSON -> DOCX / Markdown / PDF`
 
+模型与数据集下载地址：
+通过网盘分享的文件：SoC_1-1
+链接: https://pan.baidu.com/s/12ouE5owq8Ii_KigQzOeirQ 提取码: 4phe
 
 ## 1. 目录结构
 
