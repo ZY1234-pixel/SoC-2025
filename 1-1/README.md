@@ -1,6 +1,6 @@
-# 图片文本解析及矢量化转换
+# 图片文本解析与矢量化转换
 
-图片型文档的版面分析与结构化还原项目。输入扫描图片 / PDF，输出保留原始排版结构的 DOCX、Markdown 与 PDF。
+图片型文档的版面分析与结构化还原模块。输入扫描图片 / PDF，输出保留原始排版结构的 DOCX、Markdown 与 PDF。
 
 ![pipeline](https://img.shields.io/badge/pipeline-OCR--%3ELayout--%3EReconstruction-blue)
 
@@ -41,7 +41,7 @@ cd Code
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirement.txt
-pip install wheels/docflow-0.3.0-py3-none-any.whl
+pip install wheels/vecdoc-0.5.0-py3-none-any.whl
 ```
 
 ### 运行测试
@@ -81,10 +81,10 @@ python test.py -i ../dataset -o ../test-result -f docx,markdown
 ## 目录结构
 
 ```
-DocFlow/
+.
 ├── dataset/              # 测试样本
 ├── Code/                 # 源码与运行时
-│   ├── docflow_src/      # DocFlow 核心源码
+│   ├── docflow_src/      # 核心源码
 │   ├── models/           # 版面 / 检测 / 识别 / 表格模型
 │   ├── third_party/      # PaddleOCR 最小运行时
 │   ├── wheels/           # Wheel 包
