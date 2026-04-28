@@ -1,0 +1,17 @@
+# 手写体识别
+
+手写体识别算法目前基于paddleX框架进行训练，代码可直接从仓库下载，详细过程见readme_ch.md，目前使用的版本为release3.4
+
+
+# 数据集路径
+
+通过网盘分享的文件：SoC_2026
+链接: https://pan.baidu.com/s/1ATr-tdhsoPOp80MZ8kBkPw?pwd=27ev 提取码: 27ev 
+--来自百度网盘超级会员v6的分享
+
+
+# ckpt路径
+
+通过网盘分享的文件：SoC_2026
+链接: https://pan.baidu.com/s/1ATr-tdhsoPOp80MZ8kBkPw?pwd=27ev 提取码: 27ev 
+--来自百度网盘超级会员v6的分享
