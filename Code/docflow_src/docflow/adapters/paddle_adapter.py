@@ -373,6 +373,9 @@ class PaddleAdapter(BaseAdapter):
         index_bias = -float(item.get("index", 0))
         category = str(item.get("category", ""))
         if category in cls._TEXTLIKE_DEDUP_CATEGORIES:
+            text = str(item.get("text", "") or "").strip()
+            if category == "title" and text.endswith(("。", "！", "？", ".", "!", "?")):
+                return (1.95, score, text_len, area, index_bias)
             return (2.0, score, text_len, area, index_bias)
         if category == "formula":
             return (1.0, score, area, text_len, index_bias)
@@ -475,7 +478,7 @@ class PaddleAdapter(BaseAdapter):
                 spatial_match = (
                     overlap_ratio >= 0.85
                     or contain_ratio >= 0.85
-                    or self._adjacent_ratio(candidate["bbox"], existing["bbox"]) >= 0.85
+                    or self._adjacent_ratio(candidate["bbox"], existing["bbox"]) >= 0.78
                 )
                 if len(short_text) >= 4 and short_text in long_text and spatial_match:
                     return "cross_category_text_duplicate"

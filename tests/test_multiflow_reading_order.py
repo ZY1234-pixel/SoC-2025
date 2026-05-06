@@ -795,3 +795,108 @@ def test_local_parallel_region_isolated_into_its_own_zone_group():
     assert page_obj.zones[1].region_kind == "local_parallel_text_band"
     assert page_obj.zones[1].region_id.startswith("local_parallel_")
     assert page_obj.zones[2].col_count == 1
+
+
+def test_subset_spanning_visual_preserves_uncovered_left_column_flow():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1022,
+                "height": 1344,
+                "blocks": [
+                    _text_block("masthead", [62, 34, 479, 70], "The world this week Business", category="title"),
+                    _text_block("c0_top", [58, 106, 272, 395], "c0 top"),
+                    _text_block("c0_mid", [58, 409, 271, 732], "c0 mid"),
+                    _text_block("c0_low", [60, 745, 269, 1017], "c0 low"),
+                    _text_block("c1_top", [289, 106, 494, 304], "c1 top"),
+                    _text_block("c1_title", [287, 339, 482, 375], "c1 title", category="title"),
+                    _text_block("c1_mid", [289, 357, 503, 696], "c1 mid"),
+                    _text_block("c1_low", [287, 711, 493, 837], "c1 low"),
+                    _text_block("c2_top", [518, 109, 721, 180], "c2 top"),
+                    _text_block("c2_mid", [517, 410, 728, 626], "c2 mid"),
+                    _text_block("c2_low", [517, 643, 733, 837], "c2 low"),
+                    _text_block("c3_top", [747, 106, 919, 144], "c3 top"),
+                    _text_block("c3_mid", [746, 161, 956, 376], "c3 mid"),
+                    _text_block("c3_low", [746, 404, 958, 838], "c3 low"),
+                    _text_block("c0_tail", [60, 1034, 268, 1231], "left tail"),
+                    _text_block("c0_end", [60, 1248, 269, 1301], "left end"),
+                    _figure_block("bottom_fig", [290, 857, 956, 1302]),
+                ],
+            }
+        ],
+    }
+
+    pipeline = RecoveryPipeline(config=RecoveryConfig(reading_order_strategy="xycutpp_hybrid"))
+    document = pipeline.build_document(page)
+    zones = document.pages[0].zones
+    assert len(zones) == 1
+    zone = zones[0]
+    ids = [block.block_id for block in zone.blocks]
+
+    assert ids.index("c0_low") < ids.index("c0_tail") < ids.index("c0_end")
+    assert ids.index("c0_end") < ids.index("c1_top")
+    assert ids.index("c3_low") < ids.index("bottom_fig")
+    assert zone.col_count == 4
+    bottom_fig = next(block for block in zone.blocks if block.block_id == "bottom_fig")
+    assert bottom_fig.spanned_cols == [1, 2, 3]
+
+
+def test_lower_wraparound_section_is_rendered_after_middle_flow():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1524,
+                "height": 1368,
+                "blocks": [
+                    _text_block("middle_title", [410, 456, 721, 522], "middle title", category="title"),
+                    _text_block("middle_body_1", [392, 538, 742, 608], "middle body 1"),
+                    _text_block("middle_body_2", [392, 610, 742, 752], "middle body 2"),
+                    _text_block("middle_body_3", [773, 776, 1124, 1064], "middle body 3"),
+                    _text_block("middle_body_4", [775, 1065, 1125, 1184], "middle body 4"),
+                    _text_block("wrap_title", [792, 1200, 1105, 1265], "wrap title", category="title"),
+                    _text_block("wrap_left_body", [775, 1281, 1125, 1352], "wrap left body"),
+                    _text_block("wrap_right_head", [1153, 776, 1334, 800], "wrap right head", category="title"),
+                    _text_block("wrap_right_top", [1154, 801, 1505, 990], "wrap right top"),
+                    _text_block("wrap_right_mid", [1154, 993, 1504, 1112], "wrap right mid"),
+                    _text_block("wrap_right_low", [1154, 1112, 1505, 1352], "wrap right low"),
+                ],
+            }
+        ],
+    }
+
+    pipeline = RecoveryPipeline(config=RecoveryConfig(reading_order_strategy="xycutpp_hybrid"))
+    document = pipeline.build_document(page)
+    assert len(document.pages[0].zones) == 2
+    middle_zone = document.pages[0].zones[0]
+    wrap_zone = document.pages[0].zones[1]
+    middle_ids = [block.block_id for block in middle_zone.blocks]
+    wrap_ids = [block.block_id for block in wrap_zone.blocks]
+
+    assert middle_ids == [
+        "middle_title",
+        "middle_body_1",
+        "middle_body_2",
+        "middle_body_3",
+        "middle_body_4",
+    ]
+    assert wrap_ids == [
+        "wrap_title",
+        "wrap_left_body",
+        "wrap_right_head",
+        "wrap_right_top",
+        "wrap_right_mid",
+        "wrap_right_low",
+    ]
+    assert middle_zone.col_count == 3
+    assert wrap_zone.col_count == 2
+    assert wrap_zone.region_kind == "wraparound_section"
+    by_id = {block.block_id: block for block in wrap_zone.blocks}
+    assert by_id["wrap_title"].col_index == 0
+    assert by_id["wrap_right_head"].col_index == 1
+    assert by_id["wrap_title"].attributes["xycutpp_proto"]["lower_section_body_anchor_id"] == "wrap_left_body"

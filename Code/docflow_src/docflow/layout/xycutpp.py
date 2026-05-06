@@ -1781,6 +1781,9 @@ def _enforce_figure_family_order(
         family_counter += 1
         family_id = f"figure_family_{family_counter}"
         below_figure = _cy(caption) >= _cy(figure) or _y1(caption) >= _y2(figure) - 8.0
+        caption.col_count = int(getattr(figure, "col_count", 1) or 1)
+        caption.col_index = int(getattr(figure, "col_index", 0) or 0)
+        caption.spanned_cols = list(getattr(figure, "spanned_cols", []) or [caption.col_index])
         curr_idx = seq.index(caption)
         figure_idx = seq.index(figure)
         if below_figure:
@@ -2385,6 +2388,7 @@ def _enforce_spanning_visual_after_covered_columns(
 
     page_w = max(float(image_width), 1.0)
     page_h = max(float(image_height or 0), max((_y2(b) for b in seq), default=1.0))
+
     for visual in list(seq):
         if visual.block_type not in _VISUAL_TYPES or _w(visual) < page_w * 0.42:
             continue
@@ -2421,10 +2425,62 @@ def _enforce_spanning_visual_after_covered_columns(
         if len(covered) < 2 and not preceding_uncovered:
             continue
 
+        if preceding_uncovered:
+            prefix_by_col: dict[int, List["Block"]] = {}
+            for block in preceding_uncovered:
+                col = int((getattr(block, "spanned_cols", []) or [getattr(block, "col_index", 0)])[0])
+                prefix_by_col.setdefault(col, []).append(block)
+
+            moving_prefix_ids = {id(block) for block in preceding_uncovered}
+            anchors: dict[int, "Block"] = {}
+            for col, members in prefix_by_col.items():
+                members.sort(key=lambda b: (_y1(b), _x1(b), _y2(b), _x2(b)))
+                first_prefix_y = min(_y1(block) for block in members)
+                same_col_predecessors = [
+                    block for block in seq
+                    if id(block) not in moving_prefix_ids
+                    and block is not visual
+                    and block.block_type in _TEXTLIKE_TYPES
+                    and block.block_type not in _STRIP_TYPES
+                    and len(getattr(block, "spanned_cols", []) or [getattr(block, "col_index", 0)]) == 1
+                    and int((getattr(block, "spanned_cols", []) or [getattr(block, "col_index", 0)])[0]) == col
+                    and _y1(block) <= first_prefix_y
+                ]
+                if same_col_predecessors:
+                    anchors[col] = max(same_col_predecessors, key=lambda b: seq.index(b))
+
+            if anchors:
+                anchored_cols = {id(anchor): col for col, anchor in anchors.items()}
+                rebuilt: List["Block"] = []
+                inserted_cols: set[int] = set()
+                for block in seq:
+                    if id(block) in moving_prefix_ids:
+                        continue
+                    rebuilt.append(block)
+                    anchored_col = anchored_cols.get(id(block))
+                    if anchored_col is not None and anchored_col not in inserted_cols:
+                        rebuilt.extend(prefix_by_col[anchored_col])
+                        inserted_cols.add(anchored_col)
+                for col in sorted(prefix_by_col):
+                    if col not in inserted_cols:
+                        rebuilt.extend(prefix_by_col[col])
+                seq = rebuilt
+                for block in preceding_uncovered:
+                    _mark(
+                        block,
+                        spanning_visual_uncovered_prefix=True,
+                        spanning_visual_anchor_id=_block_id(visual),
+                    )
+
         visual_idx = seq.index(visual)
         blockers = covered + preceding_uncovered
         last_idx = max(seq.index(blk) for blk in blockers)
         if visual_idx > last_idx:
+            _mark(
+                visual,
+                spanning_visual_after_columns=True,
+                spanning_visual_waits_for_uncovered_prefix=bool(preceding_uncovered),
+            )
             continue
         seq.pop(visual_idx)
         if visual_idx < last_idx:
@@ -2435,6 +2491,176 @@ def _enforce_spanning_visual_after_covered_columns(
             spanning_visual_after_columns=True,
             spanning_visual_waits_for_uncovered_prefix=bool(preceding_uncovered),
         )
+    return seq
+
+
+def _enforce_lower_section_wraparound_columns(
+    ordered: Sequence["Block"],
+    *,
+    image_width: int,
+    image_height: Optional[int],
+) -> List["Block"]:
+    """Recover lower newspaper wraparound continuations.
+
+    XY-Cut++ can legitimately split a bottom article into a title/body column
+    and a right continuation column.  This rule only fires when the title-body
+    pair reaches the page bottom and the candidate right stack is the plausible
+    continuation area; otherwise the global column skeleton is left untouched.
+    """
+    seq = list(ordered)
+    if len(seq) < 6:
+        return seq
+
+    page_w = max(float(image_width), 1.0)
+    page_h = max(float(image_height or 0), max((_y2(b) for b in seq), default=1.0))
+    academic_cues = sum(
+        1 for block in seq
+        if block.block_type in {
+            BlockType.TABLE,
+            BlockType.TABLE_CAPTION,
+            BlockType.FORMULA,
+            BlockType.EQUATION,
+            BlockType.FORMULA_CAPTION,
+        }
+    )
+    if academic_cues >= 3:
+        return seq
+    if _looks_like_stable_academic_two_column_page(
+        seq,
+        image_width=image_width,
+        image_height=image_height,
+    ):
+        return seq
+
+    region_counter = 0
+    for title in sorted([b for b in seq if b.block_type == BlockType.TITLE], key=lambda b: (_y1(b), _x1(b)), reverse=True):
+        if _y1(title) < page_h * 0.58:
+            continue
+        if _w(title) < page_w * 0.16 or _w(title) > page_w * 0.42:
+            continue
+
+        left_body_candidates = [
+            block for block in seq
+            if block is not title
+            and block.block_type in _TEXTLIKE_TYPES
+            and block.block_type not in _STRIP_TYPES
+            and _y1(block) >= _y2(title) - 8.0
+            and _y1(block) - _y2(title) <= max(90.0, page_h * 0.08)
+            and _projection_overlap_ratio_x(title, block) >= 0.18
+        ]
+        if not left_body_candidates:
+            continue
+        first_body = min(left_body_candidates, key=lambda b: (_y1(b), abs(_cx(b) - _cx(title))))
+        if _y2(first_body) < page_h * 0.92:
+            continue
+
+        left_ids = {id(title), id(first_body)}
+        right_stack = [
+            block for block in seq
+            if id(block) not in left_ids
+            and block.block_type in (_TEXTLIKE_TYPES | {BlockType.TITLE})
+            and block.block_type not in _STRIP_TYPES
+            and _x1(block) >= max(_x2(title), _x2(first_body)) - page_w * 0.02
+            and _x1(block) - _x1(first_body) >= page_w * 0.18
+            and _y1(block) >= _y1(title) - max(460.0, page_h * 0.34)
+            and _y2(block) <= max(_y2(first_body), _y2(title)) + max(120.0, page_h * 0.10)
+        ]
+        if len(right_stack) < 2:
+            title_idx = seq.index(title)
+            body_idx = seq.index(first_body)
+            if title_idx > body_idx:
+                seq.pop(title_idx)
+                body_idx = seq.index(first_body)
+                seq.insert(body_idx, title)
+            _mark(
+                title,
+                lower_section_body_anchor_id=_block_id(first_body),
+                lower_section_adjacency=True,
+            )
+            _mark(
+                first_body,
+                lower_section_title_anchor_id=_block_id(title),
+                lower_section_adjacency=True,
+            )
+            continue
+
+        right_stack = sorted(right_stack, key=lambda b: (_y1(b), _x1(b)))
+        if min(_y1(block) for block in right_stack) > _y1(title) + page_h * 0.04:
+            continue
+
+        region_counter += 1
+        region_id = f"wraparound_section_{region_counter}"
+        left_column = [title, first_body]
+        moving = left_column + right_stack
+        moving_ids = {id(block) for block in moving}
+        remain = [block for block in seq if id(block) not in moving_ids]
+
+        preceding_context = [
+            block for block in seq
+            if id(block) not in moving_ids
+            and _y1(block) < _y1(title)
+            and (
+                block.block_type in (_VISUAL_TYPES | _CAPTION_TYPES)
+                or _x1(block) < _x1(title) - page_w * 0.03
+                or (
+                    block.block_type in _TEXTLIKE_TYPES
+                    and _projection_overlap_ratio_x(title, block) >= 0.18
+                )
+            )
+        ]
+        if preceding_context:
+            anchor_idx = max(seq.index(block) for block in preceding_context)
+            anchor = seq[anchor_idx]
+            insert_pos = 0
+            for idx, block in enumerate(remain):
+                if block is anchor:
+                    insert_pos = idx + 1
+                    break
+            else:
+                insert_pos = len(remain)
+        else:
+            anchor_idx = min(seq.index(block) for block in moving)
+            insert_pos = 0
+            for idx, block in enumerate(remain):
+                if seq.index(block) > anchor_idx:
+                    insert_pos = idx
+                    break
+            else:
+                insert_pos = len(remain)
+
+        title_idx = seq.index(title)
+        body_idx = seq.index(first_body)
+        if title_idx > body_idx:
+            seq.pop(title_idx)
+            body_idx = seq.index(first_body)
+            seq.insert(body_idx, title)
+
+        for block in left_column:
+            block.col_count = 2
+            block.col_index = 0
+            block.spanned_cols = [0]
+            _mark(
+                block,
+                region_id=region_id,
+                region_kind="wraparound_section",
+                region_role="left_column",
+                lower_section_adjacency=True,
+            )
+        _mark(title, lower_section_body_anchor_id=_block_id(first_body))
+        _mark(first_body, lower_section_title_anchor_id=_block_id(title))
+        for block in right_stack:
+            block.col_count = 2
+            block.col_index = 1
+            block.spanned_cols = [1]
+            _mark(
+                block,
+                region_id=region_id,
+                region_kind="wraparound_section",
+                region_role="right_continuation",
+                wraparound_continues_after_id=_block_id(first_body),
+            )
+
+        seq = remain[:insert_pos] + moving + remain[insert_pos:]
 
     return seq
 
@@ -3159,6 +3385,11 @@ def postprocess_xycutpp_local_attachments(
         image_height=image_height,
     )
     seq = _enforce_figure_family_order(
+        seq,
+        image_width=image_width,
+        image_height=image_height,
+    )
+    seq = _enforce_lower_section_wraparound_columns(
         seq,
         image_width=image_width,
         image_height=image_height,

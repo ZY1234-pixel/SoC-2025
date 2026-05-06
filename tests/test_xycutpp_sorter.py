@@ -338,6 +338,39 @@ def test_xycutpp_keeps_single_figure_caption_with_figure_before_lower_flows():
     assert ids.index("right_section_title") < ids.index("right_section_body")
 
 
+def test_xycutpp_keeps_lower_title_body_before_same_article_continuation():
+    blocks = [
+        _text_block("middle_title", (410, 456, 721, 522), BlockType.TITLE),
+        _text_block("middle_body_1", (392, 538, 742, 608)),
+        _text_block("middle_body_2", (392, 610, 742, 752)),
+        _text_block("middle_body_3", (773, 776, 1124, 1064)),
+        _text_block("middle_body_4", (775, 1065, 1125, 1184)),
+        _text_block("wrap_title", (792, 1200, 1105, 1265), BlockType.TITLE),
+        _text_block("wrap_left_body", (775, 1281, 1125, 1352)),
+        _text_block("wrap_right_head", (1153, 776, 1334, 800), BlockType.TITLE),
+        _text_block("wrap_right_top", (1154, 801, 1505, 990)),
+        _text_block("wrap_right_mid", (1154, 993, 1504, 1112)),
+        _text_block("wrap_right_low", (1154, 1112, 1505, 1352)),
+    ]
+
+    ordered = sort_layout(
+        blocks,
+        image_width=1524,
+        image_height=1368,
+        strategy="xycutpp",
+    )
+    ids = [blk.block_id for blk in ordered]
+    by_id = {blk.block_id: blk for blk in ordered}
+
+    assert ids.index("wrap_title") < ids.index("wrap_left_body") < ids.index("wrap_right_head")
+    assert ids.index("wrap_right_head") < ids.index("wrap_right_top") < ids.index("wrap_right_mid")
+    assert by_id["wrap_title"].col_count == 2
+    assert by_id["wrap_title"].col_index == 0
+    assert by_id["wrap_right_head"].col_index == 1
+    assert by_id["wrap_title"].attributes["xycutpp_proto"]["lower_section_body_anchor_id"] == "wrap_left_body"
+    assert by_id["wrap_right_head"].attributes["xycutpp_proto"]["region_kind"] == "wraparound_section"
+
+
 def test_xycutpp_keeps_parallel_figure_group_before_following_section():
     blocks = [
         _figure_block("left_fig", (220, 225, 715, 594)),
@@ -465,8 +498,11 @@ def test_xycutpp_delays_subset_spanning_visual_until_uncovered_left_column_tail(
     by_id = {blk.block_id: blk for blk in ordered}
 
     assert by_id["bottom_fig"].spanned_cols == [1, 2, 3]
+    assert ordered.index(by_id["c0_low"]) < ordered.index(by_id["c0_tail"]) < ordered.index(by_id["c0_end"])
     assert ordered.index(by_id["c0_tail"]) < ordered.index(by_id["bottom_fig"])
     assert ordered.index(by_id["c0_end"]) < ordered.index(by_id["bottom_fig"])
+    assert by_id["bottom_fig"].attributes["xycutpp_proto"]["spanning_visual_waits_for_uncovered_prefix"] is True
+    assert by_id["c0_tail"].attributes["xycutpp_proto"]["spanning_visual_anchor_id"] == "bottom_fig"
 
 
 def test_xycutpp_keeps_local_title_after_prior_same_column_context():

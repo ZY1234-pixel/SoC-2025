@@ -90,6 +90,33 @@ def test_text_block_bbox_expands_to_cover_text_line_polys() -> None:
     assert block["bbox"] == [20.0, 58.0, 160.0, 150.0]
 
 
+def test_sentence_like_title_duplicate_does_not_suppress_adjacent_text() -> None:
+    adapter = PaddleAdapter()
+    results = [
+        {
+            "type": "title",
+            "bbox": [1153, 776, 1329, 797],
+            "score": 0.49,
+            "res": [{"text": "瓦的北红海省博物馆。"}],
+        },
+        {
+            "type": "text",
+            "bbox": [1154, 801, 1505, 990],
+            "score": 0.30,
+            "res": [
+                {"text": "瓦的北红海省博物馆。"},
+                {"text": "博物馆二层陈列着一个发掘自阿杜利斯古城的中国古代陶制酒器。"},
+            ],
+        },
+    ]
+
+    filtered, report = adapter._suppress_nested_duplicates(results)
+
+    assert len(filtered) == 1
+    assert filtered[0]["type"] == "text"
+    assert any(entry["reason"] == "cross_category_text_duplicate" for entry in report)
+
+
 def test_title_bbox_trims_leading_isolated_formula_number() -> None:
     adapter = PaddleAdapter()
     image = np.zeros((700, 1000, 3), dtype=np.uint8)
