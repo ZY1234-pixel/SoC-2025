@@ -306,6 +306,38 @@ def test_xycutpp_later_column_title_does_not_anchor_to_adjacent_column_text():
     assert proto.get("restore_anchor_id") == "right_top"
 
 
+def test_xycutpp_keeps_single_figure_caption_with_figure_before_lower_flows():
+    blocks = [
+        _text_block("page_title", (130, 34, 1386, 135), BlockType.TITLE),
+        _text_block("byline", (589, 159, 931, 184)),
+        _text_block("left_intro1", (9, 201, 361, 345)),
+        _text_block("left_intro2", (11, 346, 361, 442)),
+        _text_block("mid_intro1", (392, 201, 742, 296)),
+        _text_block("mid_intro2", (392, 298, 743, 442)),
+        _figure_block("wide_fig", (774, 199, 1504, 692)),
+        _text_block("fig_cap", (812, 705, 1486, 752), BlockType.FIGURE_CAPTION),
+        _text_block("left_title", (28, 456, 342, 521), BlockType.TITLE),
+        _text_block("left_section", (11, 538, 360, 657)),
+        _text_block("middle_title", (410, 456, 721, 523), BlockType.TITLE),
+        _text_block("middle_section", (392, 538, 742, 608)),
+        _text_block("right_section_title", (1153, 776, 1334, 800), BlockType.TITLE),
+        _text_block("right_section_body", (1154, 801, 1505, 990)),
+    ]
+
+    ordered = sort_layout(
+        blocks,
+        image_width=1524,
+        image_height=1368,
+        strategy="xycutpp",
+    )
+    ids = [blk.block_id for blk in ordered]
+
+    assert ids.index("wide_fig") + 1 == ids.index("fig_cap")
+    assert ids.index("fig_cap") < ids.index("left_section")
+    assert ids.index("fig_cap") < ids.index("middle_section")
+    assert ids.index("right_section_title") < ids.index("right_section_body")
+
+
 def test_xycutpp_keeps_parallel_figure_group_before_following_section():
     blocks = [
         _figure_block("left_fig", (220, 225, 715, 594)),
@@ -401,6 +433,40 @@ def test_xycutpp_column_metadata_uses_body_anchors_not_wide_titles():
     assert ordered.index(by_id["c1_title"]) < ordered.index(by_id["c1_mid"])
     assert by_id["masthead"].spanned_cols == [0, 1]
     assert by_id["bottom_fig"].spanned_cols == [1, 2, 3]
+
+
+def test_xycutpp_delays_subset_spanning_visual_until_uncovered_left_column_tail():
+    blocks = [
+        _text_block("masthead", (62, 34, 479, 70), BlockType.TITLE),
+        _text_block("c0_top", (58, 106, 272, 395)),
+        _text_block("c0_mid", (58, 409, 271, 732)),
+        _text_block("c0_low", (60, 745, 269, 1017)),
+        _text_block("c0_tail", (60, 1034, 268, 1231)),
+        _text_block("c0_end", (60, 1248, 269, 1301)),
+        _text_block("c1_top", (289, 106, 494, 304)),
+        _text_block("c1_title", (287, 339, 482, 375), BlockType.TITLE),
+        _text_block("c1_mid", (289, 357, 503, 696)),
+        _text_block("c1_low", (287, 711, 493, 837)),
+        _text_block("c2_top", (518, 109, 721, 180)),
+        _text_block("c2_mid", (517, 410, 728, 626)),
+        _text_block("c2_low", (517, 643, 733, 837)),
+        _text_block("c3_top", (747, 106, 919, 144)),
+        _text_block("c3_mid", (746, 161, 956, 376)),
+        _text_block("c3_low", (746, 404, 958, 838)),
+        _figure_block("bottom_fig", (290, 857, 956, 1302)),
+    ]
+
+    ordered = sort_layout(
+        blocks,
+        image_width=1022,
+        image_height=1344,
+        strategy="xycutpp",
+    )
+    by_id = {blk.block_id: blk for blk in ordered}
+
+    assert by_id["bottom_fig"].spanned_cols == [1, 2, 3]
+    assert ordered.index(by_id["c0_tail"]) < ordered.index(by_id["bottom_fig"])
+    assert ordered.index(by_id["c0_end"]) < ordered.index(by_id["bottom_fig"])
 
 
 def test_xycutpp_keeps_local_title_after_prior_same_column_context():
@@ -676,6 +742,9 @@ def test_xycutpp_keeps_spanning_article_title_and_subtitle_before_column_body():
         strategy="xycutpp",
     )
     ids = [blk.block_id for blk in ordered]
+    by_id = {blk.block_id: blk for blk in ordered}
 
     assert ids.index("section") < ids.index("title") < ids.index("subtitle") < ids.index("c1a")
     assert ids.index("c1a") < ids.index("c1b") < ids.index("c2a") < ids.index("c2b") < ids.index("c3a")
+    proto = (by_id["title"].attributes or {}).get("xycutpp_proto", {})
+    assert proto.get("region_kind") == "spanning_article_band"

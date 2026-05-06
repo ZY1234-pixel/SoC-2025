@@ -1190,6 +1190,20 @@ class RecoveryPipeline:
             attrs = getattr(block, "attributes", None) or {}
             return str(attrs.get("flow_kind", ""))
 
+        def _region_id(block: Block) -> str:
+            attrs = getattr(block, "attributes", None) or {}
+            debug = attrs.get("xycutpp_proto", {}) if isinstance(attrs, dict) else {}
+            if isinstance(debug, dict):
+                return str(debug.get("region_id", "") or "")
+            return ""
+
+        def _region_kind(block: Block) -> str:
+            attrs = getattr(block, "attributes", None) or {}
+            debug = attrs.get("xycutpp_proto", {}) if isinstance(attrs, dict) else {}
+            if isinstance(debug, dict):
+                return str(debug.get("region_kind", "") or "")
+            return ""
+
         def _is_top_strip_block(block: Block) -> bool:
             if block.block_type not in _STRIP_TYPES:
                 return False
@@ -1234,11 +1248,19 @@ class RecoveryPipeline:
         current_col_count: int = blocks[0].col_count
         current_flow_id: str = _flow_id(blocks[0])
         current_flow_kind: str = _flow_kind(blocks[0])
+        current_region_id: str = _region_id(blocks[0])
+        current_region_kind: str = _region_kind(blocks[0])
 
         for block in blocks[1:]:
             block_flow_id = _flow_id(block)
             block_flow_kind = _flow_kind(block)
-            if block.col_count == current_col_count and block_flow_id == current_flow_id:
+            block_region_id = _region_id(block)
+            block_region_kind = _region_kind(block)
+            if (
+                block.col_count == current_col_count
+                and block_flow_id == current_flow_id
+                and block_region_id == current_region_id
+            ):
                 current_blocks.append(block)
             else:
                 has_spanned = any(
@@ -1250,11 +1272,15 @@ class RecoveryPipeline:
                     has_spanned=has_spanned,
                     flow_id=current_flow_id,
                     flow_kind=current_flow_kind,
+                    region_id=current_region_id,
+                    region_kind=current_region_kind,
                 ))
                 current_blocks = [block]
                 current_col_count = block.col_count
                 current_flow_id = block_flow_id
                 current_flow_kind = block_flow_kind
+                current_region_id = block_region_id
+                current_region_kind = block_region_kind
 
         # 输出最后一组
         has_spanned = any(len(b.spanned_cols) > 1 for b in current_blocks)
@@ -1264,6 +1290,8 @@ class RecoveryPipeline:
             has_spanned=has_spanned,
             flow_id=current_flow_id,
             flow_kind=current_flow_kind,
+            region_id=current_region_id,
+            region_kind=current_region_kind,
         ))
 
         # 后处理：将微小单栏区域吸收到相邻的多栏区域
@@ -1348,6 +1376,8 @@ class RecoveryPipeline:
                             has_spanned=has_spanned,
                             flow_id=_flow_id(remain[0]) if remain else "",
                             flow_kind=_flow_kind(remain[0]) if remain else "",
+                            region_id=_region_id(remain[0]) if remain else "",
+                            region_kind=_region_kind(remain[0]) if remain else "",
                         ))
                     idx += 1
                     continue
@@ -1390,6 +1420,8 @@ class RecoveryPipeline:
                             has_spanned=any(len(b.spanned_cols) > 1 for b in remain),
                             flow_id=_flow_id(remain[0]) if remain else "",
                             flow_kind=_flow_kind(remain[0]) if remain else "",
+                            region_id=_region_id(remain[0]) if remain else "",
+                            region_kind=_region_kind(remain[0]) if remain else "",
                         ))
                     idx += 1
                     continue
@@ -1406,6 +1438,7 @@ class RecoveryPipeline:
                 if (
                     zone.col_count == prev.col_count
                     and zone.flow_id == prev.flow_id
+                    and zone.region_id == prev.region_id
                     and zone.rendering_strategy != "strip_row"
                     and prev.rendering_strategy != "strip_row"
                 ):
@@ -1423,6 +1456,8 @@ class RecoveryPipeline:
                 has_spanned=False,
                 flow_id="",
                 flow_kind="",
+                region_id="",
+                region_kind="",
             ))
         if suffix_strip_blocks:
             zones.append(Zone(
@@ -1431,6 +1466,8 @@ class RecoveryPipeline:
                 has_spanned=False,
                 flow_id="",
                 flow_kind="",
+                region_id="",
+                region_kind="",
             ))
 
         return zones

@@ -70,6 +70,8 @@ def build_render_plan(document, output_format: str = "docx") -> dict:
                     "zone_index": zi,
                     "flow_id": getattr(zone, "flow_id", ""),
                     "flow_kind": getattr(zone, "flow_kind", ""),
+                    "region_id": getattr(zone, "region_id", ""),
+                    "region_kind": getattr(zone, "region_kind", ""),
                     "col_count": zone.col_count,
                     "has_spanned": zone.has_spanned,
                     "rendering_strategy": zone.rendering_strategy,

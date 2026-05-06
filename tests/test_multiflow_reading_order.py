@@ -755,3 +755,43 @@ def test_exam_like_two_column_page_refreshes_profile_and_render_mode():
     assert page_obj.attributes["layout_profile"] == "academic_two_col"
     assert page_obj.attributes["render_mode"] == "native_columns"
     assert max(zone.col_count for zone in page_obj.zones) == 2
+
+
+def test_local_parallel_region_isolated_into_its_own_zone_group():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1654,
+                "height": 2339,
+                "blocks": [
+                    _text_block("intro_1", [145, 139, 574, 177], "Intro line 1"),
+                    _text_block("intro_2", [140, 202, 1487, 376], "Wide intro paragraph\nMore intro"),
+                    _text_block("q25", [143, 919, 854, 957], "25. Question line"),
+                    _text_block("mark_b", [810, 984, 842, 1018], "B"),
+                    _text_block("left_head", [172, 1121, 544, 1196], "Dear students"),
+                    _text_block("left_body", [167, 1204, 549, 1769], "Left notice\nLeft detail\nLeft detail"),
+                    _text_block("left_sig", [300, 1808, 512, 1895], "English Club\nMarch 3"),
+                    _text_block("mid_body", [556, 1108, 940, 1847], "Middle notice\nMiddle detail\nMiddle detail"),
+                    _text_block("mid_sig", [660, 1849, 898, 1939], "Students Union\nMarch 11"),
+                    _text_block("right_title", [1115, 1118, 1223, 1156], "Found", category="title"),
+                    _text_block("right_body", [955, 1206, 1329, 1506], "Right notice\nRight detail\nRight detail"),
+                    _text_block("right_sig", [952, 1761, 1187, 1897], "Chen Dong\nMarch 2"),
+                    _text_block("tail", [145, 2046, 1134, 2085], "Tail prompt"),
+                ],
+            }
+        ],
+    }
+
+    pipeline = RecoveryPipeline(config=RecoveryConfig(reading_order_strategy="xycutpp_hybrid"))
+    document = pipeline.build_document(page)
+    page_obj = document.pages[0]
+
+    assert len(page_obj.zones) == 3
+    assert page_obj.zones[0].col_count == 1
+    assert page_obj.zones[1].col_count == 3
+    assert page_obj.zones[1].region_kind == "local_parallel_text_band"
+    assert page_obj.zones[1].region_id.startswith("local_parallel_")
+    assert page_obj.zones[2].col_count == 1

@@ -1528,6 +1528,35 @@ _INLINE_EQUATION_LABEL_RE = re.compile(r"^\(\s*\d+[a-zA-Z]?\s*\)$")
 _NUMBERED_SECTION_RE = re.compile(r"^\s*\d+(?:\.\d+)*\b")
 
 
+@dataclass(frozen=True)
+class _LocalParallelRegion:
+    region_id: str
+    region_kind: str
+    blocks: tuple["Block", ...]
+    columns: tuple[tuple["Block", ...], ...]
+    bounds: tuple[tuple[float, float], ...]
+    top: float
+    bottom: float
+
+
+@dataclass(frozen=True)
+class _SpanningArticleRegion:
+    region_id: str
+    region_kind: str
+    title: "Block"
+    subtitle: "Block"
+    columns: tuple[tuple["Block", ...], ...]
+    visuals: tuple["Block", ...]
+    captions: tuple["Block", ...]
+
+
+@dataclass(frozen=True)
+class _RegionPlacement:
+    first_idx: int
+    last_idx: int
+    prefix: tuple["Block", ...]
+
+
 def _is_inline_equation_label(block: "Block") -> bool:
     if block.block_type not in _CAPTION_TYPES:
         return False
@@ -1682,6 +1711,127 @@ def _enforce_table_family_order(
             target_idx -= 1
         seq.insert(target_idx, footnote)
         _mark(footnote, table_family_anchor_id=_block_id(table), table_family_role="footnote")
+
+    return seq
+
+
+def _best_figure_for_caption(
+    caption: "Block",
+    ordered: Sequence["Block"],
+    *,
+    image_width: int,
+    image_height: Optional[int],
+) -> "Block" | None:
+    page_w = max(float(image_width), 1.0)
+    page_h = max(float(image_height or 0), max((_y2(b) for b in ordered), default=1.0))
+    max_gap = max(72.0, page_h * 0.08)
+    candidates: List[tuple[int, float, float, float, float, "Block"]] = []
+    for figure in ordered:
+        if figure.block_type != BlockType.FIGURE:
+            continue
+        x_overlap = _projection_overlap_ratio_x(caption, figure)
+        center_inside = _x1(figure) - page_w * 0.03 <= _cx(caption) <= _x2(figure) + page_w * 0.03
+        if x_overlap < 0.18 and not center_inside:
+            continue
+        if _y1(caption) >= _y2(figure) - 8.0:
+            vertical_gap = max(0.0, _y1(caption) - _y2(figure))
+            side_bias = 0
+        elif _y2(caption) <= _y1(figure) + 8.0:
+            vertical_gap = max(0.0, _y1(figure) - _y2(caption))
+            side_bias = 1
+        else:
+            vertical_gap = 0.0
+            side_bias = 0 if _cy(caption) >= _cy(figure) else 1
+        if vertical_gap > max_gap:
+            continue
+        center_dx = abs(_cx(caption) - _cx(figure))
+        candidates.append((side_bias, vertical_gap, center_dx, -x_overlap, _y1(figure), figure))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4], _x1(item[5])))
+    return candidates[0][5]
+
+
+def _enforce_figure_family_order(
+    ordered: Sequence["Block"],
+    *,
+    image_width: int,
+    image_height: Optional[int],
+) -> List["Block"]:
+    seq = list(ordered)
+    captions = [blk for blk in seq if blk.block_type == BlockType.FIGURE_CAPTION]
+    if not captions:
+        return seq
+
+    captions.sort(key=lambda b: (_y1(b), _x1(b), _y2(b), _x2(b)))
+    family_counter = 0
+    for caption in captions:
+        proto = (getattr(caption, "attributes", None) or {}).get("xycutpp_proto", {})
+        if isinstance(proto, dict) and proto.get("figure_group_size"):
+            continue
+        figure = _best_figure_for_caption(
+            caption,
+            seq,
+            image_width=image_width,
+            image_height=image_height,
+        )
+        if figure is None:
+            continue
+
+        family_counter += 1
+        family_id = f"figure_family_{family_counter}"
+        below_figure = _cy(caption) >= _cy(figure) or _y1(caption) >= _y2(figure) - 8.0
+        curr_idx = seq.index(caption)
+        figure_idx = seq.index(figure)
+        if below_figure:
+            target_idx = figure_idx + 1
+            while target_idx < len(seq):
+                next_block = seq[target_idx]
+                next_proto = (getattr(next_block, "attributes", None) or {}).get("xycutpp_proto", {})
+                if (
+                    next_block.block_type == BlockType.FIGURE_CAPTION
+                    and isinstance(next_proto, dict)
+                    and next_proto.get("figure_family_anchor_id") == _block_id(figure)
+                ):
+                    target_idx += 1
+                    continue
+                break
+        else:
+            target_idx = figure_idx
+
+        if curr_idx == target_idx or (below_figure and curr_idx == target_idx - 1):
+            _mark(
+                figure,
+                region_id=family_id,
+                region_kind="figure_family",
+                region_role="visual",
+            )
+            _mark(
+                caption,
+                figure_family_anchor_id=_block_id(figure),
+                region_id=family_id,
+                region_kind="figure_family",
+                region_role="caption",
+            )
+            continue
+
+        seq.pop(curr_idx)
+        if curr_idx < target_idx:
+            target_idx -= 1
+        seq.insert(target_idx, caption)
+        _mark(
+            figure,
+            region_id=family_id,
+            region_kind="figure_family",
+            region_role="visual",
+        )
+        _mark(
+            caption,
+            figure_family_anchor_id=_block_id(figure),
+            region_id=family_id,
+            region_kind="figure_family",
+            region_role="caption",
+        )
 
     return seq
 
@@ -2250,18 +2400,41 @@ def _enforce_spanning_visual_after_covered_columns(
             and _y2(blk) <= _y1(visual) + 8.0
             and _y1(visual) - _y2(blk) <= max(96.0, page_h * 0.12)
         ]
-        if len(covered) < 2:
+
+        spanned_cols = [int(col) for col in (getattr(visual, "spanned_cols", []) or [getattr(visual, "col_index", 0)])]
+        first_spanned_col = min(spanned_cols) if spanned_cols else int(getattr(visual, "col_index", 0))
+        visual_col_count = int(getattr(visual, "col_count", 1) or 1)
+        band_slack = max(48.0, page_h * 0.04)
+        preceding_uncovered = [
+            blk for blk in seq
+            if len(spanned_cols) > 1
+            and blk is not visual
+            and blk.block_type in _TEXTLIKE_TYPES
+            and blk.block_type not in _STRIP_TYPES
+            and len(getattr(blk, "spanned_cols", []) or [getattr(blk, "col_index", 0)]) == 1
+            and int((getattr(blk, "spanned_cols", []) or [getattr(blk, "col_index", 0)])[0]) < first_spanned_col
+            and int(getattr(blk, "col_count", visual_col_count) or visual_col_count) == visual_col_count
+            and _y1(blk) >= _y1(visual) - band_slack
+            and _y1(blk) <= _y2(visual) + band_slack
+            and _y2(blk) > _y1(visual) - band_slack
+        ]
+        if len(covered) < 2 and not preceding_uncovered:
             continue
 
         visual_idx = seq.index(visual)
-        last_idx = max(seq.index(blk) for blk in covered)
+        blockers = covered + preceding_uncovered
+        last_idx = max(seq.index(blk) for blk in blockers)
         if visual_idx > last_idx:
             continue
         seq.pop(visual_idx)
         if visual_idx < last_idx:
             last_idx -= 1
         seq.insert(last_idx + 1, visual)
-        _mark(visual, spanning_visual_after_columns=True)
+        _mark(
+            visual,
+            spanning_visual_after_columns=True,
+            spanning_visual_waits_for_uncovered_prefix=bool(preceding_uncovered),
+        )
 
     return seq
 
@@ -2323,19 +2496,20 @@ def _delay_spanning_title_until_prior_overhang_resolves(
     return seq
 
 
-def _enforce_spanning_article_column_continuity(
-    ordered: Sequence["Block"],
+def _find_spanning_article_regions(
+    seq: Sequence["Block"],
     *,
     image_width: int,
     image_height: Optional[int],
-) -> List["Block"]:
-    seq = list(ordered)
+) -> List[_SpanningArticleRegion]:
     if len(seq) < 6:
-        return seq
+        return []
     page_w = max(float(image_width), 1.0)
     page_h = max(float(image_height or 0), max((_y2(b) for b in seq), default=1.0))
+    regions: List[_SpanningArticleRegion] = []
+    region_counter = 0
 
-    for i, blk in enumerate(list(seq)):
+    for blk in list(seq):
         if blk.block_type != BlockType.TITLE or _w(blk) < page_w * 0.30:
             continue
         subtitle = None
@@ -2350,6 +2524,7 @@ def _enforce_spanning_article_column_continuity(
             break
         if subtitle is None:
             continue
+
         visual_y = min((_y1(b) for b in seq if b.block_type in _VISUAL_TYPES and _y1(b) > _y2(subtitle)), default=page_h)
         band_blocks = [
             b for b in seq
@@ -2360,58 +2535,125 @@ def _enforce_spanning_article_column_continuity(
         ]
         if len(band_blocks) < 3:
             continue
-        cols, bounds = detect_columns(band_blocks, int(page_w), max_cols=4, cluster_thresh=min(COLUMN_CLUSTER_THRESH, 0.08))
+
+        cols, _bounds = detect_columns(
+            band_blocks,
+            int(page_w),
+            max_cols=4,
+            cluster_thresh=min(COLUMN_CLUSTER_THRESH, 0.08),
+        )
         if len(cols) < 2:
             continue
-        reordered = []
-        for col in cols:
-            reordered.extend(sorted(col, key=lambda b: (_y1(b), _x1(b))))
-        moving = [blk, subtitle] + reordered
-        if reordered:
-            last_text_y2 = max(_y2(b) for b in reordered)
-            follow_visuals = [
-                b for b in seq
-                if b.block_type in _VISUAL_TYPES
-                and _y1(b) >= last_text_y2 - 4.0
-                and _y1(b) <= last_text_y2 + page_h * 0.20
-            ]
-            if follow_visuals:
-                visual = sorted(follow_visuals, key=lambda b: (_y1(b), _x1(b)))[0]
-                moving.append(visual)
-                follow_caps = [
-                    b for b in seq
-                    if b.block_type in _CAPTION_TYPES
-                    and _y1(b) >= _y2(visual) - 8.0
-                    and _y1(b) <= _y2(visual) + page_h * 0.06
-                ]
-                if follow_caps:
-                    moving.extend(sorted(follow_caps, key=lambda b: (_y1(b), _x1(b))))
-        moving_ids = {id(b) for b in moving}
-        overhang = [
+
+        reordered = [tuple(sorted(col, key=lambda b: (_y1(b), _x1(b)))) for col in cols]
+        last_text_y2 = max(_y2(b) for col in reordered for b in col)
+        follow_visuals = [
             b for b in seq
-            if b.block_type == BlockType.TEXT
-            and _y1(b) < _y1(blk)
-            and _y2(b) > _y1(blk) + page_h * 0.02
-            and _projection_overlap_ratio_x(blk, b) < 0.10
+            if b.block_type in _VISUAL_TYPES
+            and _y1(b) >= last_text_y2 - 4.0
+            and _y1(b) <= last_text_y2 + page_h * 0.20
         ]
-        remain = [b for b in seq if id(b) not in moving_ids]
-        if overhang:
-            last_overhang = max(seq.index(b) for b in overhang)
-            anchor_block = seq[last_overhang]
-            insert_pos = 0
-            for i, b in enumerate(remain):
-                if b is anchor_block:
-                    insert_pos = i + 1
-                    break
-            seq = remain[:insert_pos] + moving + remain[insert_pos:]
-        else:
-            first_idx = min(seq.index(blk), seq.index(subtitle), *(seq.index(b) for b in band_blocks))
-            last_idx = max(seq.index(b) for b in band_blocks)
-            middle = [
-                b for b in seq[first_idx:last_idx + 1]
-                if id(b) not in moving_ids
+        visuals: List["Block"] = []
+        captions: List["Block"] = []
+        if follow_visuals:
+            visual = sorted(follow_visuals, key=lambda b: (_y1(b), _x1(b)))[0]
+            visuals.append(visual)
+            follow_caps = [
+                b for b in seq
+                if b.block_type in _CAPTION_TYPES
+                and _y1(b) >= _y2(visual) - 8.0
+                and _y1(b) <= _y2(visual) + page_h * 0.06
             ]
-            seq = seq[:first_idx] + moving + middle + seq[last_idx + 1:]
+            if follow_caps:
+                captions.extend(sorted(follow_caps, key=lambda b: (_y1(b), _x1(b))))
+
+        region_counter += 1
+        regions.append(
+            _SpanningArticleRegion(
+                region_id=f"spanning_article_{region_counter}",
+                region_kind="spanning_article_band",
+                title=blk,
+                subtitle=subtitle,
+                columns=tuple(reordered),
+                visuals=tuple(visuals),
+                captions=tuple(captions),
+            )
+        )
+
+    return regions
+
+
+def _apply_spanning_article_region(
+    seq: Sequence["Block"],
+    *,
+    region: _SpanningArticleRegion,
+    image_width: int,
+    image_height: Optional[int],
+) -> List["Block"]:
+    seq = list(seq)
+    page_h = max(float(image_height or 0), max((_y2(b) for b in seq), default=1.0))
+    body_blocks = [block for column in region.columns for block in column]
+    moving = [region.title, region.subtitle] + body_blocks + list(region.visuals) + list(region.captions)
+
+    _mark(region.title, region_id=region.region_id, region_kind=region.region_kind, region_role="title")
+    _mark(region.subtitle, region_id=region.region_id, region_kind=region.region_kind, region_role="subtitle")
+    for col_idx, column in enumerate(region.columns):
+        for block in column:
+            _mark(
+                block,
+                region_id=region.region_id,
+                region_kind=region.region_kind,
+                region_role="member",
+                region_col_index=col_idx,
+            )
+    for block in region.visuals:
+        _mark(block, region_id=region.region_id, region_kind=region.region_kind, region_role="visual")
+    for block in region.captions:
+        _mark(block, region_id=region.region_id, region_kind=region.region_kind, region_role="caption")
+
+    moving_ids = {id(block) for block in moving}
+    overhang = [
+        block for block in seq
+        if block.block_type == BlockType.TEXT
+        and _y1(block) < _y1(region.title)
+        and _y2(block) > _y1(region.title) + page_h * 0.02
+        and _projection_overlap_ratio_x(region.title, block) < 0.10
+    ]
+    remain = [block for block in seq if id(block) not in moving_ids]
+    if overhang:
+        last_overhang = max(seq.index(block) for block in overhang)
+        anchor_block = seq[last_overhang]
+        insert_pos = 0
+        for i, block in enumerate(remain):
+            if block is anchor_block:
+                insert_pos = i + 1
+                break
+        return remain[:insert_pos] + moving + remain[insert_pos:]
+
+    first_idx = min(seq.index(region.title), seq.index(region.subtitle), *(seq.index(block) for block in body_blocks))
+    last_idx = max(seq.index(block) for block in body_blocks)
+    middle = [block for block in seq[first_idx:last_idx + 1] if id(block) not in moving_ids]
+    return seq[:first_idx] + moving + middle + seq[last_idx + 1:]
+
+
+def _enforce_spanning_article_column_continuity(
+    ordered: Sequence["Block"],
+    *,
+    image_width: int,
+    image_height: Optional[int],
+) -> List["Block"]:
+    seq = list(ordered)
+    for region in _find_spanning_article_regions(
+        seq,
+        image_width=image_width,
+        image_height=image_height,
+    ):
+        seq = _apply_spanning_article_region(
+            seq,
+            region=region,
+            image_width=image_width,
+            image_height=image_height,
+        )
     return seq
 
 
@@ -2534,7 +2776,7 @@ def _find_local_parallel_text_regions(
     *,
     image_width: int,
     image_height: Optional[int],
-) -> List[dict]:
+) -> List[_LocalParallelRegion]:
     page_w = max(float(image_width), 1.0)
     page_h = max(float(image_height or 0), max((_y2(b) for b in seq), default=1.0))
     candidates = [
@@ -2544,7 +2786,8 @@ def _find_local_parallel_text_regions(
     if len(candidates) < 3:
         return []
 
-    regions: List[dict] = []
+    regions: List[_LocalParallelRegion] = []
+    region_counter = 0
     for group in _vertical_groups_for_local_parallel_regions(candidates, page_h=page_h):
         if len(group) < 3:
             continue
@@ -2582,17 +2825,121 @@ def _find_local_parallel_text_regions(
             page_h=page_h,
         ):
             continue
+        region_counter += 1
         regions.append(
-            {
-                "blocks": list(group),
-                "columns": columns,
-                "bounds": col_bounds,
-                "top": band_top,
-                "bottom": band_bottom,
-            }
+            _LocalParallelRegion(
+                region_id=f"local_parallel_{region_counter}",
+                region_kind="local_parallel_text_band",
+                blocks=tuple(group),
+                columns=tuple(tuple(column) for column in columns),
+                bounds=tuple((float(x1), float(x2)) for x1, x2 in col_bounds),
+                top=float(band_top),
+                bottom=float(band_bottom),
+            )
         )
 
     return regions
+
+
+def _select_region_prefix_blocks(
+    seq: Sequence["Block"],
+    *,
+    region: _LocalParallelRegion,
+    page_w: float,
+    page_h: float,
+) -> tuple["Block", ...]:
+    group_ids = {id(block) for block in region.blocks}
+    prefix_candidates: List[tuple[float, int, "Block"]] = []
+    for block in seq:
+        if id(block) in group_ids:
+            continue
+        block_text = re.sub(r"\s+", "", _block_text(block))
+        centered = abs(_cx(block) - page_w * 0.5) <= page_w * 0.18
+        vertical_gap = region.top - _y2(block)
+        short_label = len(block_text) <= 4 and _line_count(block) <= 1
+        if centered and short_label and 0.0 <= vertical_gap <= max(140.0, page_h * 0.08):
+            prefix_candidates.append((vertical_gap, seq.index(block), block))
+    if not prefix_candidates:
+        return ()
+    _gap, _idx, prefix_block = sorted(prefix_candidates)[0]
+    return (prefix_block,)
+
+
+def _region_placement(
+    seq: Sequence["Block"],
+    *,
+    region: _LocalParallelRegion,
+    prefix: Sequence["Block"],
+) -> _RegionPlacement:
+    first_idx = min(seq.index(block) for block in region.blocks)
+    last_idx = max(seq.index(block) for block in region.blocks)
+    for block in prefix:
+        first_idx = min(first_idx, seq.index(block))
+        last_idx = max(last_idx, seq.index(block))
+    return _RegionPlacement(
+        first_idx=first_idx,
+        last_idx=last_idx,
+        prefix=tuple(prefix),
+    )
+
+
+def _apply_local_parallel_region(
+    seq: Sequence["Block"],
+    *,
+    region: _LocalParallelRegion,
+    page_w: float,
+    page_h: float,
+) -> List["Block"]:
+    seq = list(seq)
+    group = list(region.blocks)
+    columns = [list(column) for column in region.columns]
+    col_bounds = list(region.bounds)
+    band_top = float(region.top)
+    band_bottom = float(region.bottom)
+    group_ids = {id(block) for block in group}
+
+    prefix = list(_select_region_prefix_blocks(seq, region=region, page_w=page_w, page_h=page_h))
+    placement = _region_placement(seq, region=region, prefix=prefix)
+
+    for prefix_block in prefix:
+        prefix_block.col_count = len(columns)
+        prefix_block.col_index = 0
+        prefix_block.spanned_cols = list(range(len(columns)))
+        _mark(prefix_block, region_id=region.region_id, region_kind=region.region_kind, region_role="prefix")
+
+    reordered: List["Block"] = []
+    for col_idx, column in enumerate(columns):
+        members = sorted(column, key=lambda b: (_y1(b), _x1(b)))
+        for block in members:
+            block.col_count = len(columns)
+            block.col_index = col_idx
+            block.spanned_cols = [col_idx]
+            _mark(
+                block,
+                region_id=region.region_id,
+                region_kind=region.region_kind,
+                region_role="member",
+                region_col_index=col_idx,
+            )
+        reordered.extend(members)
+
+    for block in seq[placement.first_idx:placement.last_idx + 1]:
+        if id(block) in group_ids:
+            continue
+        if _intersects_region(block, (0.0, band_top, page_w, band_bottom)):
+            detect_spanned_blocks([block], col_bounds)
+            block.col_count = len(columns)
+            _mark(block, region_id=region.region_id, region_kind=region.region_kind, region_role="attached")
+        elif _w(block) >= page_w * 0.60:
+            block.col_count = 1
+            block.col_index = 0
+            block.spanned_cols = [0]
+
+    middle = [
+        block for block in seq[placement.first_idx:placement.last_idx + 1]
+        if id(block) not in group_ids and block not in prefix
+    ]
+    return seq[:placement.first_idx] + prefix + reordered + middle + seq[placement.last_idx + 1:]
 
 
 def _enforce_local_parallel_text_band_columns(
@@ -2613,60 +2960,12 @@ def _enforce_local_parallel_text_band_columns(
         image_width=image_width,
         image_height=image_height,
     ):
-        group = region["blocks"]
-        columns = region["columns"]
-        col_bounds = region["bounds"]
-        band_top = float(region["top"])
-        band_bottom = float(region["bottom"])
-
-        group_ids = {id(block) for block in group}
-        first_idx = min(seq.index(block) for block in group)
-        last_idx = max(seq.index(block) for block in group)
-        prefix: List["Block"] = []
-        prefix_candidates: List[tuple[float, int, "Block"]] = []
-        for block in seq:
-            if id(block) in group_ids:
-                continue
-            block_text = re.sub(r"\s+", "", _block_text(block))
-            centered = abs(_cx(block) - page_w * 0.5) <= page_w * 0.18
-            vertical_gap = band_top - _y2(block)
-            short_label = len(block_text) <= 4 and _line_count(block) <= 1
-            if centered and short_label and 0.0 <= vertical_gap <= max(140.0, page_h * 0.08):
-                prefix_candidates.append((vertical_gap, seq.index(block), block))
-        if prefix_candidates:
-            _gap, _idx, prefix_block = sorted(prefix_candidates)[0]
-            prefix_block.col_count = len(columns)
-            prefix_block.col_index = 0
-            prefix_block.spanned_cols = list(range(len(columns)))
-            prefix = [prefix_block]
-            first_idx = min(first_idx, seq.index(prefix_block))
-            last_idx = max(last_idx, seq.index(prefix_block))
-
-        reordered: List["Block"] = []
-        for col_idx, column in enumerate(columns):
-            members = sorted(column, key=lambda b: (_y1(b), _x1(b)))
-            for block in members:
-                block.col_count = len(columns)
-                block.col_index = col_idx
-                block.spanned_cols = [col_idx]
-            reordered.extend(members)
-
-        for block in seq[first_idx:last_idx + 1]:
-            if id(block) in group_ids:
-                continue
-            if _intersects_region(block, (0.0, band_top, page_w, band_bottom)):
-                detect_spanned_blocks([block], col_bounds)
-                block.col_count = len(columns)
-            elif _w(block) >= page_w * 0.60:
-                block.col_count = 1
-                block.col_index = 0
-                block.spanned_cols = [0]
-
-        middle = [
-            block for block in seq[first_idx:last_idx + 1]
-            if id(block) not in group_ids and block not in prefix
-        ]
-        seq = seq[:first_idx] + prefix + reordered + middle + seq[last_idx + 1:]
+        seq = _apply_local_parallel_region(
+            seq,
+            region=region,
+            page_w=page_w,
+            page_h=page_h,
+        )
 
     return seq
 
@@ -2807,6 +3106,11 @@ def postprocess_xycutpp_local_attachments(
     seq = _enforce_inline_equation_label_adjacency(seq)
     seq = _enforce_parallel_figure_group_order(seq, image_height=image_height)
     seq = _enforce_table_family_order(seq)
+    seq = _enforce_figure_family_order(
+        seq,
+        image_width=image_width,
+        image_height=image_height,
+    )
     seq = _enforce_column_local_visual_neighbors(
         seq,
         image_width=image_width,
@@ -2850,6 +3154,11 @@ def postprocess_xycutpp_local_attachments(
         image_height=image_height,
     )
     seq = _enforce_stable_academic_two_column_order(
+        seq,
+        image_width=image_width,
+        image_height=image_height,
+    )
+    seq = _enforce_figure_family_order(
         seq,
         image_width=image_width,
         image_height=image_height,

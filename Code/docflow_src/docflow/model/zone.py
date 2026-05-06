@@ -30,6 +30,8 @@ class Zone:
     has_spanned: bool = False
     flow_id: str = ""
     flow_kind: str = ""
+    region_id: str = ""
+    region_kind: str = ""
 
     @property
     def is_strip_row(self) -> bool:

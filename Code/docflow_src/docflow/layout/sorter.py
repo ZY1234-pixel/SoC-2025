@@ -16,7 +16,7 @@ from typing import List, TYPE_CHECKING, Tuple
 
 from docflow.layout.zone_splitter import split_into_zones
 from docflow.layout.column_detector import detect_columns, detect_spanned_blocks
-from docflow.layout.xycutpp import sort_layout_xycutpp
+from docflow.layout.xycutpp import postprocess_xycutpp_local_attachments, sort_layout_xycutpp
 from docflow.model.base import BlockType
 from docflow.utils.constants import (
     SPAN_ELIGIBLE_TYPES,
@@ -1641,7 +1641,11 @@ def _sort_layout_with_article_flows(
         ordered.extend(local_sorted)
 
     _clear_flow_meta(ordered)
-    return ordered
+    return postprocess_xycutpp_local_attachments(
+        ordered,
+        image_width=image_width,
+        image_height=image_height,
+    )
 
 
 def _sort_single_column_blocks(blocks: List["Block"]) -> List["Block"]:
