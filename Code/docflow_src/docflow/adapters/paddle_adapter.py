@@ -55,6 +55,7 @@ class PaddleAdapter(BaseAdapter):
         "text",
         "title",
         "reference",
+        "formula",
         "figure",
         "table",
         "figure_caption",
@@ -68,6 +69,19 @@ class PaddleAdapter(BaseAdapter):
         "formula_caption",
         "table_footnote",
     })
+    _TEXTLIKE_DEDUP_CATEGORIES = frozenset({
+        "text",
+        "title",
+        "reference",
+        "figure_caption",
+        "table_caption",
+        "table_footnote",
+        "formula_caption",
+    })
+    _FIGURE_CAPTION_RE = re.compile(
+        r"^\s*(?:图|fig(?:ure)?\.?)\s*[\d一二三四五六七八九十]+(?:[-－—]\d+)?\s*\S*",
+        re.IGNORECASE,
+    )
 
     def convert(
         self,
@@ -93,8 +107,13 @@ class PaddleAdapter(BaseAdapter):
         """
         h, w = image.shape[:2]
         blocks: List[Dict[str, Any]] = []
+        results = self._recall_missing_figures_from_captions(results, image)
         filtered_results, cleanup_report = self._suppress_nested_duplicates(results)
         filtered_results, trim_report = self._trim_carry_over_text_regions(filtered_results)
+        filtered_results = [
+            self._trim_title_leading_formula_number(region)
+            for region in filtered_results
+        ]
         cleanup_report.extend(trim_report)
         page_attributes = None
         if cleanup_report:
@@ -157,16 +176,7 @@ class PaddleAdapter(BaseAdapter):
             )
 
         # 同类中优先保留信息量更大、得分更高的块
-        ranked = sorted(
-            enriched,
-            key=lambda item: (
-                len(item["text"]),
-                item["area"],
-                item["score"],
-                -item["index"],
-            ),
-            reverse=True,
-        )
+        ranked = sorted(enriched, key=self._dedup_sort_key, reverse=True)
 
         kept: List[dict] = []
         report: List[dict] = []
@@ -194,6 +204,179 @@ class PaddleAdapter(BaseAdapter):
 
         kept.sort(key=lambda item: item["index"])
         return [item["region"] for item in kept], report
+
+    @classmethod
+    def _recall_missing_figures_from_captions(
+        cls,
+        results: list,
+        image: np.ndarray,
+    ) -> list:
+        """Recall large visual regions that are structurally anchored by captions.
+
+        Layout detectors sometimes keep the caption but miss the associated
+        figure body. This is a detection-recall step, not a reading-order
+        fallback: a candidate is accepted only when a figure caption has no
+        same-column figure above it and image projection finds a large visual
+        mass directly above the caption.
+        """
+        if not isinstance(results, list) or image is None or not hasattr(image, "shape"):
+            return list(results or [])
+        if image.ndim < 2:
+            return list(results)
+
+        page_h, page_w = image.shape[:2]
+        if page_w <= 0 or page_h <= 0:
+            return list(results)
+
+        recalled: List[dict] = []
+        existing_figures = [
+            cls._safe_bbox(region.get("bbox"))
+            for region in results
+            if str(region.get("type", "")).lower() == "figure"
+        ]
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+
+        for region in results:
+            if not cls._is_figure_caption_like(region):
+                continue
+            caption_box = cls._safe_bbox(region.get("bbox"))
+            if cls._has_paired_figure_above(caption_box, existing_figures, page_w, page_h):
+                continue
+            candidate = cls._find_caption_anchored_visual_region(gray, caption_box, page_w, page_h)
+            if candidate is None:
+                continue
+            if any(cls._overlap_ratio(candidate, box) >= 0.65 for box in existing_figures):
+                continue
+            if any(cls._overlap_ratio(candidate, cls._safe_bbox(item.get("bbox"))) >= 0.65 for item in recalled):
+                continue
+
+            x1, y1, x2, y2 = [int(round(value)) for value in candidate]
+            x1 = max(0, min(page_w, x1))
+            x2 = max(0, min(page_w, x2))
+            y1 = max(0, min(page_h, y1))
+            y2 = max(0, min(page_h, y2))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            recalled_region = {
+                "type": "figure",
+                "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                "score": 0.42,
+                "res": [],
+                "img": image[y1:y2, x1:x2].copy(),
+            }
+            recalled.append(recalled_region)
+            existing_figures.append(recalled_region["bbox"])
+
+        if not recalled:
+            return list(results)
+        return list(results) + recalled
+
+    @classmethod
+    def _is_figure_caption_like(cls, region: dict) -> bool:
+        type_name = str(region.get("type", "")).lower()
+        if type_name not in {"figure_caption", "title", "text"}:
+            return False
+        text = re.sub(r"\s+", "", cls._extract_region_text(region))
+        return bool(cls._FIGURE_CAPTION_RE.match(text))
+
+    @classmethod
+    def _has_paired_figure_above(
+        cls,
+        caption_box: List[float],
+        figure_boxes: List[List[float]],
+        page_w: int,
+        page_h: int,
+    ) -> bool:
+        max_gap = max(80.0, page_h * 0.08)
+        for figure_box in figure_boxes:
+            if cls._axis_overlap_ratio(caption_box, figure_box, axis="x") < 0.25:
+                continue
+            vertical_gap = caption_box[1] - figure_box[3]
+            contains_caption = cls._contain_ratio(caption_box, figure_box) >= 0.75
+            if contains_caption:
+                return True
+            if -max(24.0, page_h * 0.012) <= vertical_gap <= max_gap:
+                return True
+        return False
+
+    @classmethod
+    def _find_caption_anchored_visual_region(
+        cls,
+        gray: np.ndarray,
+        caption_box: List[float],
+        page_w: int,
+        page_h: int,
+    ) -> Optional[List[float]]:
+        caption_cx = (caption_box[0] + caption_box[2]) * 0.5
+        caption_w = max(1.0, caption_box[2] - caption_box[0])
+        search_half_w = max(page_w * 0.22, caption_w * 1.6, 180.0)
+        search_h = max(page_h * 0.34, 520.0)
+        x1 = int(max(0.0, caption_cx - search_half_w))
+        x2 = int(min(float(page_w), caption_cx + search_half_w))
+        y1 = int(max(0.0, caption_box[1] - search_h))
+        y2 = int(max(0.0, caption_box[1] - 12.0))
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        roi = gray[y1:y2, x1:x2]
+        if roi.size == 0:
+            return None
+        mask = np.where(roi < 245, 255, 0).astype("uint8")
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (31, 31))
+        open_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        min_w = page_w * 0.18
+        min_h = page_h * 0.10
+        min_area = page_w * page_h * 0.025
+        max_gap = max(120.0, page_h * 0.08)
+        candidates: List[tuple[float, float, List[float]]] = []
+        for contour in contours:
+            x, y, width, height = cv2.boundingRect(contour)
+            box = [
+                float(x1 + x),
+                float(y1 + y),
+                float(x1 + x + width),
+                float(y1 + y + height),
+            ]
+            area = float(width * height)
+            gap = caption_box[1] - box[3]
+            center_delta = abs(((box[0] + box[2]) * 0.5) - caption_cx)
+            if width < min_w or height < min_h or area < min_area:
+                continue
+            if gap < -max(16.0, page_h * 0.008) or gap > max_gap:
+                continue
+            if center_delta > max(width * 0.58, page_w * 0.16):
+                continue
+            candidates.append((max(0.0, gap), -area, box))
+
+        if not candidates:
+            return None
+        candidates.sort()
+        return candidates[0][2]
+
+    @classmethod
+    def _dedup_sort_key(cls, item: dict) -> tuple[float, float, float, float]:
+        """Category-aware preference for nested-duplicate resolution.
+
+        For text-like regions, detection confidence should dominate over raw
+        bbox area / concatenated text length. This prevents a single low-score
+        merged text block from suppressing multiple higher-confidence fine-grain
+        text blocks, which became more common after lowering layout thresholds.
+        For visual regions we still prefer larger area first.
+        """
+        score = float(item.get("score", 0.0) or 0.0)
+        text_len = float(len(item.get("text", "")))
+        area = float(item.get("area", 0.0) or 0.0)
+        index_bias = -float(item.get("index", 0))
+        category = str(item.get("category", ""))
+        if category in cls._TEXTLIKE_DEDUP_CATEGORIES:
+            return (2.0, score, text_len, area, index_bias)
+        if category == "formula":
+            return (1.0, score, area, text_len, index_bias)
+        return (1.0, area, score, text_len, index_bias)
 
     @classmethod
     def _trim_carry_over_text_regions(
@@ -259,6 +442,23 @@ class PaddleAdapter(BaseAdapter):
             and existing["category"] in self._CAPTION_FAMILY
         )
         if not same_category and not same_caption_family:
+            candidate_is_visual = candidate["category"] in {"figure", "formula", "table"}
+            existing_is_textlike = existing["category"] in self._TEXTLIKE_DEDUP_CATEGORIES
+            if candidate_is_visual and existing_is_textlike and existing["text"]:
+                overlap_ratio = self._overlap_ratio(candidate["bbox"], existing["bbox"])
+                contain_ratio = self._contain_ratio(existing["bbox"], candidate["bbox"])
+                lower_confidence = candidate["score"] + 0.08 < existing["score"]
+                text_explains_visual = (
+                    overlap_ratio >= 0.92
+                    or contain_ratio >= 0.92
+                    or (
+                        candidate["category"] == "formula"
+                        and overlap_ratio >= 0.72
+                        and candidate["area"] <= existing["area"] * 1.35
+                    )
+                )
+                if lower_confidence and text_explains_visual:
+                    return "cross_category_visual_text_duplicate"
             # 跨类别：检查候选文本是否被已有文本完全包含（视觉重复）。
             # 典型场景：低分 title 检测出 "瓦的北红海省博物馆。"，但高分 text
             # 已包含完整段落 "瓦的北红海省博物馆。博物馆二层陈列着..."
@@ -363,9 +563,11 @@ class PaddleAdapter(BaseAdapter):
 
         prev_bbox = cls._safe_bbox(previous.get("bbox"))
         curr_bbox = cls._safe_bbox(current.get("bbox"))
-        if cls._axis_overlap_ratio(prev_bbox, curr_bbox, axis="x") < 0.75:
+        # 仅在两个文本块几乎位于同一列时，才判断“首行串带”。
+        if cls._axis_overlap_ratio(prev_bbox, curr_bbox, axis="x") < 0.88:
             return 0
-        if cls._vertical_gap(prev_bbox, curr_bbox) > 36.0:
+        # 放宽过头会误伤相邻段落，因此将容忍间距收紧到更保守的范围。
+        if cls._vertical_gap(prev_bbox, curr_bbox) > 20.0:
             return 0
 
         prev_lines = cls._extract_region_line_texts(previous)
@@ -384,15 +586,9 @@ class PaddleAdapter(BaseAdapter):
                 for left, right in zip(prev_slice, curr_slice)
             ):
                 best = shared
-        if best == 0 and curr_lines:
-            first_curr = cls._normalize_text(curr_lines[0])
-            prev_tail = [cls._normalize_text(text) for text in prev_lines[-2:]]
-            if first_curr and len(first_curr) >= 4:
-                for tail in prev_tail:
-                    if first_curr in tail or tail.endswith(first_curr):
-                        best = 1
-                        break
-        return best
+        # 单行重复在报纸/多栏场景中误伤率较高，这里只接受至少 2 行的
+        # 严格边界重复，优先保证段首完整保留。
+        return best if best >= 2 else 0
 
     @staticmethod
     def _clone_region(region: dict) -> dict:
@@ -414,6 +610,48 @@ class PaddleAdapter(BaseAdapter):
         if bbox is not None:
             region["bbox"] = bbox
         return region
+
+    @classmethod
+    def _trim_title_leading_formula_number(cls, region: dict) -> dict:
+        if str(region.get("type", "")).lower() != "title":
+            return region
+        res = region.get("res")
+        if not isinstance(res, list) or len(res) < 2:
+            return region
+
+        first = res[0]
+        first_text = cls._normalize_text(cls._extract_item_text(first))
+        if re.fullmatch(r"\(?\d{1,3}\)?", first_text or "") is None:
+            return region
+
+        first_bbox = cls._bbox_from_single_region_res(first)
+        rest_bbox = cls._bbox_from_region_res(res[1:])
+        if first_bbox is None or rest_bbox is None:
+            return region
+        page_like_gap = rest_bbox[0] - first_bbox[2]
+        first_height = max(1.0, first_bbox[3] - first_bbox[1])
+        if page_like_gap < max(18.0, first_height * 0.8):
+            return region
+
+        trimmed = cls._clone_region(region)
+        trimmed["res"] = list(res[1:])
+        trimmed["bbox"] = rest_bbox
+        return trimmed
+
+    @staticmethod
+    def _extract_item_text(item: Any) -> str:
+        if isinstance(item, dict):
+            return str(item.get("text", ""))
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            rhs = item[1]
+            if isinstance(rhs, (list, tuple)) and rhs:
+                return str(rhs[0])
+            return str(rhs)
+        return ""
+
+    @classmethod
+    def _bbox_from_single_region_res(cls, item: Any) -> Optional[List[float]]:
+        return cls._bbox_from_region_res([item])
 
     @staticmethod
     def _bbox_from_region_res(res: List[Any]) -> Optional[List[float]]:
@@ -551,6 +789,9 @@ class PaddleAdapter(BaseAdapter):
             block["text"] = "\n".join(
                 tl["text"] for tl in text_lines if tl.get("text")
             )
+            text_bbox = self._bbox_from_text_lines(text_lines)
+            if text_bbox is not None:
+                block["bbox"] = self._union_bbox(block["bbox"], text_bbox)
 
         # -- 表格：提取 HTML --------------------------------------------
         elif type_name == "table":
@@ -609,6 +850,31 @@ class PaddleAdapter(BaseAdapter):
                 })
 
         return text_lines
+
+    @staticmethod
+    def _bbox_from_text_lines(text_lines: List[Dict[str, Any]]) -> Optional[List[float]]:
+        polys: List[List[List[float]]] = []
+        for line in text_lines:
+            poly = line.get("poly")
+            if isinstance(poly, list) and poly:
+                polys.append(poly)
+        if not polys:
+            return None
+
+        xs = [float(pt[0]) for poly in polys for pt in poly if isinstance(pt, (list, tuple)) and len(pt) >= 2]
+        ys = [float(pt[1]) for poly in polys for pt in poly if isinstance(pt, (list, tuple)) and len(pt) >= 2]
+        if not xs or not ys:
+            return None
+        return [min(xs), min(ys), max(xs), max(ys)]
+
+    @staticmethod
+    def _union_bbox(b1: List[float], b2: List[float]) -> List[float]:
+        return [
+            min(float(b1[0]), float(b2[0])),
+            min(float(b1[1]), float(b2[1])),
+            max(float(b1[2]), float(b2[2])),
+            max(float(b1[3]), float(b2[3])),
+        ]
 
     @staticmethod
     def _encode_image(img: np.ndarray) -> Optional[str]:

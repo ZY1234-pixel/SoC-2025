@@ -1,43 +1,57 @@
+图片文本解析与矢量化转换 — v0.5.0 发布说明
+==========================================
+发布日期：2026-04-23
 
-日期：2026-03-19
+概述
+----
+图片文本解析与矢量化转换是一套文档版面还原与渲染模块，支持将扫描件/图片通过
+OCR → 版面检测 → 分栏检测 → 样式推断 → DOCX 渲染的全流程管线，还原为可编辑的 Word 文档。
 
-一、发布目标
-------------
-本版本用于离线本地验证以下主链路：
-图片 / PDF 输入 -> 版面分析 + OCR -> 标准 JSON -> DOCX / Markdown / PDF 输出。
+本次 v0.5.0 重点改进了多列布局还原、页面适配防溢页、以及渲染策略的可解释性。
 
-二、本版本包含内容
-----------------
-1) 核心源码
-- `Code/docflow_src/docflow`
-- 当前布局恢复、段落/分栏推断、DOCX/Markdown 渲染实现
+主要功能
+--------
+1. 多列布局检测
+   - 排除表格区块对列检测的干扰
+   - 支持不规则列宽的自动检测
+   - 跨列区块（图片、表格等）的版面表格渲染
 
-2) 全流程运行测试代码
-- `Code/test.py`
-- `Code/dataset.py`
-- `Code/preprocess.py`
-- `Code/model.py`
-- `Code/utils.py`
+2. 页面适配与防溢页
+   - 基于内容高度预算的全局缩放估算
+   - 分级修正策略：先局部修正后全局缩放
+   - 多遍渲染验证 + 字号下限保护
+   - 坐标映射器基于页边距自适应缩放
 
-3) 运行资产
-- 最小 Paddle 运行时：`Code/third_party/paddle_runtime`
-- 默认模型：`Code/models`
-- 当前 wheel：`Code/wheels/docflow-0.3.0-py3-none-any.whl`
+3. 渲染计划系统
+   - render_plan.json 输出，说明每个样本的渲染策略
+   - 三种策略：单栏、布局表格、原生分栏
+   - 策略选择基于跨列存在性、列宽规则性、版面复杂度
 
-4) 配套文档
-- 部署指南：`doc/DEPLOYMENT.md`
-- 测试手册：`doc/TESTING.md`
-- 故障排查：`doc/TROUBLESHOOTING.md`
+4. 样式推断
+   - 基于内容区块的字体大小、行距自动推断
+   - 页面级别样式的自动提取与回写
 
-五、结果目录说明
---------------
-- 每次测试都会在 `test-result/` 下生成一个新的 `run_时间戳/`
-- 每个样例的正式结果位于 `samples/<样例名>/`
-- 最终文档名直接使用原始样例文件名，不再使用 `recovery` / `rendered`
+5. 报纸/杂志等短横版页面适配
+   - 页边距动态调整，保证文字不溢出
+   - 内容密集页面的自适应处理
 
-六、默认模型配置
---------------
-- layout: doclayout_yolo_docstructbench_headfloat100_runtime
-- det: PP-OCRv5_mobile_det_infer
-- rec: PP-OCRv5_mobile_rec_infer
-- table: SLANet_plus_infer
+已知限制
+--------
+- 极度复杂的混合版面（如报纸中多张跨列图 + 不规则分栏）可能仍需手动调整
+- 数学公式渲染依赖图片回退，LaTeX 渲染需额外配置
+
+目录结构
+--------
+.
+├── Code/
+│   ├── docflow_src/        # 核心源码
+│   ├── dataset.py          # 数据集工具
+│   ├── test.py             # 全流程测试入口
+│   └── models/             # 模型文件（需下载）
+├── test-result/
+│   └── .examples/          # 示例渲染结果
+│       ├── academic-paper/
+│       ├── book/
+│       ├── magazine/
+│       └── newspaper/
+└── doc/                    # 文档与详细说明

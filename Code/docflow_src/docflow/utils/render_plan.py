@@ -43,9 +43,12 @@ def build_render_plan(document, output_format: str = "docx") -> dict:
         zones_payload = []
         block_type_counts = Counter()
         page_block_count = 0
+        page_flow_ids = set()
 
         for zi, zone in enumerate(page.zones):
             strategy_counts[zone.rendering_strategy] += 1
+            if getattr(zone, "flow_id", ""):
+                page_flow_ids.add(zone.flow_id)
             blocks_payload = []
             for block in zone.blocks:
                 page_block_count += 1
@@ -58,12 +61,15 @@ def build_render_plan(document, output_format: str = "docx") -> dict:
                         "bbox": [block.bbox.x1, block.bbox.y1, block.bbox.x2, block.bbox.y2],
                         "col_index": block.col_index,
                         "spanned_cols": list(getattr(block, "spanned_cols", []) or []),
+                        "flow_id": str((getattr(block, "attributes", None) or {}).get("flow_id", "")),
                         "action": _block_action(block),
                     }
                 )
             zones_payload.append(
                 {
                     "zone_index": zi,
+                    "flow_id": getattr(zone, "flow_id", ""),
+                    "flow_kind": getattr(zone, "flow_kind", ""),
                     "col_count": zone.col_count,
                     "has_spanned": zone.has_spanned,
                     "rendering_strategy": zone.rendering_strategy,
@@ -83,6 +89,7 @@ def build_render_plan(document, output_format: str = "docx") -> dict:
                 "quality_metrics": dict(attrs.get("quality_metrics") or {}),
                 "block_type_counts": dict(block_type_counts),
                 "block_count": page_block_count,
+                "flow_count": len(page_flow_ids),
                 "zones": zones_payload,
             }
         )

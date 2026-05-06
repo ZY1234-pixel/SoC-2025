@@ -11,6 +11,14 @@ class RecoveryConfig:
     column_cluster_thresh: float = 0.13
     column_confidence_min: float = 0.55
     zone_strip_height_ratio: float = 0.12
+    # legacy / auto / xycutpp / xycutpp_hybrid / xycutpp_paper / newspaper_hybrid
+    # 除显式 legacy 外，其余策略名目前都统一映射到同一个 XY-Cut++ 内核；
+    # xycutpp / xycutpp_hybrid / xycutpp_paper / newspaper_hybrid 仅作为历史兼容别名保留
+    reading_order_strategy: str = "auto"
+    xycutpp_beta: float = 1.3
+    xycutpp_density_threshold: float = 0.9
+    xycutpp_min_gap_ratio: float = 0.015
+    xycutpp_title_width_ratio: float = 0.45
     wide_block_thresh: float = 0.55
     paragraph_indent_px: float = 12.0
     paragraph_list_marker_enabled: bool = True

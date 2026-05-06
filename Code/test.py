@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
+from dataclasses import replace
 import json
 import os
 import sys
@@ -56,6 +58,10 @@ DOCLAYOUT_YOLO_LABELS = [
     "formula_caption",
 ]
 
+DEFAULT_LAYOUT_SCORE_THRESHOLD = 0.50
+DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD = 0.18
+RAW_RESULT_PREVIEW_MAX_TEXT = 300
+
 
 def bootstrap_import_paths(paths: RuntimePaths) -> None:
     """将打包内的 Paddle 运行时与 DocFlow 源码加入导入路径。"""
@@ -76,6 +82,28 @@ def resolve_cli_path(raw_path: str | None, default_path: Path) -> Path:
         if normalized.startswith("..") and not normalized.startswith("../") and "/" not in normalized[2:]:
             normalized = "../" + normalized[2:]
     return Path(normalized).resolve()
+
+
+def resolve_layout_score_threshold(layout_model_dir: Path) -> str:
+    """Resolve layout score threshold with a lower doclayout-yolo default.
+
+    The doclayout-yolo detector tends to miss sparse centered section headings
+    around tables when the threshold is too high, so we use a lower default for
+    that model family and keep an env override for quick ablation.
+    """
+    raw_override = os.environ.get("DOCFLOW_LAYOUT_SCORE_THRESHOLD", "").strip()
+    if raw_override:
+        try:
+            value = float(raw_override)
+        except ValueError:
+            value = DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD
+        else:
+            value = min(1.0, max(0.01, value))
+        return f"{value:.2f}"
+
+    if "doclayout_yolo" in layout_model_dir.name.lower():
+        return f"{DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD:.2f}"
+    return f"{DEFAULT_LAYOUT_SCORE_THRESHOLD:.2f}"
 
 
 def build_layout_dict_from_inference(layout_model_dir: Path, fallback_dict_path: Path, out_dir: Path) -> Path:
@@ -141,6 +169,7 @@ def make_engine(paths: RuntimePaths, layout_dict_dir: Path):
     rec_char_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "ppocrv5_dict.txt"
     table_char_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "table_structure_dict_ch.txt"
     layout_dict = build_layout_dict_from_inference(paths.layout_model, fallback_layout_dict, layout_dict_dir)
+    layout_score_threshold = resolve_layout_score_threshold(paths.layout_model)
 
     argv = [
         "--recovery",
@@ -154,7 +183,7 @@ def make_engine(paths: RuntimePaths, layout_dict_dir: Path):
         "--layout_model_dir",
         str(paths.layout_model),
         "--layout_score_threshold",
-        "0.25" if "doclayout_yolo" in paths.layout_model.name.lower() else "0.5",
+        layout_score_threshold,
         "--layout_dict_path",
         str(layout_dict),
         "--det_model_dir",
@@ -203,6 +232,49 @@ def print_regions(result: list) -> None:
         print(f"  [{region_type:>15s}] score={score:.2f} bbox={bbox} {text_preview}")
 
 
+def summarize_raw_result(result: list) -> dict:
+    """Build a compact raw-result debug payload without serializing image arrays."""
+    regions: list[dict] = []
+    for index, region in enumerate(result or []):
+        if not isinstance(region, dict):
+            regions.append({"index": index, "repr": repr(region)[:RAW_RESULT_PREVIEW_MAX_TEXT]})
+            continue
+
+        item: dict = {
+            "index": index,
+            "type": region.get("type"),
+            "bbox": region.get("bbox"),
+            "score": float(region.get("score", 0.0) or 0.0),
+        }
+        if "img_idx" in region:
+            item["img_idx"] = region.get("img_idx")
+        img = region.get("img")
+        if hasattr(img, "shape"):
+            item["img_shape"] = list(img.shape)
+
+        res_preview: list[dict] = []
+        for res_item in region.get("res") or []:
+            if isinstance(res_item, dict):
+                preview = {
+                    "text": str(res_item.get("text", ""))[:RAW_RESULT_PREVIEW_MAX_TEXT],
+                }
+                if "confidence" in res_item:
+                    preview["confidence"] = float(res_item.get("confidence", 0.0) or 0.0)
+                if "text_region" in res_item:
+                    preview["text_region"] = res_item.get("text_region")
+                res_preview.append(preview)
+            elif isinstance(res_item, (list, tuple)) and len(res_item) == 2:
+                rhs = res_item[1]
+                text = rhs[0] if isinstance(rhs, (list, tuple)) and rhs else rhs
+                res_preview.append({"text": str(text)[:RAW_RESULT_PREVIEW_MAX_TEXT]})
+            else:
+                res_preview.append({"repr": repr(res_item)[:RAW_RESULT_PREVIEW_MAX_TEXT]})
+        if res_preview:
+            item["res"] = res_preview
+        regions.append(item)
+    return {"regions": regions}
+
+
 def analyze_page(engine, adapter: PaddleAdapter, image, page_index: int, source_path: str) -> tuple[dict, list, float]:
     started_at = time.time()
     result, _ = engine(image, img_idx=page_index)
@@ -220,17 +292,104 @@ def save_debug_images(
     sample_layout,
     page_index: int,
 ) -> None:
-    from docflow.utils.visualization import draw_layout_ocr, draw_sorted_layout, extract_sorted_blocks
+    from docflow.utils.visualization import (
+        draw_layout_ocr,
+        draw_reading_order_comparison,
+        draw_reading_order_map,
+        draw_sorted_layout,
+        extract_sorted_blocks,
+    )
+
+    def _remap_to_source_bboxes(ordered_blocks: list[dict], source_page: dict) -> list[dict]:
+        def _should_use_source_bbox(current_bbox: list[float], source_bbox: list[float]) -> bool:
+            if len(current_bbox) != 4 or len(source_bbox) != 4:
+                return False
+            curr_w = max(0.0, float(current_bbox[2]) - float(current_bbox[0]))
+            curr_h = max(0.0, float(current_bbox[3]) - float(current_bbox[1]))
+            src_w = max(0.0, float(source_bbox[2]) - float(source_bbox[0]))
+            src_h = max(0.0, float(source_bbox[3]) - float(source_bbox[1]))
+            curr_area = curr_w * curr_h
+            src_area = src_w * src_h
+            if curr_area <= 1.0 or src_area <= 1.0:
+                return True
+
+            edge_delta = max(
+                abs(float(current_bbox[0]) - float(source_bbox[0])),
+                abs(float(current_bbox[1]) - float(source_bbox[1])),
+                abs(float(current_bbox[2]) - float(source_bbox[2])),
+                abs(float(current_bbox[3]) - float(source_bbox[3])),
+            )
+            area_ratio = curr_area / src_area
+            # 仅在 bbox 基本一致时回写 source 坐标，避免把 flow 内合并/裁剪后的
+            # 最终几何退回到原始 OCR 框，导致调试图“最后一行掉出框外”。
+            return edge_delta <= 12.0 and 0.85 <= area_ratio <= 1.15
+
+        source_by_id = {
+            str(block.get("id", "")): block
+            for block in source_page.get("blocks", [])
+        }
+        remapped: list[dict] = []
+        for block in ordered_blocks:
+            source = source_by_id.get(str(block.get("id", "")))
+            remapped_block = dict(block)
+            if (
+                source
+                and isinstance(source.get("bbox"), list)
+                and len(source["bbox"]) == 4
+                and _should_use_source_bbox(
+                    list(remapped_block.get("bbox", []) or []),
+                    source["bbox"],
+                )
+            ):
+                remapped_block["bbox"] = [float(v) for v in source["bbox"]]
+            remapped.append(remapped_block)
+        return remapped
 
     sample_layout.debug_dir.mkdir(parents=True, exist_ok=True)
     layout_path = sample_layout.debug_image_path(page_index, "layout_ocr")
     sorted_path = sample_layout.debug_image_path(page_index, "sorted_layout")
+    legacy_order_path = sample_layout.debug_image_path(page_index, "reading_order_legacy")
+    xycutpp_order_path = sample_layout.debug_image_path(page_index, "reading_order_xycutpp")
+    compare_path = sample_layout.debug_image_path(page_index, "reading_order_compare")
     vis_layout = draw_layout_ocr(image, result, font_path=None, show_text_preview=True)
     cv2.imwrite(str(layout_path), vis_layout)
-    document = pipeline.build_document(page_document)
-    sorted_blocks = extract_sorted_blocks(document, page_index=0)
+
+    legacy_pipeline = RecoveryPipeline(
+        config=replace(pipeline.config, reading_order_strategy="legacy")
+    )
+    xycutpp_pipeline = RecoveryPipeline(
+        config=replace(pipeline.config, reading_order_strategy="xycutpp_hybrid")
+    )
+    actual_document = pipeline.build_document(deepcopy(page_document))
+    legacy_document = legacy_pipeline.build_document(deepcopy(page_document))
+    xycutpp_document = xycutpp_pipeline.build_document(deepcopy(page_document))
+    source_page = (page_document.get("pages") or [{}])[0]
+
+    sorted_blocks = extract_sorted_blocks(actual_document, page_index=0)
+    legacy_blocks = _remap_to_source_bboxes(extract_sorted_blocks(legacy_document, page_index=0), source_page)
+    xycutpp_blocks = _remap_to_source_bboxes(extract_sorted_blocks(xycutpp_document, page_index=0), source_page)
+
     vis_sorted = draw_sorted_layout(image, sorted_blocks)
+    legacy_map = draw_reading_order_map(
+        image,
+        legacy_blocks,
+        title="Legacy Reading Order",
+    )
+    xycutpp_map = draw_reading_order_map(
+        image,
+        xycutpp_blocks,
+        title="XY-Cut++ Hybrid Reading Order",
+    )
+    compare_map = draw_reading_order_comparison(
+        image,
+        legacy_blocks,
+        xycutpp_blocks,
+    )
+
     cv2.imwrite(str(sorted_path), vis_sorted)
+    cv2.imwrite(str(legacy_order_path), legacy_map)
+    cv2.imwrite(str(xycutpp_order_path), xycutpp_map)
+    cv2.imwrite(str(compare_path), compare_map)
 
 
 def _sample_cleanup_removed_count(merged_document: dict) -> int:
@@ -270,18 +429,7 @@ def run_sample(
         print(f"[分析] {sample_path.name} p{page_index + 1}: 检测到 {len(result)} 个区域，耗时 {elapsed:.2f}s")
         print_regions(result)
         if save_debug_vis:
-            # TEMP: dump raw result for debugging visualization
-            import numpy as np
-            def _to_serializable(obj):
-                if hasattr(obj, 'tolist'):
-                    return obj.tolist()
-                if isinstance(obj, dict):
-                    return {k: _to_serializable(v) for k, v in obj.items()}
-                if isinstance(obj, (list, tuple)):
-                    return [_to_serializable(v) for v in obj]
-                return obj
-            with open(sample_layout.sample_dir / "raw_result.json", 'w') as _f:
-                json.dump(_to_serializable(result), _f, ensure_ascii=False, indent=2)
+            write_json(sample_layout.sample_dir / "raw_result.json", summarize_raw_result(result))
             save_debug_images(pipeline, image, result, page_document, sample_layout, page_index)
         page_documents.append(page_document)
 

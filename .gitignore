@@ -11,6 +11,7 @@ venv/
 
 # Project data and outputs (do not commit)
 dataset/
-test-result/
+test-result/*
+!test-result/.examples/
 Code/models/
 Code/wheels/

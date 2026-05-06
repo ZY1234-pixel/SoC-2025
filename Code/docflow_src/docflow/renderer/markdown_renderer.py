@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import os
 import re
+from pathlib import Path
 from hashlib import sha1
 from typing import TYPE_CHECKING
 
@@ -67,8 +68,12 @@ class MarkdownRenderer(BaseRenderer):
             asset_dir=asset_dir,
             asset_prefix=asset_prefix,
         )
-        with open(output_path, "w", encoding="utf-8") as fh:
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        tmp_output = output.with_name(f".{output.name}.tmp")
+        with open(tmp_output, "w", encoding="utf-8") as fh:
             fh.write(text)
+        tmp_output.replace(output)
 
     def render_bytes(self, document: "Document", **options) -> bytes:
         """将 *document* 渲染为 UTF-8 编码的 Markdown 字节。"""

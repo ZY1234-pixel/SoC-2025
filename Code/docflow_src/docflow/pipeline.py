@@ -55,6 +55,13 @@ _STRIP_TYPES = {
 }
 _TITLE_LEVEL_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)(?:[\.、])?\s*\S")
 _FOOTER_LIKE_RE = re.compile(r"(©|copyright|https?://|www\.|journal\.com|verlag|kgaa)", re.IGNORECASE)
+_FIGURE_CAPTION_RE = re.compile(r"^\s*(?:图|fig(?:ure)?\.?)\s*[\d一二三四五六七八九十]+(?:[-－—]\d+)?\s*\S*", re.IGNORECASE)
+_TABLE_CAPTION_RE = re.compile(r"^\s*(?:表|table)\s*[\d一二三四五六七八九十]+(?:[-－—]\d+)?\s*\S*", re.IGNORECASE)
+_PAGE_NUMBER_RE = re.compile(r"^\s*[-—–]?\s*\d{1,4}\s*[-—–]?\s*$")
+_ACADEMIC_FOOTER_NOTE_RE = re.compile(
+    r"\b(?:correspondence\s+to|received\s+\d{1,2}\s+\w+\s+\d{4}|accepted\s+\d{1,2}\s+\w+\s+\d{4})\b",
+    re.IGNORECASE,
+)
 
 
 def _infer_title_heading_level(text: str) -> Optional[int]:
@@ -236,6 +243,11 @@ class RecoveryPipeline:
             page_width=page.image_width,
             page_height=page.image_height,
         )
+        pre_spurious_visual_suppressed, blocks = self._suppress_spurious_visual_blocks_over_text(
+            blocks,
+            page_width=page.image_width,
+            page_height=page.image_height,
+        )
 
         # -- 从页面图片补充缺失的图像数据 -----------------------
         self._fill_missing_images(blocks, getattr(page, 'image_path', None))
@@ -253,6 +265,11 @@ class RecoveryPipeline:
                 cluster_thresh=self.config.column_cluster_thresh,
                 column_confidence_min=self.config.column_confidence_min,
                 zone_strip_height_ratio=self.config.zone_strip_height_ratio,
+                strategy=self.config.reading_order_strategy,
+                xycutpp_beta=self.config.xycutpp_beta,
+                xycutpp_density_threshold=self.config.xycutpp_density_threshold,
+                xycutpp_min_gap_ratio=self.config.xycutpp_min_gap_ratio,
+                xycutpp_title_width_ratio=self.config.xycutpp_title_width_ratio,
             )
 
         # -- 提升顶部作者署名/导语短行，避免误落入正文分栏 --------------------
@@ -269,9 +286,25 @@ class RecoveryPipeline:
             page_height=page.image_height,
         )
 
-        blocks = self._merge_short_continuation_fragments(blocks)
+        decorative_icon_suppressed, blocks = self._suppress_decorative_title_icons(
+            blocks,
+            page_width=page.image_width,
+            page_height=page.image_height,
+        )
+        spurious_visual_suppressed, blocks = self._suppress_spurious_visual_blocks_over_text(
+            blocks,
+            page_width=page.image_width,
+            page_height=page.image_height,
+        )
+        spurious_visual_suppressed += pre_spurious_visual_suppressed
+        figure_text_dedup_suppressed, blocks = self._suppress_overlapped_figure_text_duplicates(
+            blocks,
+            page_width=page.image_width,
+            page_height=page.image_height,
+        )
 
         blocks = self._merge_short_continuation_fragments(blocks)
+        blocks = self._trim_repeated_prefix_within_flows(blocks)
 
         # -- 检测文本区块中的段落 ------------------------------
         for block in blocks:
@@ -310,10 +343,16 @@ class RecoveryPipeline:
         self._annotate_page_profile(page, blocks)
         if page.attributes is None:
             page.attributes = {}
+        strategy_name = str(self.config.reading_order_strategy or "").strip().lower()
+        if strategy_name in {"auto", "xycutpp", "xycutpp_paper", "xycutpp_hybrid", "newspaper_hybrid"}:
+            page.attributes["xycutpp_debug"] = self._collect_xycutpp_proto_debug(blocks)
         page.attributes["rule_stats"] = {
             "category_fix_count": category_fix_count,
             "byline_promotions": byline_promotions,
             "hero_band_promotions": hero_band_promotions,
+            "decorative_icon_suppressed": decorative_icon_suppressed,
+            "spurious_visual_suppressed": spurious_visual_suppressed,
+            "figure_text_dedup_suppressed": figure_text_dedup_suppressed,
             "zone_count": len(page.zones),
         }
         page.attributes["quality_metrics"] = self._page_quality_metrics(page, blocks)
@@ -344,11 +383,47 @@ class RecoveryPipeline:
             text = block.full_text().strip()
             if not text:
                 continue
+            compact_text = re.sub(r"\s+", "", text)
             upper = text.upper()
             near_top = (
                 page_height > 0
                 and float(block.bbox.y1) <= max(float(page_height) * 0.16, 1.0)
             )
+            near_bottom = (
+                page_height > 0
+                and float(block.bbox.y2) >= max(float(page_height) * 0.92, 1.0)
+            )
+            near_footer_band = (
+                page_height > 0
+                and float(block.bbox.y1) >= max(float(page_height) * 0.80, 1.0)
+            )
+            if (
+                block.block_type in {BlockType.TEXT, BlockType.FIGURE_CAPTION}
+                and near_bottom
+                and _PAGE_NUMBER_RE.match(compact_text)
+                and float(block.bbox.width) <= max(float(page_width) * 0.12, 120.0)
+            ):
+                block.block_type = BlockType.PAGE_NUMBER
+                changes += 1
+                continue
+            if block.block_type in {BlockType.TEXT, BlockType.TITLE}:
+                if _FIGURE_CAPTION_RE.match(compact_text):
+                    block.block_type = BlockType.FIGURE_CAPTION
+                    changes += 1
+                elif _TABLE_CAPTION_RE.match(compact_text):
+                    block.block_type = BlockType.TABLE_CAPTION
+                    changes += 1
+            if block.block_type == BlockType.FIGURE_CAPTION:
+                # References such as "Fig. 3 visualizes ..." are ordinary body
+                # text, not captions. Captions are usually short labels placed
+                # directly next to the visual object.
+                if (
+                    re.match(r"^\s*fig(?:ure)?\.?\s*\d+\s+\w+", text, re.IGNORECASE)
+                    and (block.count_lines() >= 4 or len(text) >= 120)
+                    and float(block.bbox.width) >= max(float(page_width) * 0.32, 1.0)
+                ):
+                    block.block_type = BlockType.TEXT
+                    changes += 1
             if block.block_type == BlockType.HEADER:
                 if re.match(r'TABLE\s', upper):
                     block.block_type = BlockType.TABLE_CAPTION
@@ -380,12 +455,12 @@ class RecoveryPipeline:
                     block.block_type = BlockType.TITLE
                     changes += 1
             elif block.block_type == BlockType.TEXT:
-                near_bottom = (
-                    page_height > 0
-                    and float(block.bbox.y2) >= max(float(page_height) * 0.92, 1.0)
-                )
                 footer_like = bool(_FOOTER_LIKE_RE.search(text))
-                if near_bottom and footer_like and len(text) <= 120:
+                academic_footer_note = bool(_ACADEMIC_FOOTER_NOTE_RE.search(text))
+                if (
+                    ((near_bottom or near_footer_band) and footer_like and len(text) <= 120)
+                    or (near_footer_band and academic_footer_note)
+                ):
                     block.block_type = BlockType.FOOTER
                     changes += 1
 
@@ -523,6 +598,209 @@ class RecoveryPipeline:
         return promoted
 
     @staticmethod
+    def _suppress_decorative_title_icons(
+        blocks: List[Block],
+        page_width: int = 0,
+        page_height: int = 0,
+    ) -> tuple[int, List[Block]]:
+        """吸附标题旁的小装饰图标，避免其单独参与阅读顺序。"""
+        if page_width <= 0 or page_height <= 0 or len(blocks) < 2:
+            return 0, blocks
+
+        figure_like = (BlockType.FIGURE, BlockType.IMAGE if hasattr(BlockType, "IMAGE") else BlockType.FIGURE)
+        titles = [blk for blk in blocks if isinstance(blk, TextBlock) and blk.block_type == BlockType.TITLE]
+        if not titles:
+            return 0, blocks
+
+        kept: List[Block] = []
+        suppressed = 0
+        for block in blocks:
+            if not isinstance(block, ImageBlock) or block.block_type not in figure_like:
+                kept.append(block)
+                continue
+
+            width = float(block.bbox.width)
+            height = float(block.bbox.height)
+            if width > float(page_width) * 0.10 or height > max(float(page_height) * 0.08, 120.0):
+                kept.append(block)
+                continue
+
+            best_title: TextBlock | None = None
+            best_score = float("inf")
+            for title in titles:
+                if title is block:
+                    continue
+                title_text = title.full_text().strip()
+                if not title_text or len(title_text) > 80:
+                    continue
+                vertical_overlap = min(float(block.bbox.y2), float(title.bbox.y2)) - max(float(block.bbox.y1), float(title.bbox.y1))
+                center_gap_y = abs(float(block.bbox.center[1]) - float(title.bbox.center[1]))
+                horizontal_gap = min(
+                    abs(float(block.bbox.x2) - float(title.bbox.x1)),
+                    abs(float(title.bbox.x2) - float(block.bbox.x1)),
+                )
+                horizontal_overlap = max(0.0, min(float(block.bbox.x2), float(title.bbox.x2)) - max(float(block.bbox.x1), float(title.bbox.x1)))
+                near_same_band = vertical_overlap >= -4.0 or center_gap_y <= max(float(height), float(title.bbox.height)) * 1.2
+                near_horizontally = horizontal_overlap >= 8.0 or horizontal_gap <= max(float(page_width) * 0.05, 64.0)
+                if not (near_same_band and near_horizontally):
+                    continue
+                score = max(0.0, horizontal_gap) + center_gap_y * 0.35 - horizontal_overlap * 0.2
+                if score < best_score:
+                    best_score = score
+                    best_title = title
+
+            if best_title is None:
+                kept.append(block)
+                continue
+
+            if best_title.attributes is None:
+                best_title.attributes = {}
+            best_title.attributes["has_decorative_icon"] = True
+            best_title.attributes["decorative_icon_bbox"] = [
+                float(block.bbox.x1), float(block.bbox.y1), float(block.bbox.x2), float(block.bbox.y2)
+            ]
+            suppressed += 1
+
+        return suppressed, kept
+
+    @staticmethod
+    def _suppress_spurious_visual_blocks_over_text(
+        blocks: List[Block],
+        page_width: int = 0,
+        page_height: int = 0,
+    ) -> tuple[int, List[Block]]:
+        """Drop figure/formula boxes that are actually text-region duplicates."""
+        if len(blocks) < 2:
+            return 0, blocks
+
+        text_blocks = [
+            blk for blk in blocks
+            if isinstance(blk, TextBlock)
+            and blk.block_type in {BlockType.TEXT, BlockType.TITLE, BlockType.REFERENCE, BlockType.ABSTRACT}
+        ]
+        if not text_blocks:
+            return 0, blocks
+
+        def _intersection_area(a: Block, b: Block) -> float:
+            overlap_w = max(0.0, min(float(a.bbox.x2), float(b.bbox.x2)) - max(float(a.bbox.x1), float(b.bbox.x1)))
+            overlap_h = max(0.0, min(float(a.bbox.y2), float(b.bbox.y2)) - max(float(a.bbox.y1), float(b.bbox.y1)))
+            return overlap_w * overlap_h
+
+        drop_ids: set[int] = set()
+        for block in blocks:
+            if not isinstance(block, (ImageBlock, EquationBlock)):
+                continue
+            if block.block_type not in {BlockType.FIGURE, BlockType.FORMULA, BlockType.EQUATION}:
+                continue
+
+            block_area = max(float(block.bbox.area), 1.0)
+            covered_text_area = 0.0
+            long_text_hits = 0
+            title_hits = 0
+            for text_block in text_blocks:
+                overlap_area = _intersection_area(block, text_block)
+                if overlap_area <= 0:
+                    continue
+                text_area = max(float(text_block.bbox.area), 1.0)
+                contains_text = overlap_area / text_area >= 0.82
+                mostly_text = overlap_area / block_area >= 0.82
+                long_text_like = (
+                    text_block.block_type == BlockType.TEXT
+                    and (
+                        text_block.count_lines() >= 4
+                        or len(text_block.full_text().strip()) >= 120
+                    )
+                )
+                title_duplicate = (
+                    text_block.block_type == BlockType.TITLE
+                    and contains_text
+                    and float(block.bbox.height) <= max(float(page_height) * 0.04, 72.0)
+                )
+                long_text_duplicate = (
+                    long_text_like
+                    and contains_text
+                    and mostly_text
+                )
+                if title_duplicate or long_text_duplicate:
+                    drop_ids.add(id(block))
+                    break
+
+                if contains_text:
+                    covered_text_area += min(overlap_area, text_area)
+                    if long_text_like:
+                        long_text_hits += 1
+                    elif text_block.block_type == BlockType.TITLE:
+                        title_hits += 1
+
+            if id(block) in drop_ids:
+                continue
+            aggregate_text_duplicate = (
+                block.block_type == BlockType.FIGURE
+                and long_text_hits >= 2
+                and covered_text_area / block_area >= 0.55
+            )
+            narrow_section_band_duplicate = (
+                block.block_type in {BlockType.FORMULA, BlockType.EQUATION}
+                and title_hits >= 1
+                and covered_text_area / block_area >= 0.65
+                and float(block.bbox.height) <= max(float(page_height) * 0.05, 96.0)
+            )
+            if aggregate_text_duplicate or narrow_section_band_duplicate:
+                drop_ids.add(id(block))
+
+        if not drop_ids:
+            return 0, blocks
+        return len(drop_ids), [blk for blk in blocks if id(blk) not in drop_ids]
+
+    @staticmethod
+    def _suppress_overlapped_figure_text_duplicates(
+        blocks: List[Block],
+        page_width: int = 0,
+        page_height: int = 0,
+    ) -> tuple[int, List[Block]]:
+        """移除与 figure 高重叠的短文本 OCR 泄漏。"""
+        if len(blocks) < 2:
+            return 0, blocks
+
+        figures = [
+            blk for blk in blocks
+            if isinstance(blk, ImageBlock) and blk.block_type == BlockType.FIGURE
+        ]
+        if not figures:
+            return 0, blocks
+
+        drop_ids: set[int] = set()
+        for fig in figures:
+            fig_area = max(float(fig.bbox.area), 1.0)
+            for blk in blocks:
+                if blk is fig or not isinstance(blk, TextBlock):
+                    continue
+                if blk.block_type not in {BlockType.TEXT, BlockType.TITLE}:
+                    continue
+                text = blk.full_text().strip()
+                if not text:
+                    continue
+                compact = re.sub(r"\s+", "", text)
+                if len(compact) > 12 or blk.count_lines() > 3:
+                    continue
+                overlap_w = max(0.0, min(float(fig.bbox.x2), float(blk.bbox.x2)) - max(float(fig.bbox.x1), float(blk.bbox.x1)))
+                overlap_h = max(0.0, min(float(fig.bbox.y2), float(blk.bbox.y2)) - max(float(fig.bbox.y1), float(blk.bbox.y1)))
+                overlap_area = overlap_w * overlap_h
+                if overlap_area <= 0:
+                    continue
+                blk_area = max(float(blk.bbox.area), 1.0)
+                overlap_ratio = overlap_area / min(fig_area, blk_area)
+                area_ratio = blk_area / fig_area
+                if overlap_ratio < 0.92 or not (0.65 <= area_ratio <= 1.35):
+                    continue
+                drop_ids.add(id(blk))
+
+        if not drop_ids:
+            return 0, blocks
+        kept = [blk for blk in blocks if id(blk) not in drop_ids]
+        return len(drop_ids), kept
+
+    @staticmethod
     def _merge_short_continuation_fragments(blocks: List[Block]) -> List[Block]:
         """吸收被错误切成独立块的短续接文本。"""
         if len(blocks) < 2:
@@ -569,6 +847,12 @@ class RecoveryPipeline:
                 )
                 if continuation_like:
                     prev.lines.extend(block.lines)
+                    prev.lines.sort(
+                        key=lambda line: (
+                            min((float(pt[1]) for pt in line.text_region), default=float(prev.bbox.y1)),
+                            min((float(pt[0]) for pt in line.text_region), default=float(prev.bbox.x1)),
+                        )
+                    )
                     prev.bbox = prev.bbox.union(block.bbox)
                     continue
 
@@ -577,10 +861,223 @@ class RecoveryPipeline:
         return merged
 
     @staticmethod
+    def _trim_repeated_prefix_within_flows(blocks: List[Block]) -> List[Block]:
+        """仅在同一 flow 内裁剪明显重复的前缀行。"""
+        if len(blocks) < 2:
+            return blocks
+
+        def _flow_id(block: Block) -> str:
+            attrs = getattr(block, "attributes", None) or {}
+            return str(attrs.get("flow_id", ""))
+
+        def _norm(text: str) -> str:
+            return re.sub(r"\s+", " ", (text or "")).strip()
+
+        def _x_overlap_ratio(a: Block, b: Block) -> float:
+            overlap = max(0.0, min(float(a.bbox.x2), float(b.bbox.x2)) - max(float(a.bbox.x1), float(b.bbox.x1)))
+            span = min(max(float(a.bbox.width), 1.0), max(float(b.bbox.width), 1.0))
+            return overlap / span
+
+        def _vertical_gap(a: Block, b: Block) -> float:
+            if float(a.bbox.y1) <= float(b.bbox.y2) and float(b.bbox.y1) <= float(a.bbox.y2):
+                return 0.0
+            return min(abs(float(a.bbox.y1) - float(b.bbox.y2)), abs(float(b.bbox.y1) - float(a.bbox.y2)))
+
+        def _trim_lines(block: TextBlock, count: int) -> bool:
+            remaining = list(block.lines[count:])
+            if not remaining:
+                return False
+            block.lines = remaining
+            xs: List[float] = []
+            ys: List[float] = []
+            for line in remaining:
+                if line.text_region:
+                    xs.extend(float(pt[0]) for pt in line.text_region)
+                    ys.extend(float(pt[1]) for pt in line.text_region)
+            if xs and ys:
+                block.bbox = block.bbox.__class__(
+                    x1=min(xs),
+                    y1=min(ys),
+                    x2=max(xs),
+                    y2=max(ys),
+                )
+            return True
+
+        trimmed: List[Block] = [blocks[0]]
+        for block in blocks[1:]:
+            prev_flow_id = _flow_id(trimmed[-1]) if trimmed else ""
+            same_flow = bool(prev_flow_id) and prev_flow_id == _flow_id(block)
+            same_column_track = (
+                getattr(block, "col_index", 0) == getattr(trimmed[-1], "col_index", 0)
+                and getattr(block, "col_count", 1) == getattr(trimmed[-1], "col_count", 1)
+            ) if trimmed else False
+            if (
+                trimmed
+                and isinstance(block, TextBlock)
+                and isinstance(trimmed[-1], TextBlock)
+                and (same_flow or same_column_track)
+                and _x_overlap_ratio(trimmed[-1], block) >= 0.75
+                and _vertical_gap(trimmed[-1], block) <= 48.0
+            ):
+                prev = trimmed[-1]
+                prev_lines = [_norm(line.text) for line in prev.lines if _norm(line.text)]
+                curr_lines = [_norm(line.text) for line in block.lines if _norm(line.text)]
+                max_shared = min(2, len(prev_lines), len(curr_lines))
+                shared = 0
+                for size in range(max_shared, 0, -1):
+                    if prev_lines[-size:] == curr_lines[:size]:
+                        shared = size
+                        break
+                if shared == 0 and prev_lines and curr_lines:
+                    prev_last = prev_lines[-1]
+                    curr_first = curr_lines[0]
+                    if (
+                        len(prev.lines) <= 2
+                        and len(prev_last) >= 12
+                        and (
+                            curr_first.startswith(prev_last)
+                            or prev_last.startswith(curr_first)
+                        )
+                    ):
+                        shared = 1
+                if shared > 0:
+                    keep = _trim_lines(block, shared)
+                    if not keep:
+                        continue
+            trimmed.append(block)
+
+        trimmed = RecoveryPipeline._absorb_short_tail_fragments_within_flows(trimmed)
+        return RecoveryPipeline._straighten_same_flow_boundaries(trimmed)
+
+    @staticmethod
+    def _absorb_short_tail_fragments_within_flows(blocks: List[Block]) -> List[Block]:
+        """把同一 flow / 同列中紧贴正文底部的短尾块吸回前一正文块。"""
+        if len(blocks) < 2:
+            return blocks
+
+        def _flow_id(block: Block) -> str:
+            attrs = getattr(block, "attributes", None) or {}
+            return str(attrs.get("flow_id", ""))
+
+        merged: List[Block] = []
+        for block in blocks:
+            if (
+                merged
+                and isinstance(block, TextBlock)
+                and isinstance(merged[-1], TextBlock)
+                and block.block_type == BlockType.TEXT
+                and merged[-1].block_type == BlockType.TEXT
+                and _flow_id(block)
+                and _flow_id(block) == _flow_id(merged[-1])
+                and getattr(block, "col_index", 0) == getattr(merged[-1], "col_index", 0)
+            ):
+                prev = merged[-1]
+                vertical_gap = float(block.bbox.y1) - float(prev.bbox.y2)
+                overlap = max(0.0, min(float(block.bbox.x2), float(prev.bbox.x2)) - max(float(block.bbox.x1), float(prev.bbox.x1)))
+                overlap_ratio = overlap / max(1.0, min(float(block.bbox.width), float(prev.bbox.width)))
+                curr_text = block.full_text()
+                absorbable = (
+                    vertical_gap <= 36.0
+                    and overlap_ratio >= 0.80
+                    and prev.count_lines() >= 4
+                    and 1 <= block.count_lines() <= 2
+                    and len((curr_text or "").strip()) <= 120
+                )
+                if absorbable:
+                    prev.lines.extend(block.lines)
+                    prev.bbox = prev.bbox.union(block.bbox)
+                    continue
+
+            merged.append(block)
+
+        return merged
+
+    @staticmethod
+    def _straighten_same_flow_boundaries(blocks: List[Block]) -> List[Block]:
+        if len(blocks) < 2:
+            return blocks
+
+        def _flow_id(block: Block) -> str:
+            attrs = getattr(block, "attributes", None) or {}
+            return str(attrs.get("flow_id", ""))
+
+        for prev, curr in zip(blocks, blocks[1:]):
+            prev_flow_id = _flow_id(prev)
+            curr_flow_id = _flow_id(curr)
+            # 仅对显式 article-flow 内的相邻块做边界拉直。
+            # legacy 路径下 flow_id 为空，若继续按空串相等处理，
+            # 会把普通相邻块误判为同一 flow，导致 bbox 被大幅裁坏。
+            if not prev_flow_id or not curr_flow_id or prev_flow_id != curr_flow_id:
+                continue
+            if getattr(prev, "col_index", 0) != getattr(curr, "col_index", 0):
+                continue
+            overlap = min(float(prev.bbox.y2), float(curr.bbox.y2)) - max(float(prev.bbox.y1), float(curr.bbox.y1))
+            prev_short = isinstance(prev, TextBlock) and len(prev.lines) <= 2
+            curr_short = isinstance(curr, TextBlock) and len(curr.lines) <= 2
+            if overlap <= 0 or (overlap > 36.0 and not prev_short and not curr_short):
+                continue
+            mid = (max(float(prev.bbox.y1), float(curr.bbox.y1)) + min(float(prev.bbox.y2), float(curr.bbox.y2))) * 0.5
+            prev.bbox.y2 = max(float(prev.bbox.y1), mid - 1.0)
+            curr.bbox.y1 = min(float(curr.bbox.y2), mid + 1.0)
+
+        return blocks
+
+    @staticmethod
     def _annotate_page_profile(page: Page, blocks: List[Block]) -> None:
         if page.attributes is None:
             page.attributes = {}
-        page.attributes["layout_profile"] = RecoveryPipeline._infer_layout_profile(page, blocks)
+        profile = RecoveryPipeline._infer_layout_profile(page, blocks)
+        page.attributes["layout_profile"] = profile
+        page.attributes["render_mode"] = RecoveryPipeline._render_mode_for_profile(profile)
+
+    @staticmethod
+    def _render_mode_for_profile(profile: str) -> str:
+        if profile in {"single_column", "table_heavy"}:
+            return "reflow"
+        if profile == "academic_two_col":
+            return "native_columns"
+        return "grid"
+
+    @staticmethod
+    def _collect_xycutpp_proto_debug(blocks: List[Block]) -> dict:
+        phase_counts: dict[str, int] = {}
+        strategy_counts: dict[str, int] = {}
+        cross_candidates: list[str] = []
+        restore_pairs: list[dict] = []
+
+        for block in blocks:
+            attrs = getattr(block, "attributes", None) or {}
+            debug = attrs.get("xycutpp_proto")
+            if not isinstance(debug, dict):
+                continue
+
+            phase = str(debug.get("phase", "") or "")
+            strategy = str(debug.get("strategy", "") or "")
+            if phase:
+                phase_counts[phase] = phase_counts.get(phase, 0) + 1
+            if strategy:
+                strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
+            if bool(debug.get("cross_candidate")):
+                block_id = getattr(block, "block_id", "")
+                if block_id:
+                    cross_candidates.append(block_id)
+            if "restore_rank" in debug:
+                restore_pairs.append(
+                    {
+                        "id": getattr(block, "block_id", ""),
+                        "phase": phase,
+                        "restore_anchor_id": str(debug.get("restore_anchor_id", "") or ""),
+                        "restore_rank": float(debug.get("restore_rank", -1.0)),
+                    }
+                )
+
+        restore_pairs.sort(key=lambda item: (item["restore_rank"], item["id"]))
+        return {
+            "phase_counts": phase_counts,
+            "strategy_counts": strategy_counts,
+            "cross_candidates": cross_candidates,
+            "restore_pairs": restore_pairs,
+        }
 
     @staticmethod
     def _infer_layout_profile(page: Page, blocks: List[Block]) -> str:
@@ -685,6 +1182,14 @@ class RecoveryPipeline:
         if not blocks:
             return []
 
+        def _flow_id(block: Block) -> str:
+            attrs = getattr(block, "attributes", None) or {}
+            return str(attrs.get("flow_id", ""))
+
+        def _flow_kind(block: Block) -> str:
+            attrs = getattr(block, "attributes", None) or {}
+            return str(attrs.get("flow_kind", ""))
+
         def _is_top_strip_block(block: Block) -> bool:
             if block.block_type not in _STRIP_TYPES:
                 return False
@@ -704,23 +1209,36 @@ class RecoveryPipeline:
         while core_blocks and _is_top_strip_block(core_blocks[0]):
             prefix_strip_blocks.append(core_blocks.pop(0))
 
-        suffix_strip_blocks: List[Block] = []
-        while core_blocks and _is_bottom_strip_block(core_blocks[-1]):
-            suffix_strip_blocks.insert(0, core_blocks.pop())
+        suffix_strip_blocks: List[Block] = [
+            block for block in core_blocks if _is_bottom_strip_block(block)
+        ]
+        if suffix_strip_blocks:
+            suffix_ids = {id(block) for block in suffix_strip_blocks}
+            core_blocks = [block for block in core_blocks if id(block) not in suffix_ids]
+            suffix_strip_blocks.sort(key=lambda b: (b.bbox.y1, b.bbox.x1))
 
         blocks = core_blocks
         if not blocks:
             strip_blocks = prefix_strip_blocks + suffix_strip_blocks
             if not strip_blocks:
                 return []
-            return [Zone(col_count=1, blocks=sorted(strip_blocks, key=lambda b: b.bbox.x1), has_spanned=False)]
+            return [Zone(col_count=1, blocks=sorted(strip_blocks, key=lambda b: b.bbox.x1), has_spanned=False, flow_id="", flow_kind="")]
+
+        order_index = {id(block): idx for idx, block in enumerate(blocks)}
+
+        def _preserve_order(items: List[Block]) -> None:
+            items.sort(key=lambda b: order_index.get(id(b), 10**9))
 
         zones: List[Zone] = []
         current_blocks: List[Block] = [blocks[0]]
         current_col_count: int = blocks[0].col_count
+        current_flow_id: str = _flow_id(blocks[0])
+        current_flow_kind: str = _flow_kind(blocks[0])
 
         for block in blocks[1:]:
-            if block.col_count == current_col_count:
+            block_flow_id = _flow_id(block)
+            block_flow_kind = _flow_kind(block)
+            if block.col_count == current_col_count and block_flow_id == current_flow_id:
                 current_blocks.append(block)
             else:
                 has_spanned = any(
@@ -730,9 +1248,13 @@ class RecoveryPipeline:
                     col_count=current_col_count,
                     blocks=current_blocks,
                     has_spanned=has_spanned,
+                    flow_id=current_flow_id,
+                    flow_kind=current_flow_kind,
                 ))
                 current_blocks = [block]
                 current_col_count = block.col_count
+                current_flow_id = block_flow_id
+                current_flow_kind = block_flow_kind
 
         # 输出最后一组
         has_spanned = any(len(b.spanned_cols) > 1 for b in current_blocks)
@@ -740,6 +1262,8 @@ class RecoveryPipeline:
             col_count=current_col_count,
             blocks=current_blocks,
             has_spanned=has_spanned,
+            flow_id=current_flow_id,
+            flow_kind=current_flow_kind,
         ))
 
         # 后处理：将微小单栏区域吸收到相邻的多栏区域
@@ -748,7 +1272,7 @@ class RecoveryPipeline:
             idx = 0
             while idx < len(zones):
                 zone = zones[idx]
-                if zone.col_count == 1 and merged and merged[-1].col_count > 1:
+                if zone.col_count == 1 and merged and merged[-1].col_count > 1 and zone.flow_id == merged[-1].flow_id:
                     target = merged[-1]
                     movable: List[Block] = []
                     remain: List[Block] = []
@@ -781,7 +1305,7 @@ class RecoveryPipeline:
                         target.has_spanned = target.has_spanned or any(
                             len(getattr(b, "spanned_cols", [])) > 1 for b in movable
                         )
-                        target.blocks.sort(key=lambda b: (b.col_index, b.bbox.y1))
+                        _preserve_order(target.blocks)
 
                     if not movable and idx + 1 < len(zones) and zones[idx + 1].col_count > 1:
                         next_target = zones[idx + 1]
@@ -813,7 +1337,7 @@ class RecoveryPipeline:
                                 b.col_index = min(int(cx / col_w), next_target.col_count - 1)
                                 b.spanned_cols = [b.col_index]
                             next_target.blocks.extend(next_movable)
-                            next_target.blocks.sort(key=lambda b: (b.col_index, b.bbox.y1))
+                            _preserve_order(next_target.blocks)
                             remain = next_remain
 
                     if remain:
@@ -822,11 +1346,13 @@ class RecoveryPipeline:
                             col_count=1,
                             blocks=remain,
                             has_spanned=has_spanned,
+                            flow_id=_flow_id(remain[0]) if remain else "",
+                            flow_kind=_flow_kind(remain[0]) if remain else "",
                         ))
                     idx += 1
                     continue
 
-                if zone.col_count == 1 and idx + 1 < len(zones) and zones[idx + 1].col_count > 1:
+                if zone.col_count == 1 and idx + 1 < len(zones) and zones[idx + 1].col_count > 1 and zone.flow_id == zones[idx + 1].flow_id:
                     target = zones[idx + 1]
                     movable = []
                     remain = []
@@ -856,12 +1382,14 @@ class RecoveryPipeline:
                             b.col_index = min(int(cx / col_w), target.col_count - 1)
                             b.spanned_cols = [b.col_index]
                         target.blocks.extend(movable)
-                        target.blocks.sort(key=lambda b: (b.col_index, b.bbox.y1))
+                        _preserve_order(target.blocks)
                     if remain:
                         merged.append(Zone(
                             col_count=1,
                             blocks=remain,
                             has_spanned=any(len(b.spanned_cols) > 1 for b in remain),
+                            flow_id=_flow_id(remain[0]) if remain else "",
+                            flow_kind=_flow_kind(remain[0]) if remain else "",
                         ))
                     idx += 1
                     continue
@@ -877,13 +1405,13 @@ class RecoveryPipeline:
                 prev = consolidated[-1]
                 if (
                     zone.col_count == prev.col_count
+                    and zone.flow_id == prev.flow_id
                     and zone.rendering_strategy != "strip_row"
                     and prev.rendering_strategy != "strip_row"
                 ):
                     prev.blocks.extend(zone.blocks)
                     prev.has_spanned = prev.has_spanned or zone.has_spanned
-                    # 重排序，保证 col-0 在 col-1 之前
-                    prev.blocks.sort(key=lambda b: (b.col_index, b.bbox.y1))
+                    _preserve_order(prev.blocks)
                 else:
                     consolidated.append(zone)
             zones = consolidated
@@ -893,12 +1421,16 @@ class RecoveryPipeline:
                 col_count=1,
                 blocks=sorted(prefix_strip_blocks, key=lambda b: b.bbox.x1),
                 has_spanned=False,
+                flow_id="",
+                flow_kind="",
             ))
         if suffix_strip_blocks:
             zones.append(Zone(
                 col_count=1,
-                blocks=sorted(suffix_strip_blocks, key=lambda b: b.bbox.x1),
+                blocks=sorted(suffix_strip_blocks, key=lambda b: (b.bbox.y1, b.bbox.x1)),
                 has_spanned=False,
+                flow_id="",
+                flow_kind="",
             ))
 
         return zones

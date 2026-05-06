@@ -9,6 +9,7 @@ import io
 import os
 import logging
 import math
+from pathlib import Path
 from collections import defaultdict
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
@@ -105,12 +106,17 @@ class DocxRenderer(BaseRenderer):
     def render(self, document: "Document", output_path: str, **options) -> None:
         expected_pages = int(options.get("expected_pages", len(document.pages)))
         enforce_single_page = bool(options.get("enforce_single_page", True))
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        tmp_output = output.with_name(f".{output.name}.tmp")
         if enforce_single_page and expected_pages == 1:
             doc = self._render_single_page_fit(document, expected_pages, **options)
-            doc.save(output_path)
+            doc.save(tmp_output)
+            tmp_output.replace(output)
             return
         doc = self._build_docx(document, **options)
-        doc.save(output_path)
+        doc.save(tmp_output)
+        tmp_output.replace(output)
 
     def render_bytes(self, document: "Document", **options) -> bytes:
         expected_pages = int(options.get("expected_pages", len(document.pages)))

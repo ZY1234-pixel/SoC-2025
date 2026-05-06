@@ -28,6 +28,8 @@ class Zone:
     col_count: int
     blocks: List[Block] = field(default_factory=list)
     has_spanned: bool = False
+    flow_id: str = ""
+    flow_kind: str = ""
 
     @property
     def is_strip_row(self) -> bool:

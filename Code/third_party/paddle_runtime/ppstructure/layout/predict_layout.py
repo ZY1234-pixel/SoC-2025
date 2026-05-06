@@ -145,6 +145,19 @@ class LayoutPredictor(object):
         self.use_ncnn = self.ncnn_param_path is not None and self.ncnn_model_path is not None
         self.ncnn_input_size = resize_size
         self.ncnn_conf_threshold = min(float(args.layout_score_threshold), 0.25)
+        self.enable_tiled_recall = self._env_flag("DOCFLOW_LAYOUT_TILE_RECALL", True)
+        self.tile_overlap_ratio = self._env_float(
+            "DOCFLOW_LAYOUT_TILE_OVERLAP", default=0.18, minimum=0.05, maximum=0.45
+        )
+        self.tile_trigger_ratio = self._env_float(
+            "DOCFLOW_LAYOUT_TILE_TRIGGER_RATIO", default=1.05, minimum=1.0, maximum=3.0
+        )
+        self.tile_margin_ratio = self._env_float(
+            "DOCFLOW_LAYOUT_TILE_MARGIN_RATIO", default=0.02, minimum=0.0, maximum=0.15
+        )
+        self.tile_max_passes = int(
+            max(1, min(16, self._env_float("DOCFLOW_LAYOUT_TILE_MAX_PASSES", default=12, minimum=1, maximum=16)))
+        )
         self.predictor = None
         self.input_tensor = None
         self.output_tensors = None
@@ -173,6 +186,24 @@ class LayoutPredictor(object):
             ) = utility.create_predictor(args, "layout", logger)
             self.use_onnx = args.use_onnx
             self.input_names = None if self.use_onnx else self.predictor.get_input_names()
+
+    @staticmethod
+    def _env_flag(name, default):
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() not in {"0", "false", "off", "no"}
+
+    @staticmethod
+    def _env_float(name, default, minimum, maximum):
+        raw = os.environ.get(name)
+        if raw is None or not str(raw).strip():
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            return default
+        return max(minimum, min(maximum, value))
 
     def _map_label(self, label):
         return self._DOC_LAYOUT_LABEL_MAP.get(str(label).lower(), str(label).lower())
@@ -369,7 +400,190 @@ class LayoutPredictor(object):
             )
         return results
 
-    def __call__(self, img):
+    @staticmethod
+    def _tile_starts(length, tile_length, overlap_ratio):
+        if tile_length >= length:
+            return [0]
+        stride = max(1, int(round(tile_length * (1.0 - overlap_ratio))))
+        starts = [0]
+        while starts[-1] + tile_length < length:
+            next_start = min(starts[-1] + stride, length - tile_length)
+            if next_start <= starts[-1]:
+                break
+            starts.append(next_start)
+        return starts
+
+    @staticmethod
+    def _clip_bbox(bbox, width, height):
+        clipped = np.asarray(bbox, dtype=np.float32).copy()
+        clipped[0::2] = np.clip(clipped[0::2], 0, width)
+        clipped[1::2] = np.clip(clipped[1::2], 0, height)
+        return clipped
+
+    @staticmethod
+    def _bbox_area(bbox):
+        return max(0.0, float(bbox[2] - bbox[0])) * max(0.0, float(bbox[3] - bbox[1]))
+
+    @classmethod
+    def _bbox_iou(cls, bbox_a, bbox_b):
+        x1 = max(float(bbox_a[0]), float(bbox_b[0]))
+        y1 = max(float(bbox_a[1]), float(bbox_b[1]))
+        x2 = min(float(bbox_a[2]), float(bbox_b[2]))
+        y2 = min(float(bbox_a[3]), float(bbox_b[3]))
+        inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        if inter <= 0.0:
+            return 0.0
+        area_a = cls._bbox_area(bbox_a)
+        area_b = cls._bbox_area(bbox_b)
+        denom = area_a + area_b - inter
+        if denom <= 1e-6:
+            return 0.0
+        return inter / denom
+
+    @classmethod
+    def _bbox_containment(cls, bbox_a, bbox_b):
+        x1 = max(float(bbox_a[0]), float(bbox_b[0]))
+        y1 = max(float(bbox_a[1]), float(bbox_b[1]))
+        x2 = min(float(bbox_a[2]), float(bbox_b[2]))
+        y2 = min(float(bbox_a[3]), float(bbox_b[3]))
+        inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        if inter <= 0.0:
+            return 0.0
+        area_a = cls._bbox_area(bbox_a)
+        area_b = cls._bbox_area(bbox_b)
+        return inter / max(1e-6, min(area_a, area_b))
+
+    @classmethod
+    def _same_detection(cls, candidate, kept):
+        if candidate["label"] != kept["label"]:
+            return False
+        bbox_a = candidate["bbox"]
+        bbox_b = kept["bbox"]
+        return cls._bbox_iou(bbox_a, bbox_b) >= 0.45 or cls._bbox_containment(bbox_a, bbox_b) >= 0.88
+
+    def _filter_tile_edge_box(
+        self,
+        bbox,
+        *,
+        tile_width,
+        tile_height,
+        is_left_edge,
+        is_top_edge,
+        is_right_edge,
+        is_bottom_edge,
+    ):
+        margin_x = max(8.0, float(tile_width) * self.tile_margin_ratio)
+        margin_y = max(8.0, float(tile_height) * self.tile_margin_ratio)
+        if not is_left_edge and float(bbox[0]) <= margin_x:
+            return True
+        if not is_top_edge and float(bbox[1]) <= margin_y:
+            return True
+        if not is_right_edge and float(tile_width - bbox[2]) <= margin_x:
+            return True
+        if not is_bottom_edge and float(tile_height - bbox[3]) <= margin_y:
+            return True
+        return False
+
+    def _merge_layout_results(self, primary_results, fallback_results, image_shape):
+        if not fallback_results:
+            return primary_results
+        image_height, image_width = image_shape[:2]
+        merged = []
+        combined = []
+        for region in list(primary_results) + list(fallback_results):
+            label = region.get("label")
+            if label is None:
+                continue
+            bbox = self._clip_bbox(region["bbox"], image_width, image_height)
+            if self._bbox_area(bbox) <= 1.0:
+                continue
+            combined.append(
+                {
+                    "bbox": bbox,
+                    "label": label,
+                    "score": float(region.get("score", 0.0)),
+                }
+            )
+
+        combined.sort(
+            key=lambda item: (
+                float(item["score"]),
+                self._bbox_area(item["bbox"]),
+            ),
+            reverse=True,
+        )
+        for candidate in combined:
+            if any(self._same_detection(candidate, kept) for kept in merged):
+                continue
+            merged.append(candidate)
+        return merged
+
+    def _should_run_tiled_recall(self, img):
+        if not self.enable_tiled_recall:
+            return False
+        if self.tile_max_passes <= 1:
+            return False
+        img_h, img_w = img.shape[:2]
+        input_w = max(int(self.ncnn_input_size[0]), 1)
+        input_h = max(int(self.ncnn_input_size[1]), 1)
+        return (
+            img_w > input_w * self.tile_trigger_ratio
+            or img_h > input_h * self.tile_trigger_ratio
+        )
+
+    def _predict_tiled_recall(self, img):
+        img_h, img_w = img.shape[:2]
+        tile_w = min(max(int(self.ncnn_input_size[0]), 32), img_w)
+        tile_h = min(max(int(self.ncnn_input_size[1]), 32), img_h)
+        x_starts = self._tile_starts(img_w, tile_w, self.tile_overlap_ratio)
+        y_starts = self._tile_starts(img_h, tile_h, self.tile_overlap_ratio)
+        if len(x_starts) * len(y_starts) <= 1:
+            return [], 0.0
+
+        fallback_results = []
+        elapsed = 0.0
+        pass_count = 0
+        for y0 in y_starts:
+            for x0 in x_starts:
+                if pass_count >= self.tile_max_passes:
+                    return fallback_results, elapsed
+                crop = img[y0 : y0 + tile_h, x0 : x0 + tile_w]
+                local_results, local_elapsed = self._predict_single(crop)
+                elapsed += local_elapsed
+                pass_count += 1
+                is_left_edge = x0 == 0
+                is_top_edge = y0 == 0
+                is_right_edge = x0 + tile_w >= img_w
+                is_bottom_edge = y0 + tile_h >= img_h
+                for region in local_results:
+                    label = region.get("label")
+                    if label is None:
+                        continue
+                    bbox = np.asarray(region["bbox"], dtype=np.float32).copy()
+                    if self._filter_tile_edge_box(
+                        bbox,
+                        tile_width=tile_w,
+                        tile_height=tile_h,
+                        is_left_edge=is_left_edge,
+                        is_top_edge=is_top_edge,
+                        is_right_edge=is_right_edge,
+                        is_bottom_edge=is_bottom_edge,
+                    ):
+                        continue
+                    bbox[0] += x0
+                    bbox[2] += x0
+                    bbox[1] += y0
+                    bbox[3] += y0
+                    fallback_results.append(
+                        {
+                            "bbox": bbox,
+                            "label": label,
+                            "score": float(region.get("score", 0.0)),
+                        }
+                    )
+        return fallback_results, elapsed
+
+    def _predict_single(self, img):
         if self.use_ncnn:
             starttime = time.time()
             outputs, ratio_pad = self._predict_with_ncnn(img)
@@ -462,6 +676,16 @@ class LayoutPredictor(object):
             it["label"] = self._map_label(it["label"])
         elapse = time.time() - starttime
         return post_preds, elapse
+
+    def __call__(self, img):
+        base_results, base_elapsed = self._predict_single(img)
+        if not self._should_run_tiled_recall(img):
+            return base_results, base_elapsed
+        fallback_results, fallback_elapsed = self._predict_tiled_recall(img)
+        if not fallback_results:
+            return base_results, base_elapsed + fallback_elapsed
+        merged = self._merge_layout_results(base_results, fallback_results, img.shape)
+        return merged, base_elapsed + fallback_elapsed
 
 
 def main(args):

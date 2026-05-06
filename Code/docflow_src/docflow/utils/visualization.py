@@ -48,12 +48,41 @@ _COL_PALETTE = [
     (50, 130, 200),   # brown
 ]
 
+_FLOW_PALETTE_BGR = [
+    (40, 85, 235),    # vivid blue
+    (38, 178, 68),    # vivid green
+    (44, 158, 245),   # vivid orange
+    (192, 68, 214),   # vivid violet
+    (30, 198, 198),   # vivid cyan
+    (68, 74, 238),    # vivid red
+    (48, 206, 240),   # bright amber
+    (132, 112, 36),   # olive/brown
+]
+
 
 def _as_int_bbox(bbox: Sequence[float]) -> tuple[int, int, int, int]:
     if not bbox or len(bbox) != 4:
         return 0, 0, 0, 0
     x1, y1, x2, y2 = bbox
     return int(x1), int(y1), int(x2), int(y2)
+
+
+def _flow_color(flow_id: str, fallback_col_index: int = 0) -> tuple[int, int, int]:
+    if not flow_id:
+        return _COL_PALETTE[fallback_col_index % len(_COL_PALETTE)]
+    h = 5381
+    for ch in flow_id:
+        h = ((h * 33) + ord(ch)) & 0xFFFFFFFF
+    return _FLOW_PALETTE_BGR[h % len(_FLOW_PALETTE_BGR)]
+
+
+def _tint_for_column(color: tuple[int, int, int], col_index: int) -> tuple[int, int, int]:
+    if col_index <= 0:
+        return color
+    # 同一 flow 内不同列采用更强的明暗分层，优先保证肉眼易区分。
+    factor = max(0.34, 1.0 - 0.28 * col_index)
+    lift = 255 * (1.0 - factor) * 0.22
+    return tuple(max(0, min(255, int(channel * factor + lift))) for channel in color)
 
 
 def _load_font(font_path: str | None, size: int) -> ImageFont.ImageFont:
@@ -87,6 +116,42 @@ def _extract_text_result(item) -> tuple[list[list[float]] | None, str]:
             text = str(value)
         return poly, text
     return None, ""
+
+
+def _overlay_ocr_polys(
+    image_bgr: np.ndarray,
+    regions: List[Dict] | None,
+    *,
+    color: tuple[int, int, int] = (0, 255, 255),
+    show_text_preview: bool = False,
+    font_path: str | None = None,
+    max_preview_chars: int = 18,
+) -> np.ndarray:
+    if not regions:
+        return image_bgr
+
+    pil_img = Image.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+    tiny_font = _load_font(font_path, size=12)
+
+    for region in regions:
+        res = region.get("res")
+        if not isinstance(res, list):
+            continue
+        for line in res:
+            poly, txt = _extract_text_result(line)
+            if not isinstance(poly, (list, tuple)) or len(poly) < 2:
+                continue
+            pts = [(int(p[0]), int(p[1])) for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2]
+            if len(pts) < 2:
+                continue
+            draw.line(pts + [pts[0]], fill=color, width=2)
+            if show_text_preview and txt:
+                preview = txt[:max_preview_chars]
+                px, py = pts[0]
+                draw.text((px + 1, max(0, py - 12)), preview, fill=color, font=tiny_font)
+
+    return cv2.cvtColor(np.asarray(pil_img), cv2.COLOR_RGB2BGR)
 
 
 def draw_layout_ocr(
@@ -143,7 +208,12 @@ def draw_layout_ocr(
     return cv2.cvtColor(np.asarray(pil_img), cv2.COLOR_RGB2BGR)
 
 
-def draw_sorted_layout(image_bgr: np.ndarray, blocks: List[Dict]) -> np.ndarray:
+def draw_sorted_layout(
+    image_bgr: np.ndarray,
+    blocks: List[Dict],
+    *,
+    ocr_regions: List[Dict] | None = None,
+) -> np.ndarray:
     """Draw sorted-layout overlay (color by col_index, mark spanning blocks)."""
     vis = image_bgr.copy()
     for order, block in enumerate(blocks):
@@ -162,7 +232,11 @@ def draw_sorted_layout(image_bgr: np.ndarray, blocks: List[Dict]) -> np.ndarray:
             cv2.rectangle(vis, (x1 + 4, y1 + 4), (x2 - 4, y2 - 4), (255, 255, 255), 1)
 
         btype = str(block.get("type", "?"))
-        label = f"{order}:{btype[:6]} {col_count}c-{col_index}"
+        flow_id = str(block.get("flow_id", "") or "")
+        flow_tag = ""
+        if flow_id:
+            flow_tag = f" f{flow_id.split('_')[-1]}"
+        label = f"{order}:{btype[:6]} {col_count}c-{col_index}{flow_tag}"
         if len(spanned_cols) > 1:
             label += f"[{','.join(str(v) for v in spanned_cols)}]"
 
@@ -179,7 +253,209 @@ def draw_sorted_layout(image_bgr: np.ndarray, blocks: List[Dict]) -> np.ndarray:
             1,
             cv2.LINE_AA,
         )
-    return vis
+    return _overlay_ocr_polys(vis, ocr_regions, show_text_preview=False)
+
+
+def _fit_center_font_scale(text: str, box_w: int, box_h: int) -> tuple[float, int]:
+    """为块中心大号序号估计更激进的自适应字号。"""
+    if box_w <= 0 or box_h <= 0:
+        return 0.45, 2
+
+    # 让数字尽量填满区块，同时为细长块保留少量边距。
+    target_w = max(20, int(box_w * 0.72))
+    target_h = max(20, int(box_h * 0.68))
+
+    # 以区块较短边估算一个初始尺度，再向下试探，避免对大块上限过低。
+    short_edge = max(1.0, min(float(box_w), float(box_h)))
+    scale = max(0.55, min(8.0, short_edge / 46.0))
+    thickness = max(2, min(10, int(scale * 1.6)))
+
+    while scale > 0.30:
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+        if tw <= target_w and th <= target_h:
+            return scale, thickness
+        scale *= 0.92
+        thickness = max(2, min(10, int(scale * 1.6)))
+
+    return 0.30, 2
+
+
+def _block_area(block: Dict) -> float:
+    x1, y1, x2, y2 = _as_int_bbox(block.get("bbox", []))
+    return float(max(0, x2 - x1) * max(0, y2 - y1))
+
+
+def _visual_stack_order(blocks: List[Dict]) -> List[tuple[int, Dict]]:
+    """Return blocks in a visibility-friendly z-order.
+
+    Large / spanning blocks are rendered first and smaller local blocks later,
+    so cross-column titles do not hide inner text boxes.
+    """
+    indexed = list(enumerate(blocks))
+    return sorted(
+        indexed,
+        key=lambda item: (
+            -len(item[1].get("spanned_cols") or []),
+            -_block_area(item[1]),
+            item[0],
+        ),
+    )
+
+
+def _inset_rect(x1: int, y1: int, x2: int, y2: int, inset: int) -> tuple[int, int, int, int]:
+    if inset <= 0:
+        return x1, y1, x2, y2
+    if (x2 - x1) <= inset * 2 or (y2 - y1) <= inset * 2:
+        return x1, y1, x2, y2
+    return x1 + inset, y1 + inset, x2 - inset, y2 - inset
+
+
+def draw_reading_order_map(
+    image_bgr: np.ndarray,
+    blocks: List[Dict],
+    *,
+    title: str | None = None,
+    alpha: float = 0.34,
+    ocr_regions: List[Dict] | None = None,
+) -> np.ndarray:
+    """绘制论文风格的阅读顺序图：块填充 + 中央大号序号。"""
+    if image_bgr is None:
+        raise ValueError("image_bgr is None")
+
+    base = image_bgr.copy()
+    overlay = image_bgr.copy()
+    title_band_h = 56 if title else 0
+
+    if title:
+        cv2.rectangle(base, (0, 0), (base.shape[1], title_band_h), (248, 248, 248), -1)
+        cv2.putText(
+            base,
+            title,
+            (20, 36),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (20, 20, 20),
+            2,
+            cv2.LINE_AA,
+        )
+        overlay = base.copy()
+
+    stacked_blocks = _visual_stack_order(blocks)
+
+    for _order_idx, block in stacked_blocks:
+        x1, y1, x2, y2 = _as_int_bbox(block.get("bbox", []))
+        col_index = int(block.get("col_index", 0))
+        flow_id = str(block.get("flow_id", "") or "")
+        spanned_cols = block.get("spanned_cols") or [col_index]
+        if not isinstance(spanned_cols, list):
+            spanned_cols = [col_index]
+
+        color = _tint_for_column(_flow_color(flow_id, col_index), col_index)
+        fill_inset = 3 if len(spanned_cols) > 1 else 2
+        fx1, fy1, fx2, fy2 = _inset_rect(x1, y1, x2, y2, fill_inset)
+        cv2.rectangle(overlay, (fx1, fy1), (fx2, fy2), color, -1)
+        if len(spanned_cols) > 1:
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 255, 255), 6)
+
+    vis = cv2.addWeighted(overlay, alpha, base, 1.0 - alpha, 0.0)
+
+    for _order_idx, block in stacked_blocks:
+        x1, y1, x2, y2 = _as_int_bbox(block.get("bbox", []))
+        col_index = int(block.get("col_index", 0))
+        flow_id = str(block.get("flow_id", "") or "")
+        spanned_cols = block.get("spanned_cols") or [col_index]
+        if not isinstance(spanned_cols, list):
+            spanned_cols = [col_index]
+
+        color = _tint_for_column(_flow_color(flow_id, col_index), col_index)
+        thick = 5 if len(spanned_cols) > 1 else 3
+        cv2.rectangle(vis, (x1, y1), (x2, y2), (255, 255, 255), thick + 2)
+        cv2.rectangle(vis, (x1, y1), (x2, y2), color, thick)
+
+    for order, block in enumerate(blocks, start=1):
+        x1, y1, x2, y2 = _as_int_bbox(block.get("bbox", []))
+        col_index = int(block.get("col_index", 0))
+        flow_id = str(block.get("flow_id", "") or "")
+        spanned_cols = block.get("spanned_cols") or [col_index]
+        if not isinstance(spanned_cols, list):
+            spanned_cols = [col_index]
+
+        number = str(order)
+        scale, num_thickness = _fit_center_font_scale(number, x2 - x1, y2 - y1)
+        (tw, th), baseline = cv2.getTextSize(number, cv2.FONT_HERSHEY_SIMPLEX, scale, num_thickness)
+        cx = x1 + max(0, ((x2 - x1) - tw) // 2)
+        cy = y1 + max(th, ((y2 - y1) + th) // 2)
+
+        cv2.putText(
+            vis,
+            number,
+            (cx, cy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            scale,
+            (255, 255, 255),
+            num_thickness + 3,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            vis,
+            number,
+            (cx, cy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            scale,
+            (25, 25, 25),
+            num_thickness,
+            cv2.LINE_AA,
+        )
+
+        btype = str(block.get("type", "?"))
+        flow_tag = f" f{flow_id.split('_')[-1]}" if flow_id else ""
+        small = f"{btype} c{col_index}{flow_tag}"
+        cv2.putText(
+            vis,
+            small,
+            (x1 + 6, max(y1 + 18, 18)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (20, 20, 20),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            vis,
+            small,
+            (x1 + 6, max(y1 + 18, 18)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+    return _overlay_ocr_polys(vis, ocr_regions, show_text_preview=False)
+
+
+def draw_reading_order_comparison(
+    image_bgr: np.ndarray,
+    legacy_blocks: List[Dict],
+    xycutpp_blocks: List[Dict],
+    *,
+    ocr_regions: List[Dict] | None = None,
+) -> np.ndarray:
+    """并排比较原始/XY-Cut++ 两种读序。"""
+    left = draw_reading_order_map(
+        image_bgr,
+        legacy_blocks,
+        title="Legacy Reading Order",
+        ocr_regions=ocr_regions,
+    )
+    right = draw_reading_order_map(
+        image_bgr,
+        xycutpp_blocks,
+        title="XY-Cut++ Reading Order",
+        ocr_regions=ocr_regions,
+    )
+    gap = np.full((left.shape[0], 24, 3), 245, dtype=np.uint8)
+    return np.concatenate([left, gap, right], axis=1)
 
 
 def extract_sorted_blocks(document, page_index: int = 0) -> List[Dict]:
@@ -193,11 +469,13 @@ def extract_sorted_blocks(document, page_index: int = 0) -> List[Dict]:
         for blk in zone.blocks:
             out.append(
                 {
+                    "id": getattr(blk, "block_id", ""),
                     "type": blk.block_type.value,
                     "bbox": [blk.bbox.x1, blk.bbox.y1, blk.bbox.x2, blk.bbox.y2],
                     "col_count": int(blk.col_count),
                     "col_index": int(blk.col_index),
                     "spanned_cols": list(blk.spanned_cols) if blk.spanned_cols else [int(blk.col_index)],
+                    "flow_id": str((getattr(blk, "attributes", None) or {}).get("flow_id", "")),
                 }
             )
     return out
