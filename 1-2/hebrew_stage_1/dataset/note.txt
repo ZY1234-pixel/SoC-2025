@@ -1,0 +1,21 @@
+# 数据集介绍
+
+本数据集共包含训练数据10万张，验证数据1万张，包括希伯来单词和40字符内的短句，比例为3：7
+
+
+# 数据集格式
+
+hebrew
+——images
+        ——train_word_xx.jpg
+        ——val_word_xx.jpg
+——test
+——dict.txt
+——train.txt
+——val.txt
+
+
+# 数据集路径
+
+链接: https://pan.baidu.com/s/1cVPOWOngw62u6qA1i9ZomA?pwd=zcuk 提取码: zcuk 
+--来自百度网盘超级会员v6的分享
