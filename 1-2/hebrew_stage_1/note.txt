@@ -1,0 +1,9 @@
+# 希伯来语识别
+
+希伯来语算法目前基于paddleOCR框架进行训练，代码可直接从仓库下载，详细过程见readme_ch.md，目前使用的版本为release3.2
+
+
+# 数据集路径
+
+链接: https://pan.baidu.com/s/1cVPOWOngw62u6qA1i9ZomA?pwd=zcuk 提取码: zcuk 
+--来自百度网盘超级会员v6的分享
