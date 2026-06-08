@@ -1,5 +1,0 @@
-四个文件存放位置分别为:
-1. ppocr/utils/rtl.py
-2. tools/infer/predict_rec.py
-3. tools/infer/utility.py
-4. tools/infer_rec.py
