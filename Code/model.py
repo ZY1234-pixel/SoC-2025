@@ -4,6 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
+
+
+@dataclass(frozen=True)
+class LayoutModelSpec:
+    """版面模型的规范化描述。"""
+
+    name: str
+    model_path: Path
+    use_onnx: bool = False
+    dict_name: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -18,12 +29,55 @@ class RuntimePaths:
     paddle_root: Path
     models_root: Path
     layout_model: Path
+    layout_model_spec: LayoutModelSpec
     det_model: Path
     rec_model: Path
     table_model: Path
 
+    @staticmethod
+    def resolve_layout_model_spec(models_root: Path, layout_model_name: str) -> LayoutModelSpec:
+        layout_root = models_root / "layout"
+        name = (layout_model_name or "").strip()
+        if not name:
+            raise ValueError("layout_model_name must not be empty")
+
+        specs = {
+            "doclayout_yolo": LayoutModelSpec(
+                name="doclayout_yolo",
+                model_path=layout_root / "doclayout_yolo_docstructbench_headfloat100_runtime",
+                use_onnx=False,
+                dict_name=None,
+            ),
+            "doclayout_yolo_docstructbench_headfloat100_runtime": LayoutModelSpec(
+                name="doclayout_yolo",
+                model_path=layout_root / "doclayout_yolo_docstructbench_headfloat100_runtime",
+                use_onnx=False,
+                dict_name=None,
+            ),
+            "picodet-l_layout_17cls": LayoutModelSpec(
+                name="picodet-l_layout_17cls",
+                model_path=layout_root / "picodet-l_layout_17cls" / "picodet-l_layout_17cls.onnx",
+                use_onnx=True,
+                dict_name="layout_picodet_l_layout_17cls_dict.txt",
+            ),
+            "pp-doclayout-m": LayoutModelSpec(
+                name="pp-doclayout-m",
+                model_path=layout_root / "pp-doclayout-m" / "pp-doclayout-m.onnx",
+                use_onnx=True,
+                dict_name="layout_pp_doclayout_m_dict.txt",
+            ),
+        }
+
+        spec = specs.get(name)
+        if spec is None:
+            candidate_dir = layout_root / name
+            if candidate_dir.is_dir():
+                return LayoutModelSpec(name=name, model_path=candidate_dir, use_onnx=False, dict_name=None)
+            raise ValueError(f"Unsupported layout model: {layout_model_name}")
+        return spec
+
     @classmethod
-    def discover(cls) -> "RuntimePaths":
+    def discover(cls, layout_model_name: str = "doclayout_yolo") -> "RuntimePaths":
         code_root = Path(__file__).resolve().parent
         package_root = code_root.parent
         dataset_root = package_root / "dataset"
@@ -31,6 +85,7 @@ class RuntimePaths:
         docflow_src = code_root / "docflow_src"
         paddle_root = code_root / "third_party" / "paddle_runtime"
         models_root = code_root / "models"
+        layout_model_spec = cls.resolve_layout_model_spec(models_root, layout_model_name)
         return cls(
             package_root=package_root,
             code_root=code_root,
@@ -39,7 +94,8 @@ class RuntimePaths:
             docflow_src=docflow_src,
             paddle_root=paddle_root,
             models_root=models_root,
-            layout_model=models_root / "layout" / "doclayout_yolo_docstructbench_headfloat100_runtime",
+            layout_model=layout_model_spec.model_path,
+            layout_model_spec=layout_model_spec,
             det_model=models_root / "det" / "ch" / "PP-OCRv5_mobile_det_infer",
             rec_model=models_root / "rec" / "ch" / "PP-OCRv5_mobile_rec_infer",
             table_model=models_root / "table" / "SLANet_plus_infer",

@@ -39,6 +39,7 @@ def build_render_plan(document, output_format: str = "docx") -> dict:
     for page in document.pages:
         attrs = page.attributes or {}
         profile = attrs.get("layout_profile", "generic_complex")
+        page_render_mode = _render_mode(profile)
         profile_counts[profile] += 1
         zones_payload = []
         block_type_counts = Counter()
@@ -46,7 +47,9 @@ def build_render_plan(document, output_format: str = "docx") -> dict:
         page_flow_ids = set()
 
         for zi, zone in enumerate(page.zones):
-            strategy_counts[zone.rendering_strategy] += 1
+            raw_strategy = zone.rendering_strategy
+            effective_strategy = "single_col" if page_render_mode == "reflow" else raw_strategy
+            strategy_counts[effective_strategy] += 1
             if getattr(zone, "flow_id", ""):
                 page_flow_ids.add(zone.flow_id)
             blocks_payload = []
@@ -74,7 +77,8 @@ def build_render_plan(document, output_format: str = "docx") -> dict:
                     "region_kind": getattr(zone, "region_kind", ""),
                     "col_count": zone.col_count,
                     "has_spanned": zone.has_spanned,
-                    "rendering_strategy": zone.rendering_strategy,
+                    "rendering_strategy": effective_strategy,
+                    "raw_rendering_strategy": raw_strategy,
                     "block_count": len(zone.blocks),
                     "blocks": blocks_payload,
                 }
@@ -84,7 +88,7 @@ def build_render_plan(document, output_format: str = "docx") -> dict:
             {
                 "page_index": page.index,
                 "layout_profile": profile,
-                "render_mode": _render_mode(profile),
+                "render_mode": page_render_mode,
                 "orientation": page.orientation,
                 "size_pt": {"width": page.page_width_pt, "height": page.page_height_pt},
                 "rule_stats": dict(attrs.get("rule_stats") or {}),

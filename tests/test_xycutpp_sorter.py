@@ -1,11 +1,17 @@
 from pathlib import Path
 import sys
+import json
+
+import cv2
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "Code" / "docflow_src"))
 
 from docflow.layout.sorter import sort_layout
+from docflow.layout.xycutpp import _sort_layout_xycutpp_core, postprocess_xycutpp_local_attachments
+from docflow.adapters.paddle_adapter import PaddleAdapter
 from docflow.model.base import BBox, BlockType
+from docflow.model.blocks.factory import BlockFactory
 from docflow.model.blocks.image_block import ImageBlock
 from docflow.model.blocks.text_block import TextBlock, TextLine
 
@@ -338,37 +344,64 @@ def test_xycutpp_keeps_single_figure_caption_with_figure_before_lower_flows():
     assert ids.index("right_section_title") < ids.index("right_section_body")
 
 
-def test_xycutpp_keeps_lower_title_body_before_same_article_continuation():
-    blocks = [
-        _text_block("middle_title", (410, 456, 721, 522), BlockType.TITLE),
-        _text_block("middle_body_1", (392, 538, 742, 608)),
-        _text_block("middle_body_2", (392, 610, 742, 752)),
-        _text_block("middle_body_3", (773, 776, 1124, 1064)),
-        _text_block("middle_body_4", (775, 1065, 1125, 1184)),
-        _text_block("wrap_title", (792, 1200, 1105, 1265), BlockType.TITLE),
-        _text_block("wrap_left_body", (775, 1281, 1125, 1352)),
-        _text_block("wrap_right_head", (1153, 776, 1334, 800), BlockType.TITLE),
-        _text_block("wrap_right_top", (1154, 801, 1505, 990)),
-        _text_block("wrap_right_mid", (1154, 993, 1504, 1112)),
-        _text_block("wrap_right_low", (1154, 1112, 1505, 1352)),
-    ]
+def test_xycutpp_postprocess_does_not_break_real_newspaper_four_column_skeleton():
+    raw = json.loads((ROOT / "test-result" / "run_20260507_050647" / "newspaper_01" / "raw_result.json").read_text())
+    image = cv2.imread(str(ROOT / "dataset" / "newspaper_01.png"))
+    converted = PaddleAdapter().convert(raw["regions"], image)
+    page = converted["pages"][0]
+    blocks = [BlockFactory.create(block) for block in page["blocks"]]
+
+    core = _sort_layout_xycutpp_core(
+        blocks,
+        image_width=page["width"],
+        image_height=page["height"],
+    )
+    by_id_core = {blk.block_id: blk for blk in core}
+    assert by_id_core["blk_26"].col_count == 4
+    assert by_id_core["blk_25"].col_count == 4
+    assert by_id_core["blk_27"].col_count == 4
+    assert by_id_core["blk_30"].col_count == 4
+    assert by_id_core["blk_26"].col_index == 0
+    assert by_id_core["blk_25"].col_index == 1
+    assert by_id_core["blk_27"].col_index == 2
+    assert by_id_core["blk_30"].col_index == 3
+
+    post = postprocess_xycutpp_local_attachments(
+        core,
+        image_width=page["width"],
+        image_height=page["height"],
+    )
+    by_id_post = {blk.block_id: blk for blk in post}
+    assert by_id_post["blk_26"].col_count == 4
+    assert by_id_post["blk_25"].col_count == 4
+    assert by_id_post["blk_27"].col_count == 4
+    assert by_id_post["blk_30"].col_count == 4
+    assert "region_kind" not in (by_id_post["blk_27"].attributes or {}).get("xycutpp_proto", {})
+
+
+def test_xycutpp_hybrid_sorter_keeps_real_newspaper_four_column_skeleton():
+    raw = json.loads((ROOT / "test-result" / "run_20260507_050647" / "newspaper_01" / "raw_result.json").read_text())
+    image = cv2.imread(str(ROOT / "dataset" / "newspaper_01.png"))
+    converted = PaddleAdapter().convert(raw["regions"], image)
+    page = converted["pages"][0]
+    blocks = [BlockFactory.create(block) for block in page["blocks"]]
 
     ordered = sort_layout(
         blocks,
-        image_width=1524,
-        image_height=1368,
-        strategy="xycutpp",
+        image_width=page["width"],
+        image_height=page["height"],
+        strategy="xycutpp_hybrid",
     )
-    ids = [blk.block_id for blk in ordered]
     by_id = {blk.block_id: blk for blk in ordered}
 
-    assert ids.index("wrap_title") < ids.index("wrap_left_body") < ids.index("wrap_right_head")
-    assert ids.index("wrap_right_head") < ids.index("wrap_right_top") < ids.index("wrap_right_mid")
-    assert by_id["wrap_title"].col_count == 2
-    assert by_id["wrap_title"].col_index == 0
-    assert by_id["wrap_right_head"].col_index == 1
-    assert by_id["wrap_title"].attributes["xycutpp_proto"]["lower_section_body_anchor_id"] == "wrap_left_body"
-    assert by_id["wrap_right_head"].attributes["xycutpp_proto"]["region_kind"] == "wraparound_section"
+    assert by_id["blk_26"].col_count == 4
+    assert by_id["blk_25"].col_count == 4
+    assert by_id["blk_27"].col_count == 4
+    assert by_id["blk_30"].col_count == 4
+    assert by_id["blk_26"].col_index == 0
+    assert by_id["blk_25"].col_index == 1
+    assert by_id["blk_27"].col_index == 2
+    assert by_id["blk_30"].col_index == 3
 
 
 def test_xycutpp_keeps_parallel_figure_group_before_following_section():
@@ -784,3 +817,52 @@ def test_xycutpp_keeps_spanning_article_title_and_subtitle_before_column_body():
     assert ids.index("c1a") < ids.index("c1b") < ids.index("c2a") < ids.index("c2b") < ids.index("c3a")
     proto = (by_id["title"].attributes or {}).get("xycutpp_proto", {})
     assert proto.get("region_kind") == "spanning_article_band"
+
+
+def test_xycutpp_keeps_local_centered_title_before_right_side_figure():
+    blocks = [
+        _text_block("chapter", (120, 80, 320, 125), BlockType.TITLE),
+        _text_block("intro", (160, 150, 540, 210)),
+        _figure_block("fig", (640, 300, 930, 520)),
+        _text_block("title", (470, 240, 610, 285), BlockType.TITLE),
+        _text_block("body_short", (170, 320, 510, 380)),
+        _text_block("body_long", (130, 400, 960, 640)),
+        _text_block("cap", (680, 532, 910, 564), BlockType.FIGURE_CAPTION),
+        _text_block("tail", (170, 660, 520, 710)),
+    ]
+
+    ordered = sort_layout(
+        blocks,
+        image_width=1100,
+        image_height=1500,
+        strategy="xycutpp",
+    )
+    ids = [blk.block_id for blk in ordered]
+
+    assert ids.index("title") < ids.index("fig")
+
+
+def test_xycutpp_defers_right_side_figure_family_until_after_continuing_body():
+    blocks = [
+        _text_block("chapter", (120, 80, 320, 125), BlockType.TITLE),
+        _text_block("section", (470, 240, 610, 285), BlockType.TITLE),
+        _text_block("lead", (160, 305, 520, 365)),
+        _figure_block("fig", (640, 300, 930, 520)),
+        _text_block("cont1", (140, 530, 970, 590)),
+        _text_block("cont2", (130, 595, 980, 770)),
+        _text_block("cap", (680, 532, 910, 564), BlockType.FIGURE_CAPTION),
+        _text_block("tail", (170, 790, 520, 840)),
+    ]
+
+    ordered = sort_layout(
+        blocks,
+        image_width=1100,
+        image_height=1500,
+        strategy="xycutpp",
+    )
+    ids = [blk.block_id for blk in ordered]
+    by_id = {blk.block_id: blk for blk in ordered}
+
+    assert ids.index("cont2") < ids.index("fig") < ids.index("cap")
+    proto = (by_id["fig"].attributes or {}).get("xycutpp_proto", {})
+    assert proto.get("body_continuation_deferred") is True

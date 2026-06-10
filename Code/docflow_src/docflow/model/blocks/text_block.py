@@ -188,9 +188,10 @@ class TextBlock(Block):
             # 使用中位行高以提高对异常值的鲁棒性
             line_heights.sort()
             median_h = line_heights[len(line_heights) // 2]
-            # text_region 测量的是文本行的实际高度（含升部/降部），
-            # 不是行间距。除数 1.05 仅补偿行内额外空间，不混入行间空白。
-            fs = mapper.h(median_h) / 1.05
+            # Paddle 的 text_region 是检测外接框，高度通常大于字体 em，
+            # 尤其 CJK 文本会包含较多上下留白。用 1.25 将检测框高度
+            # 折回更接近 Word 字号的尺度。
+            fs = mapper.h(median_h) / 1.25
         else:
             n_lines = self.count_lines()
             if n_lines <= 0:
@@ -264,4 +265,3 @@ class TextBlock(Block):
     def full_text(self) -> str:
         """返回所有行文本的拼接结果。"""
         return join_text_segments([line.text for line in self.lines])
-

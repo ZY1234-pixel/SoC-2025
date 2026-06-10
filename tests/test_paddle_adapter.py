@@ -202,6 +202,34 @@ def test_low_score_formula_duplicate_does_not_suppress_section_title() -> None:
     assert any(entry["reason"] == "cross_category_visual_text_duplicate" for entry in report)
 
 
+def test_figure_with_internal_source_text_is_not_dropped_by_adjacent_text_duplicate() -> None:
+    adapter = PaddleAdapter()
+    results = [
+        {
+            "type": "figure",
+            "bbox": [526, 199, 722, 385],
+            "score": 0.95,
+            "res": [
+                {"text": "S&P500"},
+                {"text": "2022"},
+                {"text": "2023"},
+                {"text": "Source: LSEG Workspace"},
+            ],
+        },
+        {
+            "type": "text",
+            "bbox": [529, 385, 635, 399],
+            "score": 0.98,
+            "res": [{"text": "Source: LSEG Workspace"}],
+        },
+    ]
+
+    filtered, report = adapter._suppress_nested_duplicates(results)
+
+    assert len(filtered) == 2
+    assert all(entry["removed_index"] != 0 for entry in report)
+
+
 def test_caption_anchored_visual_region_is_recalled_as_missing_figure() -> None:
     adapter = PaddleAdapter()
     image = np.full((900, 700, 3), 255, dtype=np.uint8)

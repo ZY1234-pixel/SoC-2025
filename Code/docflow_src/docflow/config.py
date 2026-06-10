@@ -35,6 +35,23 @@ class RecoveryConfig:
     docx_preserve_visual_line_breaks: bool = True
     docx_preserve_breaks_on_ambiguous_justify: bool = True
 
+    # 字体分类（扫描文本块）
+    font_classification_enabled: bool = True
+    font_model_path: str = "Code/models/font/mobilenetv3.ckpt"
+    font_classifier_device: str = "auto"
+    font_classifier_height: int = 48
+    font_classifier_width: int = 768
+    font_classifier_eval_crops: int = 5
+    font_classifier_temperature: float = 1.0
+    font_classifier_reject_threshold: float = 0.6
+    font_classifier_margin_threshold: float = 0.25
+    font_classifier_grayscale: bool = True
+    font_classifier_crop_padding_px: int = 3
+    font_classifier_max_line_crops_per_block: int = 5
+    font_classifier_binarize: bool = False
+    font_classifier_contrast: float = 1.4
+    font_classifier_invert: bool = False
+
     # 标题字号缩放（multiplier / additive / cap）
     title_masthead_scale: float = 1.35
     title_masthead_cap: float = 42.0

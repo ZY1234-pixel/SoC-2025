@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import re
+from difflib import SequenceMatcher
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
@@ -471,6 +472,7 @@ class PaddleAdapter(BaseAdapter):
                 )
                 overlap_ratio = self._overlap_ratio(candidate["bbox"], existing["bbox"])
                 contain_ratio = self._contain_ratio(candidate["bbox"], existing["bbox"])
+                candidate_is_visual = candidate["category"] in {"figure", "formula", "table"}
                 # 空间判定放宽：允许 bbox 邻近（adjacent），不一定严格重叠。
                 # 典型场景：低分 title 的 bbox=[1153,776,1329,797] 与高分 text 的
                 # bbox=[1154,800,1507,990] 垂直相接但不重叠，实际是同一段 OCR 内容的
@@ -478,10 +480,21 @@ class PaddleAdapter(BaseAdapter):
                 spatial_match = (
                     overlap_ratio >= 0.85
                     or contain_ratio >= 0.85
-                    or self._adjacent_ratio(candidate["bbox"], existing["bbox"]) >= 0.78
+                    or (
+                        not candidate_is_visual
+                        and self._adjacent_ratio(candidate["bbox"], existing["bbox"]) >= 0.78
+                    )
                 )
                 if len(short_text) >= 4 and short_text in long_text and spatial_match:
                     return "cross_category_text_duplicate"
+                if (
+                    candidate["category"] in self._TEXTLIKE_DEDUP_CATEGORIES
+                    and existing["category"] in self._TEXTLIKE_DEDUP_CATEGORIES
+                    and len(short_text) >= 8
+                    and spatial_match
+                    and SequenceMatcher(None, candidate["text"], existing["text"]).ratio() >= 0.70
+                ):
+                    return "cross_category_similar_text_duplicate"
             return None
 
         cand_box = candidate["bbox"]
@@ -511,6 +524,13 @@ class PaddleAdapter(BaseAdapter):
                 and spatial_match
             ):
                 return "nested_text_duplicate"
+            if (
+                same_category
+                and spatial_match
+                and min(len(cand_text), len(exist_text)) >= min_text_len
+                and SequenceMatcher(None, cand_text, exist_text).ratio() >= 0.70
+            ):
+                return "similar_text_duplicate"
 
         return None
 

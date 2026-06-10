@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -844,59 +845,20 @@ def test_subset_spanning_visual_preserves_uncovered_left_column_flow():
     assert bottom_fig.spanned_cols == [1, 2, 3]
 
 
-def test_lower_wraparound_section_is_rendered_after_middle_flow():
-    page = {
-        "version": "2.0",
-        "metadata": {},
-        "pages": [
-            {
-                "page_index": 0,
-                "width": 1524,
-                "height": 1368,
-                "blocks": [
-                    _text_block("middle_title", [410, 456, 721, 522], "middle title", category="title"),
-                    _text_block("middle_body_1", [392, 538, 742, 608], "middle body 1"),
-                    _text_block("middle_body_2", [392, 610, 742, 752], "middle body 2"),
-                    _text_block("middle_body_3", [773, 776, 1124, 1064], "middle body 3"),
-                    _text_block("middle_body_4", [775, 1065, 1125, 1184], "middle body 4"),
-                    _text_block("wrap_title", [792, 1200, 1105, 1265], "wrap title", category="title"),
-                    _text_block("wrap_left_body", [775, 1281, 1125, 1352], "wrap left body"),
-                    _text_block("wrap_right_head", [1153, 776, 1334, 800], "wrap right head", category="title"),
-                    _text_block("wrap_right_top", [1154, 801, 1505, 990], "wrap right top"),
-                    _text_block("wrap_right_mid", [1154, 993, 1504, 1112], "wrap right mid"),
-                    _text_block("wrap_right_low", [1154, 1112, 1505, 1352], "wrap right low"),
-                ],
-            }
-        ],
-    }
+def test_real_newspaper_page_keeps_lower_four_column_zone_after_pipeline():
+    page = json.loads((ROOT / "test-result" / "run_20260507_050647" / "newspaper_01" / "newspaper_01.json").read_text())
 
     pipeline = RecoveryPipeline(config=RecoveryConfig(reading_order_strategy="xycutpp_hybrid"))
     document = pipeline.build_document(page)
-    assert len(document.pages[0].zones) == 2
-    middle_zone = document.pages[0].zones[0]
-    wrap_zone = document.pages[0].zones[1]
-    middle_ids = [block.block_id for block in middle_zone.blocks]
-    wrap_ids = [block.block_id for block in wrap_zone.blocks]
-
-    assert middle_ids == [
-        "middle_title",
-        "middle_body_1",
-        "middle_body_2",
-        "middle_body_3",
-        "middle_body_4",
+    lower_multicol_zones = [
+        zone for zone in document.pages[0].zones
+        if zone.col_count == 4 and any(block.block_id == "blk_27" for block in zone.blocks)
     ]
-    assert wrap_ids == [
-        "wrap_title",
-        "wrap_left_body",
-        "wrap_right_head",
-        "wrap_right_top",
-        "wrap_right_mid",
-        "wrap_right_low",
-    ]
-    assert middle_zone.col_count == 3
-    assert wrap_zone.col_count == 2
-    assert wrap_zone.region_kind == "wraparound_section"
-    by_id = {block.block_id: block for block in wrap_zone.blocks}
-    assert by_id["wrap_title"].col_index == 0
-    assert by_id["wrap_right_head"].col_index == 1
-    assert by_id["wrap_title"].attributes["xycutpp_proto"]["lower_section_body_anchor_id"] == "wrap_left_body"
+    assert len(lower_multicol_zones) == 1
+    zone = lower_multicol_zones[0]
+    by_id = {block.block_id: block for block in zone.blocks}
+    assert by_id["blk_26"].col_index == 0
+    assert by_id["blk_25"].col_index == 1
+    assert by_id["blk_27"].col_index == 2
+    assert by_id["blk_30"].col_index == 3
+    assert zone.region_kind == ""

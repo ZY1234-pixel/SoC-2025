@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 from dataclasses import replace
+from difflib import SequenceMatcher
 import json
 import os
 import sys
@@ -21,7 +22,7 @@ if docflow_src_str not in sys.path:
     sys.path.insert(0, docflow_src_str)
 
 from dataset import collect_samples, is_pdf_file
-from model import RuntimePaths
+from model import LayoutModelSpec, RuntimePaths
 from preprocess import expand_to_pages
 from utils import ensure_runtime_paths, find_libreoffice, parse_formats, print_list
 from docflow.adapters.paddle_adapter import PaddleAdapter
@@ -61,6 +62,51 @@ DOCLAYOUT_YOLO_LABELS = [
 DEFAULT_LAYOUT_SCORE_THRESHOLD = 0.50
 DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD = 0.18
 RAW_RESULT_PREVIEW_MAX_TEXT = 300
+TITLE_OCR_RECHECK_TYPES = {"title"}
+PICODET_LAYOUT_17CLS_LABELS = [
+    "text",
+    "title",
+    "list",
+    "table",
+    "figure",
+    "header",
+    "footer",
+    "reference",
+    "equation",
+    "abstract",
+    "content",
+    "figure_caption",
+    "table_caption",
+    "table_footnote",
+    "formula_caption",
+    "algorithm",
+    "seal",
+]
+PP_DOCLAYOUT_M_LABELS = [
+    "paragraph_title",
+    "image",
+    "text",
+    "number",
+    "abstract",
+    "content",
+    "figure_title",
+    "formula",
+    "table",
+    "table_title",
+    "reference",
+    "doc_title",
+    "footnote",
+    "header",
+    "algorithm",
+    "footer",
+    "seal",
+    "chart_title",
+    "chart",
+    "formula_number",
+    "header_image",
+    "footer_image",
+    "aside_text",
+]
 
 
 def bootstrap_import_paths(paths: RuntimePaths) -> None:
@@ -84,7 +130,7 @@ def resolve_cli_path(raw_path: str | None, default_path: Path) -> Path:
     return Path(normalized).resolve()
 
 
-def resolve_layout_score_threshold(layout_model_dir: Path) -> str:
+def resolve_layout_score_threshold(layout_spec: LayoutModelSpec) -> str:
     """Resolve layout score threshold with a lower doclayout-yolo default.
 
     The doclayout-yolo detector tends to miss sparse centered section headings
@@ -101,15 +147,26 @@ def resolve_layout_score_threshold(layout_model_dir: Path) -> str:
             value = min(1.0, max(0.01, value))
         return f"{value:.2f}"
 
-    if "doclayout_yolo" in layout_model_dir.name.lower():
+    if "doclayout_yolo" in layout_spec.name.lower():
         return f"{DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD:.2f}"
     return f"{DEFAULT_LAYOUT_SCORE_THRESHOLD:.2f}"
 
 
-def build_layout_dict_from_inference(layout_model_dir: Path, fallback_dict_path: Path, out_dir: Path) -> Path:
+def build_layout_dict_from_inference(layout_spec: LayoutModelSpec, fallback_dict_path: Path, out_dir: Path) -> Path:
     """按模型 inference.yml 自动生成 layout 字典文件。"""
+    layout_model_dir = layout_spec.model_path if layout_spec.model_path.is_dir() else layout_spec.model_path.parent
     inference_yml = layout_model_dir / "inference.yml"
     if not inference_yml.is_file():
+        explicit_labels = {
+            "picodet-l_layout_17cls": PICODET_LAYOUT_17CLS_LABELS,
+            "pp-doclayout-m": PP_DOCLAYOUT_M_LABELS,
+        }.get(layout_spec.name)
+        if explicit_labels:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_name = layout_spec.dict_name or f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
+            out_path = out_dir / out_name
+            out_path.write_text("\n".join(explicit_labels) + "\n", encoding="utf-8")
+            return out_path
         metadata_yml = layout_model_dir / "metadata.yaml"
         if metadata_yml.is_file():
             try:
@@ -121,14 +178,16 @@ def build_layout_dict_from_inference(layout_model_dir: Path, fallback_dict_path:
                     ordered = [names[idx] for idx in sorted(names)]
                     if ordered:
                         out_dir.mkdir(parents=True, exist_ok=True)
-                        out_path = out_dir / f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
+                        out_name = layout_spec.dict_name or f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
+                        out_path = out_dir / out_name
                         out_path.write_text("\n".join(ordered) + "\n", encoding="utf-8")
                         return out_path
             except Exception:
                 pass
-        if "doclayout_yolo" in layout_model_dir.name.lower():
+        if "doclayout_yolo" in layout_spec.name.lower():
             out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir / f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
+            out_name = layout_spec.dict_name or f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
+            out_path = out_dir / out_name
             out_path.write_text("\n".join(DOCLAYOUT_YOLO_LABELS) + "\n", encoding="utf-8")
             return out_path
         return fallback_dict_path
@@ -154,7 +213,8 @@ def build_layout_dict_from_inference(layout_model_dir: Path, fallback_dict_path:
         return fallback_dict_path
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
+    out_name = layout_spec.dict_name or f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
+    out_path = out_dir / out_name
     out_path.write_text("\n".join(labels) + "\n", encoding="utf-8")
     return out_path
 
@@ -168,8 +228,8 @@ def make_engine(paths: RuntimePaths, layout_dict_dir: Path):
     fallback_layout_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "layout_dict" / "layout_cdla_dict.txt"
     rec_char_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "ppocrv5_dict.txt"
     table_char_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "table_structure_dict_ch.txt"
-    layout_dict = build_layout_dict_from_inference(paths.layout_model, fallback_layout_dict, layout_dict_dir)
-    layout_score_threshold = resolve_layout_score_threshold(paths.layout_model)
+    layout_dict = build_layout_dict_from_inference(paths.layout_model_spec, fallback_layout_dict, layout_dict_dir)
+    layout_score_threshold = resolve_layout_score_threshold(paths.layout_model_spec)
 
     argv = [
         "--recovery",
@@ -275,9 +335,212 @@ def summarize_raw_result(result: list) -> dict:
     return {"regions": regions}
 
 
+def _line_texts(region: dict) -> list[str]:
+    texts: list[str] = []
+    for item in region.get("res") or []:
+        if isinstance(item, dict):
+            text = str(item.get("text", "") or "").strip()
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            rhs = item[1]
+            text = str(rhs[0] if isinstance(rhs, (list, tuple)) and rhs else rhs).strip()
+        else:
+            text = ""
+        if text:
+            texts.append(text)
+    return texts
+
+
+def _ocr_lines_from_crop(engine, crop) -> list[dict]:
+    boxes, recs, _ = engine.text_system(crop)
+    if boxes is None or recs is None:
+        return []
+    lines: list[dict] = []
+    for box, rec in zip(boxes, recs):
+        text = str(rec[0] or "").strip()
+        if not text:
+            continue
+        lines.append(
+            {
+                "text": text,
+                "confidence": float(rec[1] or 0.0),
+                "text_region": box.tolist() if hasattr(box, "tolist") else box,
+            }
+        )
+    return lines
+
+
+def _offset_text_regions(lines: list[dict], x_offset: int, y_offset: int) -> list[dict]:
+    shifted: list[dict] = []
+    for line in lines:
+        item = dict(line)
+        region = item.get("text_region")
+        if isinstance(region, list):
+            item["text_region"] = [
+                [float(point[0]) + x_offset, float(point[1]) + y_offset]
+                for point in region
+                if isinstance(point, (list, tuple)) and len(point) >= 2
+            ]
+        shifted.append(item)
+    return shifted
+
+
+def _clean_text_len(lines: list[dict] | list[str]) -> int:
+    total = 0
+    for item in lines:
+        text = item.get("text", "") if isinstance(item, dict) else str(item)
+        total += len("".join(str(text).split()))
+    return total
+
+
+def _should_accept_ocr_recheck(region: dict, candidate_lines: list[dict]) -> bool:
+    if not candidate_lines:
+        return False
+    current_texts = _line_texts(region)
+    current_len = _clean_text_len(current_texts)
+    candidate_len = _clean_text_len(candidate_lines)
+    if current_texts and abs(len(candidate_lines) - len(current_texts)) > 1:
+        return False
+    avg_conf = sum(float(line.get("confidence", 0.0) or 0.0) for line in candidate_lines) / len(candidate_lines)
+    if avg_conf < 0.90:
+        return False
+    if candidate_len > current_len:
+        return True
+    current_joined = "".join(current_texts)
+    candidate_joined = "".join(str(line.get("text", "") or "") for line in candidate_lines)
+    similarity = SequenceMatcher(None, current_joined, candidate_joined).ratio()
+    return candidate_joined != current_joined and similarity >= 0.72
+
+
+def _merge_rechecked_lines(region: dict, candidate_lines: list[dict]) -> list[dict]:
+    current = [
+        dict(item) for item in (region.get("res") or [])
+        if isinstance(item, dict) and str(item.get("text", "") or "").strip()
+    ]
+    if not current:
+        return candidate_lines
+
+    def _y_center(line: dict) -> float | None:
+        region = line.get("text_region")
+        if not isinstance(region, list) or not region:
+            return None
+        ys = [
+            float(point[1])
+            for point in region
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        ]
+        if not ys:
+            return None
+        return (min(ys) + max(ys)) * 0.5
+
+    merged: list[dict] = []
+    changed = False
+    used_candidates: set[int] = set()
+    for old in current:
+        old_text = str(old.get("text", "") or "").strip()
+        old_y = _y_center(old)
+        best_index = -1
+        best_score = -1.0
+        for idx, candidate in enumerate(candidate_lines):
+            if idx in used_candidates:
+                continue
+            new_text = str(candidate.get("text", "") or "").strip()
+            if not new_text:
+                continue
+            similarity = SequenceMatcher(None, old_text, new_text).ratio()
+            if similarity < 0.55:
+                continue
+            new_y = _y_center(candidate)
+            y_score = 1.0
+            if old_y is not None and new_y is not None:
+                y_score = max(0.0, 1.0 - abs(old_y - new_y) / 64.0)
+            score = similarity * 0.75 + y_score * 0.25
+            if score > best_score:
+                best_score = score
+                best_index = idx
+
+        if best_index < 0:
+            merged.append(old)
+            continue
+
+        new = candidate_lines[best_index]
+        new_text = str(new.get("text", "") or "").strip()
+        old_conf = float(old.get("confidence", 0.0) or 0.0)
+        new_conf = float(new.get("confidence", 0.0) or 0.0)
+        similarity = SequenceMatcher(None, old_text, new_text).ratio()
+        use_new = (
+            new_text
+            and new_text != old_text
+            and similarity >= 0.60
+            and (
+                len("".join(new_text.split())) > len("".join(old_text.split()))
+                or new_conf >= old_conf + 0.02
+                or (new_conf >= 0.95 and old_conf < 0.95)
+            )
+        )
+        if use_new:
+            merged.append(new)
+            changed = True
+            used_candidates.add(best_index)
+        else:
+            merged.append(old)
+    return merged if changed else current
+
+
+def recheck_title_ocr_with_preprocessing(engine, image, result: list) -> int:
+    """用扩边二值化 OCR 复核容易漏行首字符的标题/短文本块。"""
+    if not result:
+        return 0
+    h, w = image.shape[:2]
+    changed = 0
+    for region in result:
+        region_type = str(region.get("type", "") or "").lower()
+        if region_type not in TITLE_OCR_RECHECK_TYPES:
+            continue
+        bbox = region.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        texts = _line_texts(region)
+        if not texts or len(texts) > 5:
+            continue
+        x1, y1, x2, y2 = [int(round(float(v))) for v in bbox]
+        bw = max(1, x2 - x1)
+        bh = max(1, y2 - y1)
+        pad_x = max(16, int(round(bw * 0.08)))
+        pad_y = max(8, int(round(bh * 0.12)))
+        ex1 = max(0, x1 - pad_x)
+        ey1 = max(0, y1 - pad_y)
+        ex2 = min(w, x2 + pad_x)
+        ey2 = min(h, y2 + pad_y)
+        crop = image[ey1:ey2, ex1:ex2]
+        if crop.size == 0:
+            continue
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        binary_bgr = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+        candidate_lines = _ocr_lines_from_crop(engine, binary_bgr)
+        if not _should_accept_ocr_recheck(region, candidate_lines):
+            continue
+        shifted_candidates = _offset_text_regions(candidate_lines, ex1, ey1)
+        region["res"] = _merge_rechecked_lines(region, shifted_candidates)
+        xs = []
+        ys = []
+        for line in region["res"]:
+            for point in line.get("text_region") or []:
+                if isinstance(point, (list, tuple)) and len(point) >= 2:
+                    xs.append(float(point[0]))
+                    ys.append(float(point[1]))
+        if xs and ys:
+            region["bbox"] = [max(0, min(xs)), max(0, min(ys)), min(w, max(xs)), min(h, max(ys))]
+        region.setdefault("attributes", {})
+        region["ocr_rechecked"] = True
+        changed += 1
+    return changed
+
+
 def analyze_page(engine, adapter: PaddleAdapter, image, page_index: int, source_path: str) -> tuple[dict, list, float]:
     started_at = time.time()
     result, _ = engine(image, img_idx=page_index)
+    recheck_title_ocr_with_preprocessing(engine, image, result)
     elapsed = time.time() - started_at
     page_document = adapter.convert(result, image, img_idx=page_index)
     page_document["pages"][0]["image_path"] = source_path
@@ -459,7 +722,8 @@ def run_sample(
     if "docx" in formats:
         renderer = pipeline._get_renderer("docx")
         renderer.render(document, str(sample_layout.docx_path))
-        # 将 renderer 记录的 render_fit 与 style_inferred 回写到 JSON（设计文档 §2.2）
+        # 将 build/render 阶段写入 page.attributes 的信息回写到 JSON
+        # （如字体分类统计、render_fit 与 style_inferred）。
         for page_index, page in enumerate(document.pages):
             if page_index >= len(merged_document["pages"]):
                 continue
@@ -467,12 +731,8 @@ def run_sample(
             if page_entry.get("attributes") is None:
                 page_entry["attributes"] = {}
             attrs = page_entry["attributes"]
-            render_fit = page.attributes.get("render_fit")
-            if render_fit:
-                attrs["render_fit"] = render_fit
-            style_inferred = page.attributes.get("style_inferred")
-            if style_inferred:
-                attrs["style_inferred"] = style_inferred
+            if page.attributes:
+                attrs.update(page.attributes)
         write_json(sample_layout.json_path, merged_document)
         native_docx_table_count = _native_docx_table_count(sample_layout.docx_path)
     else:
@@ -491,9 +751,15 @@ def main() -> int:
     parser.add_argument("--formats", "-f", default="docx,markdown,pdf", help="逗号分隔输出格式：docx,markdown,pdf")
     parser.add_argument("--pdf-dpi", type=int, default=200, help="PDF 转图像的 DPI，默认 200")
     parser.add_argument("--no-debug-vis", action="store_true", help="关闭 debug 可视化图导出")
+    parser.add_argument(
+        "--layout-model",
+        default="doclayout_yolo",
+        choices=["doclayout_yolo", "picodet-l_layout_17cls", "pp-doclayout-m"],
+        help="选择版面分析模型。",
+    )
     args = parser.parse_args()
 
-    paths = RuntimePaths.discover()
+    paths = RuntimePaths.discover(layout_model_name=args.layout_model)
     input_path = resolve_cli_path(args.input, paths.dataset_root)
     output_root = resolve_cli_path(args.output, paths.result_root)
     formats = parse_formats(args.formats)
@@ -512,6 +778,7 @@ def main() -> int:
     print_list("样本列表：", [str(path) for path in samples])
     print(f"输出格式：{formats}")
     print(f"运行目录：{run_layout.run_dir}")
+    print(f"版面模型：{paths.layout_model_spec.name} -> {paths.layout_model}")
     engine = make_engine(paths, run_layout.runtime_dir)
     adapter = PaddleAdapter()
     pipeline = RecoveryPipeline()

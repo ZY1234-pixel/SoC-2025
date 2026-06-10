@@ -126,6 +126,7 @@ def _overlay_ocr_polys(
     show_text_preview: bool = False,
     font_path: str | None = None,
     max_preview_chars: int = 18,
+    offset: tuple[int, int] = (0, 0),
 ) -> np.ndarray:
     if not regions:
         return image_bgr
@@ -133,6 +134,7 @@ def _overlay_ocr_polys(
     pil_img = Image.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(pil_img)
     tiny_font = _load_font(font_path, size=12)
+    dx, dy = offset
 
     for region in regions:
         res = region.get("res")
@@ -142,7 +144,11 @@ def _overlay_ocr_polys(
             poly, txt = _extract_text_result(line)
             if not isinstance(poly, (list, tuple)) or len(poly) < 2:
                 continue
-            pts = [(int(p[0]), int(p[1])) for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2]
+            pts = [
+                (int(p[0]) + dx, int(p[1]) + dy)
+                for p in poly
+                if isinstance(p, (list, tuple)) and len(p) >= 2
+            ]
             if len(pts) < 2:
                 continue
             draw.line(pts + [pts[0]], fill=color, width=2)
@@ -215,10 +221,14 @@ def draw_sorted_layout(
     ocr_regions: List[Dict] | None = None,
 ) -> np.ndarray:
     """Draw sorted-layout overlay (color by col_index, mark spanning blocks)."""
-    vis = image_bgr.copy()
+    vis, dx, dy = _make_annotation_canvas(image_bgr, top=32, bottom=8, left=8, right=8)
     for order, block in enumerate(blocks):
         bbox = block.get("bbox", [0, 0, 0, 0])
         x1, y1, x2, y2 = _as_int_bbox(bbox)
+        x1 += dx
+        x2 += dx
+        y1 += dy
+        y2 += dy
         col_index = int(block.get("col_index", 0))
         col_count = int(block.get("col_count", 1))
         spanned_cols = block.get("spanned_cols") or [col_index]
@@ -239,21 +249,8 @@ def draw_sorted_layout(
         label = f"{order}:{btype[:6]} {col_count}c-{col_index}{flow_tag}"
         if len(spanned_cols) > 1:
             label += f"[{','.join(str(v) for v in spanned_cols)}]"
-
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
-        ly = max(y1 - 2, th + 4)
-        cv2.rectangle(vis, (x1, ly - th - 3), (x1 + tw + 4, ly + 2), color, -1)
-        cv2.putText(
-            vis,
-            label,
-            (x1 + 2, ly),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.42,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
-    return _overlay_ocr_polys(vis, ocr_regions, show_text_preview=False)
+        _draw_label_panel(vis, label, anchor_bbox=(x1, y1, x2, y2), color=color, font_scale=0.42)
+    return _overlay_ocr_polys(vis, ocr_regions, show_text_preview=False, offset=(dx, dy))
 
 
 def _fit_center_font_scale(text: str, box_w: int, box_h: int) -> tuple[float, int]:
@@ -310,6 +307,157 @@ def _inset_rect(x1: int, y1: int, x2: int, y2: int, inset: int) -> tuple[int, in
     return x1 + inset, y1 + inset, x2 - inset, y2 - inset
 
 
+def _make_annotation_canvas(
+    image_bgr: np.ndarray,
+    *,
+    top: int = 0,
+    bottom: int = 0,
+    left: int = 0,
+    right: int = 0,
+    fill_value: int = 255,
+) -> tuple[np.ndarray, int, int]:
+    h, w = image_bgr.shape[:2]
+    canvas = np.full((h + top + bottom, w + left + right, 3), fill_value, dtype=image_bgr.dtype)
+    canvas[top:top + h, left:left + w] = image_bgr
+    return canvas, left, top
+
+
+def _place_panel(
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    *,
+    panel_w: int,
+    panel_h: int,
+    canvas_w: int,
+    canvas_h: int,
+    gap: int = 4,
+) -> tuple[int, int]:
+    candidates = [
+        (x1, y1 - panel_h - gap),
+        (x1, y2 + gap),
+        (x2 + gap, y1),
+        (x1 - panel_w - gap, y1),
+        (x1 + 4, y1 + 4),
+    ]
+    for px, py in candidates:
+        if px < 0 or py < 0:
+            continue
+        if px + panel_w > canvas_w or py + panel_h > canvas_h:
+            continue
+        return px, py
+
+    clamped_x = min(max(0, x1 + 4), max(0, canvas_w - panel_w))
+    clamped_y = min(max(0, y1 + 4), max(0, canvas_h - panel_h))
+    return clamped_x, clamped_y
+
+
+def _draw_label_panel(
+    image_bgr: np.ndarray,
+    text: str,
+    *,
+    anchor_bbox: tuple[int, int, int, int],
+    color: tuple[int, int, int],
+    font_scale: float = 0.42,
+    text_thickness: int = 1,
+    gap: int = 4,
+) -> None:
+    (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_thickness)
+    panel_w = tw + 8
+    panel_h = th + baseline + 8
+    px, py = _place_panel(
+        *anchor_bbox,
+        panel_w=panel_w,
+        panel_h=panel_h,
+        canvas_w=image_bgr.shape[1],
+        canvas_h=image_bgr.shape[0],
+        gap=gap,
+    )
+    cv2.rectangle(image_bgr, (px, py), (px + panel_w, py + panel_h), color, -1)
+    cv2.putText(
+        image_bgr,
+        text,
+        (px + 4, py + th + 3),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        (255, 255, 255),
+        text_thickness,
+        cv2.LINE_AA,
+    )
+
+
+def _draw_order_badge(
+    image_bgr: np.ndarray,
+    number: str,
+    *,
+    anchor_bbox: tuple[int, int, int, int],
+    block_type: str,
+) -> None:
+    x1, y1, x2, y2 = anchor_bbox
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
+    should_externalize = block_type == "title" or box_h <= 72 or box_w <= 96
+
+    scale, num_thickness = _fit_center_font_scale(number, box_w, box_h)
+    if should_externalize:
+        scale = min(scale, 1.15)
+        num_thickness = max(2, min(4, num_thickness))
+        (tw, th), baseline = cv2.getTextSize(number, cv2.FONT_HERSHEY_SIMPLEX, scale, num_thickness)
+        panel_w = tw + 18
+        panel_h = th + baseline + 16
+        px, py = _place_panel(
+            x1,
+            y1,
+            x2,
+            y2,
+            panel_w=panel_w,
+            panel_h=panel_h,
+            canvas_w=image_bgr.shape[1],
+            canvas_h=image_bgr.shape[0],
+            gap=6,
+        )
+        cv2.rectangle(image_bgr, (px, py), (px + panel_w, py + panel_h), (255, 255, 255), -1)
+        cv2.rectangle(image_bgr, (px, py), (px + panel_w, py + panel_h), (60, 60, 60), 2)
+        tx = px + max(6, (panel_w - tw) // 2)
+        ty = py + th + max(4, (panel_h - (th + baseline)) // 2)
+        cv2.putText(
+            image_bgr,
+            number,
+            (tx, ty),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            scale,
+            (25, 25, 25),
+            num_thickness,
+            cv2.LINE_AA,
+        )
+        return
+
+    (tw, th), _ = cv2.getTextSize(number, cv2.FONT_HERSHEY_SIMPLEX, scale, num_thickness)
+    cx = x1 + max(0, (box_w - tw) // 2)
+    cy = y1 + max(th, (box_h + th) // 2)
+    cv2.putText(
+        image_bgr,
+        number,
+        (cx, cy),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        (255, 255, 255),
+        num_thickness + 3,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        image_bgr,
+        number,
+        (cx, cy),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        (25, 25, 25),
+        num_thickness,
+        cv2.LINE_AA,
+    )
+
+
 def draw_reading_order_map(
     image_bgr: np.ndarray,
     blocks: List[Dict],
@@ -322,12 +470,21 @@ def draw_reading_order_map(
     if image_bgr is None:
         raise ValueError("image_bgr is None")
 
-    base = image_bgr.copy()
-    overlay = image_bgr.copy()
     title_band_h = 56 if title else 0
+    top_pad = title_band_h + 12
+    side_pad = 12
+    bottom_pad = 12
+    base, dx, dy = _make_annotation_canvas(
+        image_bgr,
+        top=top_pad,
+        bottom=bottom_pad,
+        left=side_pad,
+        right=side_pad,
+    )
+    overlay = base.copy()
 
     if title:
-        cv2.rectangle(base, (0, 0), (base.shape[1], title_band_h), (248, 248, 248), -1)
+        cv2.rectangle(base, (0, 0), (base.shape[1], title_band_h + 6), (248, 248, 248), -1)
         cv2.putText(
             base,
             title,
@@ -344,6 +501,10 @@ def draw_reading_order_map(
 
     for _order_idx, block in stacked_blocks:
         x1, y1, x2, y2 = _as_int_bbox(block.get("bbox", []))
+        x1 += dx
+        x2 += dx
+        y1 += dy
+        y2 += dy
         col_index = int(block.get("col_index", 0))
         flow_id = str(block.get("flow_id", "") or "")
         spanned_cols = block.get("spanned_cols") or [col_index]
@@ -361,6 +522,10 @@ def draw_reading_order_map(
 
     for _order_idx, block in stacked_blocks:
         x1, y1, x2, y2 = _as_int_bbox(block.get("bbox", []))
+        x1 += dx
+        x2 += dx
+        y1 += dy
+        y2 += dy
         col_index = int(block.get("col_index", 0))
         flow_id = str(block.get("flow_id", "") or "")
         spanned_cols = block.get("spanned_cols") or [col_index]
@@ -374,64 +539,36 @@ def draw_reading_order_map(
 
     for order, block in enumerate(blocks, start=1):
         x1, y1, x2, y2 = _as_int_bbox(block.get("bbox", []))
+        x1 += dx
+        x2 += dx
+        y1 += dy
+        y2 += dy
         col_index = int(block.get("col_index", 0))
         flow_id = str(block.get("flow_id", "") or "")
         spanned_cols = block.get("spanned_cols") or [col_index]
         if not isinstance(spanned_cols, list):
             spanned_cols = [col_index]
 
-        number = str(order)
-        scale, num_thickness = _fit_center_font_scale(number, x2 - x1, y2 - y1)
-        (tw, th), baseline = cv2.getTextSize(number, cv2.FONT_HERSHEY_SIMPLEX, scale, num_thickness)
-        cx = x1 + max(0, ((x2 - x1) - tw) // 2)
-        cy = y1 + max(th, ((y2 - y1) + th) // 2)
-
-        cv2.putText(
+        _draw_order_badge(
             vis,
-            number,
-            (cx, cy),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            scale,
-            (255, 255, 255),
-            num_thickness + 3,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            vis,
-            number,
-            (cx, cy),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            scale,
-            (25, 25, 25),
-            num_thickness,
-            cv2.LINE_AA,
+            str(order),
+            anchor_bbox=(x1, y1, x2, y2),
+            block_type=str(block.get("type", "?")),
         )
 
         btype = str(block.get("type", "?"))
         flow_tag = f" f{flow_id.split('_')[-1]}" if flow_id else ""
         small = f"{btype} c{col_index}{flow_tag}"
-        cv2.putText(
+        _draw_label_panel(
             vis,
             small,
-            (x1 + 6, max(y1 + 18, 18)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.42,
-            (20, 20, 20),
-            2,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            vis,
-            small,
-            (x1 + 6, max(y1 + 18, 18)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.42,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
+            anchor_bbox=(x1, y1, x2, y2),
+            color=(72, 72, 72),
+            font_scale=0.42,
+            text_thickness=1,
         )
 
-    return _overlay_ocr_polys(vis, ocr_regions, show_text_preview=False)
+    return _overlay_ocr_polys(vis, ocr_regions, show_text_preview=False, offset=(dx, dy))
 
 
 def draw_reading_order_comparison(

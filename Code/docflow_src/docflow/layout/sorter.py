@@ -12,11 +12,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 import copy
 import re
-from typing import List, TYPE_CHECKING, Tuple
+from typing import Callable, List, TYPE_CHECKING, Tuple
 
 from docflow.layout.zone_splitter import split_into_zones
 from docflow.layout.column_detector import detect_columns, detect_spanned_blocks
-from docflow.layout.xycutpp import postprocess_xycutpp_local_attachments, sort_layout_xycutpp
+from docflow.layout.xycutpp import (
+    _has_locked_global_multicol_skeleton,
+    _sort_layout_xycutpp_core,
+    postprocess_xycutpp_local_attachments,
+    sort_layout_xycutpp,
+)
 from docflow.model.base import BlockType
 from docflow.utils.constants import (
     SPAN_ELIGIBLE_TYPES,
@@ -93,6 +98,36 @@ class _LayoutEvidence:
     centered_short_title_count: int
 
 
+@dataclass
+class _SkeletonProfile:
+    candidate_name: str
+    global_col_count: int
+    main_col_count: int
+    substantial_cols: int
+    dominant_share: float
+    min_col_coverage: float
+    coverage_balance: float
+    gap_score: float
+    title_continuity: float
+    fragmentation_score: float
+    confidence: float
+    has_peripheral_sidebar: bool
+
+
+@dataclass
+class _LayoutProposal:
+    name: str
+    ordered: List["Block"]
+    profile: _SkeletonProfile
+
+
+def _block_uid(block: "Block") -> str:
+    block_id = str(getattr(block, "block_id", "") or "").strip()
+    if block_id:
+        return block_id
+    return f"anon_{id(block)}"
+
+
 def _flow_id_of(block: "Block") -> str:
     attrs = getattr(block, "attributes", None) or {}
     return str(attrs.get("flow_id", ""))
@@ -115,7 +150,416 @@ def _clear_flow_meta(blocks: List["Block"]) -> None:
 
 
 def _clone_blocks_for_evidence(blocks: List["Block"]) -> List["Block"]:
-    return [copy.copy(block) for block in blocks]
+    clones: List["Block"] = []
+    for block in blocks:
+        cloned = copy.copy(block)
+        cloned.spanned_cols = list(getattr(block, "spanned_cols", []) or [getattr(block, "col_index", 0)])
+        attrs = getattr(block, "attributes", None)
+        cloned.attributes = dict(attrs) if attrs else None
+        clones.append(cloned)
+    return clones
+
+
+def _capture_skeleton_assignments(blocks: List["Block"]) -> dict[str, tuple[int, int, tuple[int, ...]]]:
+    assignments: dict[str, tuple[int, int, tuple[int, ...]]] = {}
+    for block in blocks:
+        assignments[_block_uid(block)] = (
+            int(getattr(block, "col_count", 1) or 1),
+            int(getattr(block, "col_index", 0) or 0),
+            _block_cols(block),
+        )
+    return assignments
+
+
+def _restore_skeleton_assignments(
+    blocks: List["Block"],
+    assignments: dict[str, tuple[int, int, tuple[int, ...]]],
+) -> None:
+    for block in blocks:
+        captured = assignments.get(_block_uid(block))
+        if captured is None:
+            continue
+        block.col_count = int(captured[0])
+        block.col_index = int(captured[1])
+        block.spanned_cols = list(captured[2] or (0,))
+
+
+def _capture_order_positions(blocks: List["Block"]) -> dict[str, int]:
+    return {_block_uid(block): idx for idx, block in enumerate(blocks)}
+
+
+def _capture_block_attributes(blocks: List["Block"]) -> dict[str, dict | None]:
+    captured: dict[str, dict | None] = {}
+    for block in blocks:
+        attrs = getattr(block, "attributes", None)
+        captured[_block_uid(block)] = dict(attrs) if attrs else None
+    return captured
+
+
+def _apply_proposal_to_blocks(
+    blocks: List["Block"],
+    proposal: _LayoutProposal,
+) -> List["Block"]:
+    order_positions = _capture_order_positions(proposal.ordered)
+    assignments = _capture_skeleton_assignments(proposal.ordered)
+    attributes = _capture_block_attributes(proposal.ordered)
+    ordered = sorted(blocks, key=lambda block: order_positions.get(_block_uid(block), 10**9))
+    _restore_skeleton_assignments(ordered, assignments)
+    for block in ordered:
+        captured_attrs = attributes.get(_block_uid(block))
+        block.attributes = dict(captured_attrs) if captured_attrs else None
+    return ordered
+
+
+def _main_skeleton_members(
+    blocks: List["Block"],
+    main_col_count: int,
+) -> List["Block"]:
+    if main_col_count <= 1:
+        return [
+            block for block in blocks
+            if int(getattr(block, "col_count", 1) or 1) == 1
+            and block.block_type not in _STRIP_TYPES
+        ]
+    return [
+        block for block in blocks
+        if int(getattr(block, "col_count", 1) or 1) == main_col_count
+        and block.block_type not in _STRIP_TYPES
+    ]
+
+
+def _infer_main_col_count(blocks: List["Block"]) -> int:
+    counts: dict[int, int] = {}
+    for block in blocks:
+        if block.block_type in _STRIP_TYPES or block.block_type in _SPANNING_CAPTION_TYPES:
+            continue
+        col_count = int(getattr(block, "col_count", 1) or 1)
+        if col_count < 1:
+            continue
+        counts[col_count] = counts.get(col_count, 0) + 1
+    if not counts:
+        return 1
+    return max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+
+
+def _skeleton_col_bounds(
+    blocks: List["Block"],
+    main_col_count: int,
+) -> dict[int, tuple[float, float]]:
+    by_col: dict[int, List["Block"]] = {}
+    for block in blocks:
+        cols = _block_cols(block)
+        if int(getattr(block, "col_count", 1) or 1) != main_col_count or len(cols) != 1:
+            continue
+        by_col.setdefault(int(cols[0]), []).append(block)
+    bounds: dict[int, tuple[float, float]] = {}
+    for col_idx, members in by_col.items():
+        bounds[col_idx] = (
+            min(float(block.bbox.x1) for block in members),
+            max(float(block.bbox.x2) for block in members),
+        )
+    return bounds
+
+
+def _estimate_title_continuity(
+    ordered: List["Block"],
+    main_col_count: int,
+) -> float:
+    title_positions = [
+        (idx, block)
+        for idx, block in enumerate(ordered)
+        if block.block_type == BlockType.TITLE
+        and int(getattr(block, "col_count", 1) or 1) == main_col_count
+    ]
+    if not title_positions:
+        return 0.5
+
+    satisfied = 0.0
+    total = 0
+    for idx, title in title_positions:
+        title_cols = set(_block_cols(title))
+        if not title_cols:
+            continue
+        total += 1
+        same_rank = None
+        foreign_rank = None
+        for step, later in enumerate(ordered[idx + 1:idx + 10], start=1):
+            if later.block_type in _STRIP_TYPES or later.block_type in _SPANNING_CAPTION_TYPES:
+                continue
+            if later.block_type not in {
+                BlockType.TEXT,
+                BlockType.TITLE,
+                BlockType.REFERENCE,
+                BlockType.ABSTRACT,
+                BlockType.LIST,
+                BlockType.CODE,
+            }:
+                continue
+            overlap = bool(title_cols.intersection(_block_cols(later)))
+            if overlap and same_rank is None:
+                same_rank = step
+            if not overlap and foreign_rank is None:
+                foreign_rank = step
+            if same_rank is not None and foreign_rank is not None:
+                break
+
+        if same_rank is None and foreign_rank is None:
+            satisfied += 0.5
+            continue
+        if same_rank is not None and (foreign_rank is None or same_rank <= foreign_rank):
+            satisfied += 1.0
+            continue
+        if same_rank is not None:
+            satisfied += 0.35
+
+    if total <= 0:
+        return 0.5
+    return max(0.0, min(1.0, satisfied / total))
+
+
+def _estimate_fragmentation_score(
+    ordered: List["Block"],
+    main_col_count: int,
+) -> float:
+    members = _main_skeleton_members(ordered, main_col_count)
+    if not members:
+        return 0.0
+    member_ids = {id(block) for block in members}
+    segments = 0
+    inside = False
+    for block in ordered:
+        is_member = id(block) in member_ids
+        if is_member and not inside:
+            segments += 1
+            inside = True
+        elif not is_member:
+            inside = False
+    if segments <= 1:
+        return 1.0
+    return max(0.0, 1.0 - 0.22 * float(segments - 1))
+
+
+def _estimate_local_region_order_score(ordered: List["Block"]) -> float:
+    if not ordered:
+        return 0.0
+    main_col_count = _infer_main_col_count(ordered)
+    title_score = _estimate_title_continuity(ordered, main_col_count)
+    fragmentation_score = _estimate_fragmentation_score(ordered, main_col_count)
+    return max(0.0, min(1.0, 0.65 * title_score + 0.35 * fragmentation_score))
+
+
+def _collect_skeleton_profile(
+    ordered: List["Block"],
+    *,
+    image_width: int,
+    image_height: int | None,
+    candidate_name: str,
+) -> _SkeletonProfile:
+    if not ordered:
+        return _SkeletonProfile(candidate_name, 1, 1, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False)
+
+    page_w = max(float(image_width), 1.0)
+    page_h = max(float(image_height or 0), max((float(block.bbox.y2) for block in ordered), default=1.0))
+    global_col_count = max((int(getattr(block, "col_count", 1) or 1) for block in ordered), default=1)
+    main_col_count = _infer_main_col_count(ordered)
+    main_members = _main_skeleton_members(ordered, main_col_count)
+    dominant_share = len(main_members) / max(len([b for b in ordered if b.block_type not in _STRIP_TYPES]), 1)
+
+    bounds = _skeleton_col_bounds(ordered, main_col_count)
+    by_col: dict[int, List["Block"]] = {}
+    for block in ordered:
+        cols = _block_cols(block)
+        if int(getattr(block, "col_count", 1) or 1) != main_col_count or len(cols) != 1:
+            continue
+        by_col.setdefault(int(cols[0]), []).append(block)
+
+    coverages = [_y_coverage_ratio(members, 0.0, page_h) for members in by_col.values()]
+    min_col_coverage = min(coverages) if coverages else 0.0
+    max_col_coverage = max(coverages) if coverages else 0.0
+    coverage_balance = (min_col_coverage / max_col_coverage) if max_col_coverage > 1e-6 else 0.0
+    substantial_cols = sum(1 for coverage in coverages if coverage >= 0.08)
+
+    if len(bounds) >= 2:
+        sorted_bounds = [bounds[col_idx] for col_idx in sorted(bounds.keys())]
+        gaps = [
+            max(0.0, float(sorted_bounds[idx + 1][0]) - float(sorted_bounds[idx][1]))
+            for idx in range(len(sorted_bounds) - 1)
+        ]
+        mean_gap_norm = (sum(gaps) / len(gaps)) / page_w if gaps else 0.0
+        gap_score = max(0.0, min(1.0, (mean_gap_norm - 0.02) / 0.10))
+    else:
+        gap_score = 0.85 if main_col_count == 1 else 0.0
+
+    title_continuity = _estimate_title_continuity(ordered, main_col_count)
+    fragmentation_score = _estimate_fragmentation_score(ordered, main_col_count)
+
+    evidence = _collect_layout_evidence(
+        _clone_blocks_for_evidence(ordered),
+        image_width=image_width,
+        image_height=image_height,
+    )
+    structural_score = 1.0 if main_col_count == 1 else min(1.0, substantial_cols / max(main_col_count, 1))
+    confidence = (
+        0.20 * structural_score
+        + 0.18 * dominant_share
+        + 0.18 * min_col_coverage
+        + 0.14 * coverage_balance
+        + 0.10 * gap_score
+        + 0.12 * title_continuity
+        + 0.08 * fragmentation_score
+    )
+    if evidence.has_peripheral_sidebar:
+        confidence += 0.04
+    if evidence.has_spanning_visual and main_col_count >= 3:
+        confidence += 0.04
+    confidence = max(0.0, min(1.0, confidence))
+
+    return _SkeletonProfile(
+        candidate_name=candidate_name,
+        global_col_count=global_col_count,
+        main_col_count=main_col_count,
+        substantial_cols=substantial_cols,
+        dominant_share=dominant_share,
+        min_col_coverage=min_col_coverage,
+        coverage_balance=coverage_balance,
+        gap_score=gap_score,
+        title_continuity=title_continuity,
+        fragmentation_score=fragmentation_score,
+        confidence=confidence,
+        has_peripheral_sidebar=evidence.has_peripheral_sidebar,
+    )
+
+
+def _build_layout_proposal(
+    name: str,
+    source_blocks: List["Block"],
+    *,
+    image_width: int,
+    image_height: int | None,
+    builder: Callable[[List["Block"]], List["Block"]],
+) -> _LayoutProposal:
+    proposal_blocks = _clone_blocks_for_evidence(source_blocks)
+    ordered = builder(proposal_blocks)
+    profile = _collect_skeleton_profile(
+        ordered,
+        image_width=image_width,
+        image_height=image_height,
+        candidate_name=name,
+    )
+    return _LayoutProposal(name=name, ordered=ordered, profile=profile)
+
+
+def _choose_global_skeleton_proposal(
+    core_proposal: _LayoutProposal,
+    fallback_proposal: _LayoutProposal | None,
+) -> _LayoutProposal:
+    if fallback_proposal is None:
+        return core_proposal
+
+    core_conf = core_proposal.profile.confidence
+    fallback_conf = fallback_proposal.profile.confidence
+    if core_proposal.profile.main_col_count >= 3 and core_conf >= 0.74 and fallback_conf < core_conf + 0.10:
+        return core_proposal
+    if fallback_conf >= core_conf + 0.08:
+        return fallback_proposal
+    if core_conf >= fallback_conf - 0.03:
+        return core_proposal
+    return fallback_proposal
+
+
+def _should_apply_local_subregion_sort(
+    proposal: _LayoutProposal,
+    *,
+    raw_strong_multiflow: bool,
+) -> bool:
+    if not raw_strong_multiflow:
+        return False
+    if (
+        proposal.profile.main_col_count >= 4
+        and proposal.profile.confidence >= 0.80
+        and not proposal.profile.has_peripheral_sidebar
+    ):
+        return False
+    return True
+
+
+def _annotate_layout_hierarchy(
+    blocks: List["Block"],
+    *,
+    selected: _LayoutProposal,
+    core_proposal: _LayoutProposal,
+    fallback_proposal: _LayoutProposal | None,
+    local_sort_applied: bool,
+    local_score_before: float,
+    local_score_after: float,
+) -> None:
+    payload = {
+        "selected_skeleton": selected.name,
+        "selected_confidence": round(float(selected.profile.confidence), 4),
+        "selected_main_col_count": int(selected.profile.main_col_count),
+        "core_confidence": round(float(core_proposal.profile.confidence), 4),
+        "legacy_confidence": round(float(fallback_proposal.profile.confidence), 4) if fallback_proposal else None,
+        "local_sort_applied": bool(local_sort_applied),
+        "local_score_before": round(float(local_score_before), 4),
+        "local_score_after": round(float(local_score_after), 4),
+    }
+    for block in blocks:
+        if block.attributes is None:
+            block.attributes = {}
+        block.attributes["sorter_hierarchy"] = payload
+
+
+def _core_establishes_locked_multicol_skeleton(
+    blocks: List["Block"],
+    *,
+    image_width: int,
+    image_height: int | None,
+    max_cols: int,
+    cluster_thresh: float,
+    column_confidence_min: float,
+    zone_strip_height_ratio: float,
+    xycutpp_beta: float,
+    xycutpp_density_threshold: float,
+    xycutpp_min_gap_ratio: float,
+    xycutpp_title_width_ratio: float,
+) -> bool:
+    """Respect stable four-column skeletons before any flow-level wrapper runs."""
+    probe_blocks = _clone_blocks_for_evidence(blocks)
+    ordered = _sort_layout_xycutpp_core(
+        probe_blocks,
+        image_width=image_width,
+        image_height=image_height,
+        max_cols=max_cols,
+        cluster_thresh=cluster_thresh,
+        column_confidence_min=column_confidence_min,
+        zone_strip_height_ratio=zone_strip_height_ratio,
+        beta=xycutpp_beta,
+        density_threshold=xycutpp_density_threshold,
+        min_gap_ratio=xycutpp_min_gap_ratio,
+        title_width_ratio=xycutpp_title_width_ratio,
+    )
+    if not _has_locked_global_multicol_skeleton(
+        ordered,
+        image_width=image_width,
+        image_height=image_height,
+    ):
+        return False
+
+    page_w = max(float(image_width), 1.0)
+    by_col: dict[int, int] = {}
+    for block in ordered:
+        cols = _block_cols(block)
+        if (
+            block.block_type not in {BlockType.TEXT, BlockType.TITLE, BlockType.REFERENCE, BlockType.ABSTRACT}
+            or int(getattr(block, "col_count", 1) or 1) < 4
+            or len(cols) != 1
+            or float(block.bbox.width) > page_w * 0.48
+        ):
+            continue
+        by_col[int(cols[0])] = by_col.get(int(cols[0]), 0) + 1
+
+    substantial_cols = sum(1 for count in by_col.values() if count >= 2)
+    return substantial_cols >= 4
 
 
 def _block_cols(block: "Block") -> tuple[int, ...]:
@@ -1570,12 +2014,19 @@ def _sort_layout_with_article_flows(
     xycutpp_density_threshold: float,
     xycutpp_min_gap_ratio: float,
     xycutpp_title_width_ratio: float,
+    preserve_global_skeleton: dict[str, tuple[int, int, tuple[int, ...]]] | None = None,
+    respect_existing_skeleton: bool = False,
 ) -> List["Block"]:
     if not blocks:
         return []
 
-    _global_assign_columns(blocks, image_width=image_width, max_cols=max_cols, cluster_thresh=cluster_thresh)
-    col_count = max((blk.col_count for blk in blocks), default=1)
+    if respect_existing_skeleton:
+        col_count = max((int(getattr(blk, "col_count", 1) or 1) for blk in blocks), default=1)
+    else:
+        _global_assign_columns(blocks, image_width=image_width, max_cols=max_cols, cluster_thresh=cluster_thresh)
+        col_count = max((blk.col_count for blk in blocks), default=1)
+    if preserve_global_skeleton is None:
+        preserve_global_skeleton = _capture_skeleton_assignments(blocks)
     if col_count <= 1:
         return sort_layout_xycutpp(
             blocks,
@@ -1640,12 +2091,17 @@ def _sort_layout_with_article_flows(
             _set_flow_meta(blk, flow_id, flow_kind)
         ordered.extend(local_sorted)
 
+    if preserve_global_skeleton is not None:
+        _restore_skeleton_assignments(ordered, preserve_global_skeleton)
     _clear_flow_meta(ordered)
-    return postprocess_xycutpp_local_attachments(
+    ordered = postprocess_xycutpp_local_attachments(
         ordered,
         image_width=image_width,
         image_height=image_height,
     )
+    if preserve_global_skeleton is not None:
+        _restore_skeleton_assignments(ordered, preserve_global_skeleton)
+    return ordered
 
 
 def _sort_single_column_blocks(blocks: List["Block"]) -> List["Block"]:
@@ -2177,9 +2633,7 @@ def sort_layout(
         ``"newspaper_hybrid"`` / ``"auto"`` 全部统一走 XY-Cut++ 内核。
     """
     mode = (strategy or "auto").strip().lower()
-    if mode == "xycutpp":
-        mode = "xycutpp_hybrid"
-    if mode not in {"legacy", "xycutpp_paper", "xycutpp_hybrid", "newspaper_hybrid", "auto"}:
+    if mode not in {"legacy", "xycutpp", "xycutpp_paper", "xycutpp_hybrid", "newspaper_hybrid", "auto"}:
         mode = "auto"
     if mode == "legacy":
         return sort_layout_legacy(
@@ -2191,7 +2645,69 @@ def sort_layout(
             column_confidence_min=column_confidence_min,
             zone_strip_height_ratio=zone_strip_height_ratio,
         )
-    evidence_blocks = _clone_blocks_for_evidence(blocks)
+    raw_evidence_blocks = _clone_blocks_for_evidence(blocks)
+    raw_evidence = _collect_layout_evidence(
+        raw_evidence_blocks,
+        image_width=image_width,
+        image_height=image_height,
+        max_cols=max_cols,
+        cluster_thresh=cluster_thresh,
+    )
+    raw_strong_multiflow = _has_strong_multiflow_evidence(
+        raw_evidence_blocks,
+        image_width=image_width,
+        image_height=image_height,
+        evidence=raw_evidence,
+    )
+    core_proposal = _build_layout_proposal(
+        "xycutpp_core",
+        blocks,
+        image_width=image_width,
+        image_height=image_height,
+        builder=lambda proposal_blocks: sort_layout_xycutpp(
+            proposal_blocks,
+            image_width=image_width,
+            image_height=image_height,
+            max_cols=max_cols,
+            cluster_thresh=cluster_thresh,
+            column_confidence_min=column_confidence_min,
+            zone_strip_height_ratio=zone_strip_height_ratio,
+            beta=xycutpp_beta,
+            density_threshold=xycutpp_density_threshold,
+            min_gap_ratio=xycutpp_min_gap_ratio,
+            title_width_ratio=xycutpp_title_width_ratio,
+        ),
+    )
+
+    fallback_proposal: _LayoutProposal | None = None
+    if (
+        mode in {"xycutpp_hybrid", "newspaper_hybrid", "auto"}
+        and (
+            raw_strong_multiflow
+            or raw_evidence.has_peripheral_sidebar
+            or _has_stable_multicol_spanning_evidence(raw_evidence)
+        )
+    ):
+        fallback_proposal = _build_layout_proposal(
+            "legacy_fallback",
+            blocks,
+            image_width=image_width,
+            image_height=image_height,
+            builder=lambda proposal_blocks: sort_layout_legacy(
+                proposal_blocks,
+                image_width=image_width,
+                image_height=image_height,
+                max_cols=max_cols,
+                cluster_thresh=cluster_thresh,
+                column_confidence_min=column_confidence_min,
+                zone_strip_height_ratio=zone_strip_height_ratio,
+            ),
+        )
+
+    selected_proposal = _choose_global_skeleton_proposal(core_proposal, fallback_proposal)
+    selected_blocks = _apply_proposal_to_blocks(blocks, selected_proposal)
+
+    evidence_blocks = _clone_blocks_for_evidence(selected_blocks)
     evidence = _collect_layout_evidence(
         evidence_blocks,
         image_width=image_width,
@@ -2199,17 +2715,16 @@ def sort_layout(
         max_cols=max_cols,
         cluster_thresh=cluster_thresh,
     )
-    if (
-        mode in {"xycutpp_hybrid", "newspaper_hybrid", "auto"}
-        and _has_strong_multiflow_evidence(
-            evidence_blocks,
-            image_width=image_width,
-            image_height=image_height,
-            evidence=evidence,
-        )
+    local_score_before = _estimate_local_region_order_score(selected_blocks)
+    local_score_after = local_score_before
+    local_sort_applied = False
+    if mode in {"xycutpp_hybrid", "newspaper_hybrid", "auto"} and _should_apply_local_subregion_sort(
+        selected_proposal,
+        raw_strong_multiflow=raw_strong_multiflow,
     ):
-        return _sort_layout_with_article_flows(
-            blocks,
+        preserved_skeleton = _capture_skeleton_assignments(selected_blocks)
+        locally_sorted = _sort_layout_with_article_flows(
+            selected_blocks,
             image_width=image_width,
             image_height=image_height,
             max_cols=max_cols,
@@ -2220,17 +2735,21 @@ def sort_layout(
             xycutpp_density_threshold=xycutpp_density_threshold,
             xycutpp_min_gap_ratio=xycutpp_min_gap_ratio,
             xycutpp_title_width_ratio=xycutpp_title_width_ratio,
+            preserve_global_skeleton=preserved_skeleton,
+            respect_existing_skeleton=True,
         )
-    return sort_layout_xycutpp(
-        blocks,
-        image_width=image_width,
-        image_height=image_height,
-        max_cols=max_cols,
-        cluster_thresh=cluster_thresh,
-        column_confidence_min=column_confidence_min,
-        zone_strip_height_ratio=zone_strip_height_ratio,
-        beta=xycutpp_beta,
-        density_threshold=xycutpp_density_threshold,
-        min_gap_ratio=xycutpp_min_gap_ratio,
-        title_width_ratio=xycutpp_title_width_ratio,
+        local_score_after = _estimate_local_region_order_score(locally_sorted)
+        if local_score_after + 0.03 >= local_score_before or selected_proposal.profile.main_col_count >= 3:
+            selected_blocks = locally_sorted
+            local_sort_applied = True
+
+    _annotate_layout_hierarchy(
+        selected_blocks,
+        selected=selected_proposal,
+        core_proposal=core_proposal,
+        fallback_proposal=fallback_proposal,
+        local_sort_applied=local_sort_applied,
+        local_score_before=local_score_before,
+        local_score_after=local_score_after,
     )
+    return selected_blocks

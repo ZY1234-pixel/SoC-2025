@@ -1,21 +1,11 @@
-"""Integrated XY-Cut++ sorter for DocFlow.
+"""XY-Cut++ sorter following the original paper's 4-stage pipeline.
 
-This module replaces the previous in-project XY-Cut++ implementation with the
-prototype provided under ``Code/xycutpp_prototype_for_docflow``.
-
-Properties:
-- input: ``List[docflow.model.base.Block]``
-- output: reordered blocks with ``col_count``, ``col_index`` and
-  ``spanned_cols`` populated for downstream renderers
-- debug: writes trace fields under ``block.attributes['xycutpp_proto']``
-
-Pipeline:
-1. Cross-layout detection via ``beta * median(width)``.
+1. Cross-layout detection via beta * median(width).
 2. Pre-mask title / figure / table / formula / caption / strip elements.
-3. Coarse Y-band segmentation using wide masked barriers.
-4. Adaptive XY/YX recursive sorting on remaining anchors.
-5. Semantic + geometry-aware restoration of masked elements.
-6. Column metadata assignment for renderers.
+3. Coarse Y-band segmentation using wide masked barriers, then adaptive
+   XY/YX-Cut recursive sorting within each band.
+4. Semantic + geometry-aware restoration of masked elements.
+5. Column metadata assignment for downstream renderers.
 """
 
 from __future__ import annotations
@@ -32,6 +22,10 @@ from docflow.utils.constants import COLUMN_CLUSTER_THRESH, MAX_COLS, SPAN_ELIGIB
 if TYPE_CHECKING:  # pragma: no cover
     from docflow.model.base import Block
 
+
+# ---------------------------------------------------------------------------
+# Type groups
+# ---------------------------------------------------------------------------
 
 _TEXTLIKE_TYPES = frozenset({
     BlockType.TEXT,
@@ -92,6 +86,10 @@ _COLUMN_ANCHOR_TYPES = frozenset({
     BlockType.FOOTNOTE,
 })
 
+
+# ---------------------------------------------------------------------------
+# Geometry utilities
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class _Cut:
@@ -176,6 +174,10 @@ def _sort_yx(blocks: Iterable["Block"]) -> List["Block"]:
     return sorted(blocks, key=lambda b: (_y1(b), _x1(b), _y2(b), _x2(b)))
 
 
+def _sort_xy(blocks: Iterable["Block"]) -> List["Block"]:
+    return sorted(blocks, key=lambda b: (_x1(b), _y1(b), _x2(b), _y2(b)))
+
+
 def _block_id(block: "Block") -> str:
     raw = getattr(block, "block_id", "")
     return str(raw) if raw else f"@{id(block)}"
@@ -199,13 +201,44 @@ def _block_text(block: "Block") -> str:
     return ""
 
 
-def _text_isolation_gap(block: "Block", blocks: Sequence["Block"]) -> float:
-    gap = float("inf")
-    for other in blocks:
-        if other is block or other.block_type != BlockType.TEXT:
-            continue
-        gap = min(gap, _edge_gap(block, other))
-    return gap
+def _full_text(block: "Block") -> str:
+    if hasattr(block, "full_text"):
+        try:
+            return str(block.full_text() or "")
+        except Exception:
+            return ""
+    lines = getattr(block, "lines", None) or []
+    return "".join(str(getattr(line, "text", "") or "") for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# Helpers kept for postprocessing compatibility
+# ---------------------------------------------------------------------------
+
+def _merged_y_coverage(blocks: Sequence["Block"], page_h: float) -> float:
+    if not blocks or page_h <= 0.0:
+        return 0.0
+    intervals = sorted((_y1(blk), _y2(blk)) for blk in blocks if _y2(blk) > _y1(blk))
+    if not intervals:
+        return 0.0
+    merged: List[List[float]] = [[intervals[0][0], intervals[0][1]]]
+    for lo, hi in intervals[1:]:
+        if lo <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    covered = sum(max(0.0, hi - lo) for lo, hi in merged)
+    return max(0.0, min(1.0, covered / page_h))
+
+
+def _intersects_region(block: "Block", region: tuple[float, float, float, float]) -> bool:
+    rx1, ry1, rx2, ry2 = region
+    return (
+        _x1(block) < rx2
+        and _x2(block) > rx1
+        and _y1(block) < ry2
+        and _y2(block) > ry1
+    )
 
 
 def _has_column_local_text_neighbor(
@@ -236,25 +269,63 @@ def _has_column_local_text_neighbor(
     return False
 
 
-def _is_top_centered_short_text(
-    block: "Block",
+def _has_locked_global_multicol_skeleton(
+    blocks: Sequence["Block"],
     *,
     image_width: int,
     image_height: Optional[int],
 ) -> bool:
-    if block.block_type not in _TEXTLIKE_TYPES or block.block_type in _STRIP_TYPES:
-        return False
+    """Return true when the core has already established a stable 4-column skeleton.
+
+    Postprocess rules may repair local family ordering, but once a stable
+    4-column newspaper or magazine skeleton is present they should not
+    rewrite column metadata or split the page into synthetic sub-structures.
+    """
     page_w = max(float(image_width), 1.0)
-    page_h = max(float(image_height or 0), max(_y2(block), 1.0))
-    return (
-        _line_count(block) <= 2
-        and _w(block) <= page_w * 0.36
-        and _y2(block) <= page_h * 0.18
-        and abs(_cx(block) - page_w * 0.5) <= page_w * 0.22
-    )
+    page_h = max(float(image_height or 0), max((_y2(blk) for blk in blocks), default=1.0))
+    bodylike = [
+        blk for blk in blocks
+        if blk.block_type in {
+            BlockType.TEXT,
+            BlockType.TITLE,
+            BlockType.REFERENCE,
+            BlockType.ABSTRACT,
+        }
+        and blk.block_type not in _STRIP_TYPES
+        and blk.block_type not in _CAPTION_TYPES
+        and int(getattr(blk, "col_count", 1) or 1) >= 4
+        and len(getattr(blk, "spanned_cols", []) or [getattr(blk, "col_index", 0)]) == 1
+        and _w(blk) <= page_w * 0.48
+    ]
+    if len(bodylike) < 8:
+        return False
+
+    by_col: dict[int, List["Block"]] = {}
+    for blk in bodylike:
+        col = int((getattr(blk, "spanned_cols", []) or [getattr(blk, "col_index", 0)])[0])
+        by_col.setdefault(col, []).append(blk)
+    if len(by_col) < 3:
+        return False
+
+    substantial_cols = 0
+    for members in by_col.values():
+        if len(members) >= 2 and _merged_y_coverage(members, page_h) >= 0.08:
+            substantial_cols += 1
+
+    return substantial_cols >= 4
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: cross-layout detection
+# ---------------------------------------------------------------------------
 
 
 def _candidate_widths_for_median(blocks: Sequence["Block"], image_width: int) -> List[float]:
+    """Collect widths from narrow body-text blocks for a stable median.
+
+    Wide visuals, captions, and strip blocks are excluded so they don't inflate
+    the median on sparse pages.
+    """
     page_w = max(float(image_width), 1.0)
     widths: List[float] = []
     for blk in blocks:
@@ -267,146 +338,33 @@ def _candidate_widths_for_median(blocks: Sequence["Block"], image_width: int) ->
         if blk.block_type not in {BlockType.TEXT, BlockType.TITLE, BlockType.REFERENCE, BlockType.ABSTRACT}:
             continue
         widths.append(_w(blk))
-    return widths or [_w(blk) for blk in blocks]
-
-
-def _merged_y_coverage(blocks: Sequence["Block"], page_h: float) -> float:
-    if not blocks or page_h <= 0.0:
-        return 0.0
-    intervals = sorted((_y1(blk), _y2(blk)) for blk in blocks if _y2(blk) > _y1(blk))
-    if not intervals:
-        return 0.0
-    merged: List[List[float]] = [[intervals[0][0], intervals[0][1]]]
-    for lo, hi in intervals[1:]:
-        if lo <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], hi)
-        else:
-            merged.append([lo, hi])
-    covered = sum(max(0.0, hi - lo) for lo, hi in merged)
-    return max(0.0, min(1.0, covered / page_h))
-
-
-def _has_stable_narrow_column_skeleton(
-    bodylike_blocks: Sequence["Block"],
-    *,
-    image_width: int,
-    image_height: Optional[int],
-) -> tuple[bool, List[List["Block"]], List[tuple[float, float]]]:
-    columns, col_bounds = detect_columns(
-        list(bodylike_blocks),
-        image_width,
-        max_cols=MAX_COLS,
-        cluster_thresh=min(COLUMN_CLUSTER_THRESH, 0.08),
-    )
-    if len(columns) <= 1:
-        return False, columns, col_bounds
-
-    total_blocks = sum(len(col) for col in columns)
-    if len(columns) == 2 and total_blocks == 2:
-        left = columns[0][0]
-        right = columns[1][0]
-        page_h = max(float(image_height or 0), max(_y2(left), _y2(right), 1.0))
-        if min(_y1(left), _y1(right)) >= page_h * 0.78:
-            return False, columns, col_bounds
-        y_overlap = _overlap_1d(_y1(left), _y2(left), _y1(right), _y2(right))
-        min_h = max(1.0, min(_h(left), _h(right)))
-        center_gap = abs(_cx(left) - _cx(right))
-        page_w = max(float(image_width), 1.0)
-        if y_overlap >= min_h * 0.35 and center_gap >= page_w * 0.18:
-            return True, columns, col_bounds
-
-    page_h = max(float(image_height or 0), max((_y2(blk) for blk in bodylike_blocks), default=1.0))
-    substantial_cols = 0
-    for col in columns:
-        if len(col) >= 2 and _merged_y_coverage(col, page_h) >= 0.08:
-            substantial_cols += 1
-
-    stable = substantial_cols >= 2 and total_blocks >= max(4, len(columns) * 2)
-    return stable, columns, col_bounds
-
-
-def _has_single_column_wide_body_dominance(
-    blocks: Sequence["Block"],
-    *,
-    image_width: int,
-    image_height: Optional[int],
-) -> bool:
-    page_w = max(float(image_width), 1.0)
-    page_h = max(float(image_height or 0), max((_y2(blk) for blk in blocks), default=1.0))
-    wide_body = [
-        blk for blk in blocks
-        if blk.block_type in {BlockType.TEXT, BlockType.ABSTRACT, BlockType.REFERENCE}
-        and blk.block_type not in _STRIP_TYPES
-        and _w(blk) >= page_w * 0.60
-        and (_line_count(blk) >= 2 or _h(blk) >= page_h * 0.025)
-    ]
-    if len(wide_body) < 2:
-        return False
-
-    wide_coverage = _merged_y_coverage(wide_body, page_h)
-    if wide_coverage < 0.22:
-        return False
-
-    narrow_body = [
-        blk for blk in blocks
-        if blk.block_type == BlockType.TEXT
-        and _w(blk) <= page_w * 0.48
-        and _line_count(blk) >= 1
-    ]
-    stable_columns, _columns, _bounds = _has_stable_narrow_column_skeleton(
-        narrow_body,
-        image_width=image_width,
-        image_height=image_height,
-    )
-    return not stable_columns
+    return widths or [_w(blk) for blk in blocks if blk.block_type not in _STRIP_TYPES and blk.block_type not in _VISUAL_TYPES]
 
 
 def _detect_cross_layout_blocks(
     blocks: Sequence["Block"],
     *,
     image_width: int,
-    image_height: Optional[int],
-    beta: float,
-    min_projection_overlap: int,
-    overlap_threshold: float,
+    image_height: Optional[int] = None,
+    beta: float = 1.3,
+    min_projection_overlap: int = 2,
+    overlap_threshold: float = 0.10,
 ) -> set[int]:
     if len(blocks) < 3:
         return set()
 
-    if _has_single_column_wide_body_dominance(
-        blocks,
-        image_width=image_width,
-        image_height=image_height,
-    ):
-        for blk in blocks:
-            _mark(blk, cross_candidate=False, cross_threshold=0.0, cross_overlap_count=0)
-        return set()
-
-    text_candidates = [
-        blk for blk in blocks
-        if blk.block_type in _TEXTLIKE_TYPES and blk.block_type not in _STRIP_TYPES
-    ]
-    bodylike_probe = [
-        blk for blk in text_candidates
-        if blk.block_type == BlockType.TEXT
-        and _w(blk) <= max(float(image_width), 1.0) * 0.48
-        and not _is_top_centered_short_text(
-            blk,
-            image_width=image_width,
-            image_height=image_height,
-        )
-    ]
-    if len(bodylike_probe) < 2:
-        for blk in blocks:
-            _mark(blk, cross_candidate=False, cross_threshold=0.0, cross_overlap_count=0)
-        return set()
-
-    stable_columns, _columns, col_bounds = _has_stable_narrow_column_skeleton(
-        bodylike_probe,
-        image_width=image_width,
-        image_height=image_height,
-    )
-    if not stable_columns:
+    # Only detect cross-layout when there are blocks that don't overlap in X,
+    # indicating actual column structure. Without columns the concept is meaningless.
+    text_blocks = [b for b in blocks if b.block_type in _TEXTLIKE_TYPES and b.block_type not in _CAPTION_TYPES]
+    has_columns = False
+    for i, a in enumerate(text_blocks):
+        for j in range(i + 1, len(text_blocks)):
+            if _projection_overlap_ratio_x(a, text_blocks[j]) < overlap_threshold:
+                has_columns = True
+                break
+        if has_columns:
+            break
+    if not has_columns:
         for blk in blocks:
             _mark(blk, cross_candidate=False, cross_threshold=0.0, cross_overlap_count=0)
         return set()
@@ -419,18 +377,14 @@ def _detect_cross_layout_blocks(
     cross_ids: set[int] = set()
     for blk in blocks:
         if blk.block_type not in _TEXTLIKE_TYPES or blk.block_type in _CAPTION_TYPES:
-            _mark(blk, cross_candidate=False, cross_threshold=round(threshold, 2), cross_overlap_count=0)
+            _mark(blk, cross_candidate=False, cross_threshold=round(threshold, 2))
             continue
+
         bw = _w(blk)
         length_hit = bw > threshold or bw >= page_w * 0.58
         if not length_hit:
             _mark(blk, cross_candidate=False, cross_threshold=round(threshold, 2))
             continue
-
-        spanned_col_count = sum(
-            1 for cx1, cx2 in col_bounds
-            if _overlap_1d(_x1(blk), _x2(blk), float(cx1), float(cx2)) > 0
-        )
 
         overlap_count = 0
         for other in blocks:
@@ -441,17 +395,21 @@ def _detect_cross_layout_blocks(
                 if overlap_count >= min_projection_overlap:
                     break
 
-        is_cross = overlap_count >= min_projection_overlap and spanned_col_count >= 2
+        is_cross = overlap_count >= min_projection_overlap
         _mark(
             blk,
             cross_candidate=is_cross,
             cross_threshold=round(threshold, 2),
             cross_overlap_count=overlap_count,
-            cross_spanned_cols=spanned_col_count,
         )
         if is_cross:
             cross_ids.add(id(blk))
     return cross_ids
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: pre-mask and coarse segmentation
+# ---------------------------------------------------------------------------
 
 
 def _is_isolated_central_dynamic(
@@ -462,12 +420,7 @@ def _is_isolated_central_dynamic(
     image_height: Optional[int],
     near_text_margin_ratio: float,
 ) -> bool:
-    # Our current pre-cut implementation only produces full-width horizontal
-    # bands. Visual islands work well with that approximation, but ordinary
-    # section titles do not: using column-local titles as page-level barriers
-    # breaks stable double-column pages such as academic articles. Keep title
-    # restoration in CMM and reserve pre-cut for isolated visuals only.
-    if block.block_type not in _VISUAL_TYPES:
+    if block.block_type not in _DYNAMIC_MASK_TYPES:
         return False
     page_w = max(float(image_width), 1.0)
     page_h = max(float(image_height or 0), 1.0)
@@ -480,83 +433,49 @@ def _is_isolated_central_dynamic(
     near_center = dist / max(normalizer, 1.0) <= 0.20
     if not near_center:
         return False
-    if _has_column_local_text_neighbor(
-        block,
-        blocks,
-        image_width=image_width,
-        image_height=image_height,
-    ):
-        return False
 
     margin = max(page_w, page_h) * near_text_margin_ratio
-    min_text_gap = _text_isolation_gap(block, blocks)
+    min_text_gap = float("inf")
+    for other in blocks:
+        if other is block or other.block_type != BlockType.TEXT:
+            continue
+        min_text_gap = min(min_text_gap, _edge_gap(block, other))
     return min_text_gap > margin
 
 
-def _is_top_centered_attachment(
-    block: "Block",
-    blocks: Sequence["Block"],
-    *,
-    cross_ids: set[int],
-    image_width: int,
-    image_height: Optional[int],
-) -> bool:
-    """Return true for short top lines that belong to a spanning page title."""
-    if block.block_type != BlockType.TEXT or _line_count(block) != 1:
-        return False
-    page_w = max(float(image_width), 1.0)
-    page_h = max(float(image_height or 0), max((_y2(b) for b in blocks), default=1.0))
-    text = _block_text(block).strip()
-    if not text or len(text) > 48:
-        return False
-    if not (page_w * 0.10 <= _w(block) <= page_w * 0.36):
-        return False
-    if _h(block) > max(page_h * 0.035, 40.0):
-        return False
-    if _y1(block) > page_h * 0.24:
-        return False
-    if abs(_cx(block) - page_w * 0.5) > page_w * 0.18:
-        return False
-
-    return any(
-        other is not block
-        and other.block_type == BlockType.TITLE
-        and (id(other) in cross_ids or _w(other) >= page_w * 0.55)
-        and _y2(other) <= _y1(block) + max(24.0, page_h * 0.025)
-        and _y1(other) <= page_h * 0.16
-        for other in blocks
-    )
-
-
-def _is_column_structural_visual(
+def _is_top_attachment(
     block: "Block",
     blocks: Sequence["Block"],
     *,
     image_width: int,
     image_height: Optional[int],
 ) -> bool:
-    """Column-local figures should participate in XY-cut partitioning.
-
-    Captions and floating/cross-column visuals are still restored semantically,
-    but a large in-column figure is real column content. Masking it removes
-    important projection mass and can make the opposite column appear first.
-    """
-    if block.block_type != BlockType.FIGURE:
+    """Detect narrow, short text blocks immediately below a title (e.g. byline)."""
+    if block.block_type not in _TEXTLIKE_TYPES or block.block_type in _DYNAMIC_MASK_TYPES:
         return False
     page_w = max(float(image_width), 1.0)
-    page_h = max(float(image_height or 0), max(_y2(block), 1.0))
-    if _w(block) > page_w * 0.42:
+    page_h = max(float(image_height or 0), _y2(block), 1.0)
+    if _y1(block) > page_h * 0.15:
         return False
-    if _w(block) < page_w * 0.16 or _h(block) < page_h * 0.10:
+    if _w(block) > page_w * 0.55:
         return False
-    if _area(block) < page_w * page_h * 0.025:
+    if _line_count(block) > 1:
         return False
-    return _has_column_local_text_neighbor(
-        block,
-        blocks,
-        image_width=image_width,
-        image_height=image_height,
-    )
+    if _h(block) > page_h * 0.04:
+        return False
+    for other in blocks:
+        if other is block:
+            continue
+        if other.block_type != BlockType.TITLE:
+            continue
+        if _y2(other) > _y1(block):
+            continue
+        vertical_gap = _y1(block) - _y2(other)
+        if vertical_gap > max(24.0, page_h * 0.02):
+            continue
+        if _projection_overlap_ratio_x(block, other) >= 0.25:
+            return True
+    return False
 
 
 def _split_mask_sets(
@@ -566,175 +485,99 @@ def _split_mask_sets(
     image_width: int,
     image_height: Optional[int],
     near_text_margin_ratio: float,
-) -> tuple[List["Block"], List["Block"], List["Block"]]:
+) -> tuple[List["Block"], List["Block"]]:
     active: List["Block"] = []
     masked: List["Block"] = []
-    precut_targets: List["Block"] = []
     for blk in blocks:
         is_cross = id(blk) in cross_ids
-        text = _block_text(blk).strip()
-        is_numbered_section_title = (
-            blk.block_type == BlockType.TITLE
-            and bool(text)
-            and _NUMBERED_SECTION_RE.match(text) is not None
-        )
-        is_precut_target = _is_isolated_central_dynamic(
+        is_top_att = _is_top_attachment(
             blk,
             blocks,
             image_width=image_width,
             image_height=image_height,
-            near_text_margin_ratio=near_text_margin_ratio,
         )
-        is_top_attachment = _is_top_centered_attachment(
-            blk,
-            blocks,
-            cross_ids=cross_ids,
-            image_width=image_width,
-            image_height=image_height,
-        )
-        is_structural_visual = (
-            not is_cross
-            and not is_precut_target
-            and _is_column_structural_visual(
+        should_mask = (
+            is_cross
+            or blk.block_type in _DYNAMIC_MASK_TYPES
+            or _is_isolated_central_dynamic(
                 blk,
                 blocks,
                 image_width=image_width,
                 image_height=image_height,
+                near_text_margin_ratio=near_text_margin_ratio,
             )
-        )
-        should_mask = (
-            is_cross
-            or is_top_attachment
-            or (
-                blk.block_type in _DYNAMIC_MASK_TYPES
-                and not is_structural_visual
-                and not is_numbered_section_title
-            )
-            or is_precut_target
+            or is_top_att
         )
         if should_mask:
             masked.append(blk)
-            if is_precut_target:
-                precut_targets.append(blk)
-            _mark(
-                blk,
-                phase="pre_mask",
-                is_cross_layout=is_cross,
-                is_precut_target=is_precut_target,
-                mask_reason="cross" if is_cross else ("top_attachment" if is_top_attachment else blk.block_type.value),
-            )
+            reason = blk.block_type.value if blk.block_type in _DYNAMIC_MASK_TYPES else ("top_attachment" if is_top_att else "cross" if is_cross else blk.block_type.value)
+            _mark(blk, phase="pre_mask", is_cross_layout=is_cross, mask_reason=reason)
         else:
             active.append(blk)
             _mark(blk, phase="anchor", is_cross_layout=False)
-    return active, masked, precut_targets
+    return active, masked
 
 
-def _split_region_around_target(
-    region: tuple[float, float, float, float],
-    target: "Block",
+def _wide_barriers(
+    masked: Sequence["Block"],
     *,
-    min_gap: float,
-) -> List[tuple[float, float, float, float]]:
-    rx1, ry1, rx2, ry2 = region
-    tx1 = max(rx1, _x1(target))
-    ty1 = max(ry1, _y1(target))
-    tx2 = min(rx2, _x2(target))
-    ty2 = min(ry2, _y2(target))
-    if tx2 <= tx1 or ty2 <= ty1:
-        return [region]
-
-    pieces: List[tuple[float, float, float, float]] = []
-    if ty1 - ry1 >= min_gap:
-        pieces.append((rx1, ry1, rx2, ty1))
-    if tx1 - rx1 >= min_gap and ty2 - ty1 >= min_gap:
-        pieces.append((rx1, ty1, tx1, ty2))
-    if rx2 - tx2 >= min_gap and ty2 - ty1 >= min_gap:
-        pieces.append((tx2, ty1, rx2, ty2))
-    if ry2 - ty2 >= min_gap:
-        pieces.append((rx1, ty2, rx2, ry2))
-    return pieces or [region]
+    image_width: int,
+    barrier_width_ratio: float,
+) -> List["Block"]:
+    page_w = max(float(image_width), 1.0)
+    barriers: List["Block"] = []
+    for blk in masked:
+        if blk.block_type in _STRIP_TYPES:
+            continue
+        if _w(blk) >= page_w * barrier_width_ratio:
+            barriers.append(blk)
+    return _sort_yx(barriers)
 
 
-def _coarse_precut_regions(
+def _coarse_y_bands(
     active: Sequence["Block"],
-    precut_targets: Sequence["Block"],
+    masked: Sequence["Block"],
     *,
     image_width: int,
     image_height: Optional[int],
+    barrier_width_ratio: float,
     min_band_gap: float,
-) -> List[tuple[tuple[float, float, float, float], List["Block"]]]:
+) -> List[List["Block"]]:
     if not active:
         return []
-    page_w = max(float(image_width), 1.0)
     page_h = max(float(image_height or 0), max((_y2(b) for b in active), default=1.0))
-    if not precut_targets:
-        return [((0.0, 0.0, page_w, page_h), list(active))]
+    barriers = _wide_barriers(masked, image_width=image_width, barrier_width_ratio=barrier_width_ratio)
+    if not barriers:
+        return [list(active)]
 
-    regions: List[tuple[float, float, float, float]] = [(0.0, 0.0, page_w, page_h)]
-    for target in _sort_yx(precut_targets):
-        next_regions: List[tuple[float, float, float, float]] = []
-        applied = False
-        tcx, tcy = _cx(target), _cy(target)
-        for region in regions:
-            rx1, ry1, rx2, ry2 = region
-            target_inside = (rx1 <= tcx <= rx2) and (ry1 <= tcy <= ry2)
-            if not applied and target_inside:
-                split_regions = _split_region_around_target(region, target, min_gap=min_band_gap)
-                next_regions.extend(split_regions)
-                applied = True
-            else:
-                next_regions.append(region)
-        regions = next_regions
+    intervals: List[tuple[float, float]] = []
+    cursor = 0.0
+    for bar in barriers:
+        top = _y1(bar)
+        bottom = _y2(bar)
+        if top - cursor >= min_band_gap:
+            intervals.append((cursor, top))
+        cursor = max(cursor, bottom)
+    if page_h - cursor >= min_band_gap:
+        intervals.append((cursor, page_h))
 
-    memberships: List[tuple[tuple[float, float, float, float], List["Block"]]] = []
-    assigned_ids: set[int] = set()
-    for region in regions:
-        members: List["Block"] = []
-        for blk in active:
-            if id(blk) in assigned_ids:
-                continue
-            inter = _region_intersection_area(blk, region)
-            if inter <= 0.0:
-                continue
-            best_inter = inter
-            is_best = True
-            for other in regions:
-                if other is region:
-                    continue
-                other_inter = _region_intersection_area(blk, other)
-                if other_inter > best_inter:
-                    is_best = False
-                    break
-            if is_best:
-                members.append(blk)
-                assigned_ids.add(id(blk))
-        if members:
-            memberships.append((region, sorted(members, key=lambda b: (_y1(b), _x1(b)))))
+    groups: List[List["Block"]] = []
+    used: set[int] = set()
+    for y_top, y_bottom in intervals:
+        group = [blk for blk in active if id(blk) not in used and _y1(blk) < y_bottom and _y2(blk) > y_top]
+        if group:
+            groups.append(group)
+            used.update(id(blk) for blk in group)
 
-    leftovers = [blk for blk in active if id(blk) not in assigned_ids]
+    leftovers = [blk for blk in active if id(blk) not in used]
     if leftovers:
-        memberships.append(
-            (
-                (
-                    min(_x1(b) for b in leftovers),
-                    min(_y1(b) for b in leftovers),
-                    max(_x2(b) for b in leftovers),
-                    max(_y2(b) for b in leftovers),
-                ),
-                sorted(leftovers, key=lambda b: (_y1(b), _x1(b))),
-            )
-        )
-
-    return memberships or [((0.0, 0.0, page_w, page_h), list(active))]
+        groups.append(leftovers)
+    return groups or [list(active)]
 
 
-def _region_intersection_area(block: "Block", region: tuple[float, float, float, float]) -> float:
-    rx1, ry1, rx2, ry2 = region
-    return _overlap_1d(_x1(block), _x2(block), rx1, rx2) * _overlap_1d(_y1(block), _y2(block), ry1, ry2)
-
-
-def _intersects_region(block: "Block", region: tuple[float, float, float, float]) -> bool:
-    return _region_intersection_area(block, region) > 0.0
+# ---------------------------------------------------------------------------
+# Phase 3: adaptive recursive segmentation
+# ---------------------------------------------------------------------------
 
 
 def _split_by_cut(blocks: Sequence["Block"], cut: _Cut) -> tuple[List["Block"], List["Block"]] | None:
@@ -751,75 +594,46 @@ def _split_by_cut(blocks: Sequence["Block"], cut: _Cut) -> tuple[List["Block"], 
     return first, second
 
 
-def _best_projection_cut(
-    blocks: Sequence["Block"],
-    axis: str,
-    region: tuple[float, float, float, float],
-) -> _Cut:
+def _best_gap_cut(blocks: Sequence["Block"], axis: str) -> _Cut:
     if len(blocks) <= 1:
         return _Cut(axis=axis, position=0.0, gap=0.0)
 
     if axis == "x":
-        start = int(region[0])
-        end = int(region[2])
-        intervals = [(max(start, int(_x1(b))), min(end, int(_x2(b)))) for b in blocks]
+        intervals = sorted((_x1(b), _x2(b)) for b in blocks)
     else:
-        start = int(region[1])
-        end = int(region[3])
-        intervals = [(max(start, int(_y1(b))), min(end, int(_y2(b)))) for b in blocks]
-    if end - start <= 1:
-        return _Cut(axis=axis, position=float(start), gap=0.0)
-    valid_intervals = [(lo, hi) for lo, hi in intervals if hi > lo]
-    if len(valid_intervals) <= 1:
-        return _Cut(axis=axis, position=0.0, gap=0.0)
+        intervals = sorted((_y1(b), _y2(b)) for b in blocks)
 
-    hist = [0] * (end - start + 1)
-    for lo, hi in valid_intervals:
-        for i in range(lo - start, hi - start):
-            hist[i] += 1
-
-    content_start = min(lo for lo, _ in valid_intervals) - start
-    content_end = max(hi for _, hi in valid_intervals) - start
-    if content_end - content_start <= 1:
-        return _Cut(axis=axis, position=0.0, gap=0.0)
-
-    search = hist[content_start:content_end]
-    min_val = min(search)
-    best_run_start = 0
-    best_run_len = 0
-    run_start = 0
-    run_len = 0
-    for idx, val in enumerate(search):
-        if val == min_val:
-            if run_len == 0:
-                run_start = idx
-            run_len += 1
-            if run_len > best_run_len:
-                best_run_len = run_len
-                best_run_start = run_start
-        else:
-            run_len = 0
-
-    if best_run_len <= 0:
-        return _Cut(axis=axis, position=0.0, gap=0.0)
-    best_run_start += content_start
-    best_pos = float(start + best_run_start + best_run_len * 0.5)
-    return _Cut(axis=axis, position=best_pos, gap=float(best_run_len))
+    running_end = intervals[0][1]
+    best_gap = 0.0
+    best_pos = 0.0
+    for start, end in intervals[1:]:
+        if start > running_end:
+            gap = start - running_end
+            if gap > best_gap:
+                best_gap = gap
+                best_pos = (running_end + start) * 0.5
+        running_end = max(running_end, end)
+    return _Cut(axis=axis, position=best_pos, gap=best_gap)
 
 
-def _density_tau(
-    context_blocks: Sequence["Block"],
-    cross_ids: set[int],
-    region: tuple[float, float, float, float],
-) -> float:
-    cross_area = sum(_region_intersection_area(b, region) for b in context_blocks if id(b) in cross_ids)
-    single_area = sum(_region_intersection_area(b, region) for b in context_blocks if id(b) not in cross_ids)
+def _density_tau(blocks: Sequence["Block"], cross_ids: set[int]) -> float:
+    cross_area = sum(_area(b) for b in blocks if id(b) in cross_ids)
+    single_area = sum(_area(b) for b in blocks if id(b) not in cross_ids)
     if single_area <= 0.0:
         return float("inf") if cross_area > 0.0 else 0.0
     return cross_area / single_area
 
 
-def _fallback_sort_when_unsplittable(blocks: Sequence["Block"], *, image_width: int) -> List["Block"]:
+def _fallback_sort_when_unsplittable(
+    blocks: Sequence["Block"],
+    *,
+    image_width: int,
+    image_height: Optional[int] = None,
+) -> List["Block"]:
+    """Stable fallback for tiny or highly overlapping regions.
+
+    If columns are obvious, sort column-major; otherwise row-major.
+    """
     if len(blocks) <= 2:
         return _sort_yx(blocks)
     columns, _ = detect_columns(
@@ -842,8 +656,7 @@ def _recursive_adaptive_sort(
     blocks: Sequence["Block"],
     *,
     image_width: int,
-    region: tuple[float, float, float, float],
-    context_blocks: Sequence["Block"],
+    image_height: Optional[int],
     cross_ids: set[int],
     density_threshold: float,
     min_gap_px: float,
@@ -854,15 +667,17 @@ def _recursive_adaptive_sort(
     if len(blocks) <= 1:
         return blocks
     if depth >= max_depth:
-        return _fallback_sort_when_unsplittable(blocks, image_width=image_width)
+        return _fallback_sort_when_unsplittable(blocks, image_width=image_width, image_height=image_height)
 
-    tau = _density_tau(context_blocks, cross_ids, region)
+    tau = _density_tau(blocks, cross_ids)
+    # Paper: XY-Cut (horizontal split = Y axis) when cross-layout dominates,
+    # YX-Cut (vertical split = X axis) otherwise.
     primary_axis = "y" if tau > density_threshold else "x"
     secondary_axis = "x" if primary_axis == "y" else "y"
 
     cuts = {
-        "x": _best_projection_cut(blocks, "x", region),
-        "y": _best_projection_cut(blocks, "y", region),
+        "x": _best_gap_cut(blocks, "x"),
+        "y": _best_gap_cut(blocks, "y"),
     }
     chosen: Optional[_Cut] = None
     for axis in (primary_axis, secondary_axis):
@@ -875,21 +690,13 @@ def _recursive_adaptive_sort(
         if len(blocks) >= 5 and best.gap >= max(3.0, min_gap_px * 0.45):
             chosen = best
         else:
-            return _fallback_sort_when_unsplittable(blocks, image_width=image_width)
+            return _fallback_sort_when_unsplittable(blocks, image_width=image_width, image_height=image_height)
 
     split = _split_by_cut(blocks, chosen)
     if split is None:
-        return _fallback_sort_when_unsplittable(blocks, image_width=image_width)
+        return _fallback_sort_when_unsplittable(blocks, image_width=image_width, image_height=image_height)
 
     first, second = split
-    if chosen.axis == "y":
-        first_region = (region[0], region[1], region[2], chosen.position)
-        second_region = (region[0], chosen.position, region[2], region[3])
-    else:
-        first_region = (region[0], region[1], chosen.position, region[3])
-        second_region = (chosen.position, region[1], region[2], region[3])
-    first_context = [blk for blk in context_blocks if _intersects_region(blk, first_region)]
-    second_context = [blk for blk in context_blocks if _intersects_region(blk, second_region)]
     for blk in blocks:
         _mark(
             blk,
@@ -902,8 +709,7 @@ def _recursive_adaptive_sort(
         _recursive_adaptive_sort(
             first,
             image_width=image_width,
-            region=first_region,
-            context_blocks=first_context,
+            image_height=image_height,
             cross_ids=cross_ids,
             density_threshold=density_threshold,
             min_gap_px=min_gap_px,
@@ -913,8 +719,7 @@ def _recursive_adaptive_sort(
         + _recursive_adaptive_sort(
             second,
             image_width=image_width,
-            region=second_region,
-            context_blocks=second_context,
+            image_height=image_height,
             cross_ids=cross_ids,
             density_threshold=density_threshold,
             min_gap_px=min_gap_px,
@@ -927,32 +732,31 @@ def _recursive_adaptive_sort(
 def _sort_active_anchors(
     active: Sequence["Block"],
     masked: Sequence["Block"],
-    precut_targets: Sequence["Block"],
     *,
     image_width: int,
     image_height: Optional[int],
     cross_ids: set[int],
     density_threshold: float,
     min_gap_px: float,
+    barrier_width_ratio: float,
 ) -> List["Block"]:
-    bands = _coarse_precut_regions(
+    bands = _coarse_y_bands(
         active,
-        precut_targets,
+        masked,
         image_width=image_width,
         image_height=image_height,
+        barrier_width_ratio=barrier_width_ratio,
         min_band_gap=max(4.0, min_gap_px),
     )
     ordered: List["Block"] = []
-    for band_idx, (region, band) in enumerate(bands):
-        band_context = [blk for blk in list(band) + list(masked) if _intersects_region(blk, region)]
+    for band_idx, band in enumerate(bands):
         for blk in band:
             _mark(blk, coarse_band=band_idx)
         ordered.extend(
             _recursive_adaptive_sort(
                 band,
                 image_width=image_width,
-                region=region,
-                context_blocks=band_context,
+                image_height=image_height,
                 cross_ids=cross_ids,
                 density_threshold=density_threshold,
                 min_gap_px=min_gap_px,
@@ -961,14 +765,25 @@ def _sort_active_anchors(
     return ordered
 
 
+# ---------------------------------------------------------------------------
+# Phase 4: semantic + geometry restoration
+# ---------------------------------------------------------------------------
+
+
 def _priority(block: "Block", cross_ids: set[int]) -> int:
     if id(block) in cross_ids:
-        return 3
+        return 0
+    if block.block_type == BlockType.HEADER:
+        return 0
     if block.block_type == BlockType.TITLE:
-        return 2
-    if block.block_type in _VISUAL_TYPES:
         return 1
-    return 0
+    if block.block_type in _VISUAL_TYPES:
+        return 2
+    if block.block_type in _CAPTION_TYPES:
+        return 3
+    if block.block_type in {BlockType.PAGE_NUMBER, BlockType.FOOTER}:
+        return 5
+    return 4
 
 
 def _direction(block: "Block") -> str:
@@ -976,13 +791,7 @@ def _direction(block: "Block") -> str:
 
 
 def _projection_score(a: "Block", b: "Block") -> float:
-    if _direction(a) == "horizontal":
-        overlap = _overlap_1d(_x1(a), _x2(a), _x1(b), _x2(b))
-        union = max(_x2(a), _x2(b)) - min(_x1(a), _x1(b))
-    else:
-        overlap = _overlap_1d(_y1(a), _y2(a), _y1(b), _y2(b))
-        union = max(_y2(a), _y2(b)) - min(_y1(a), _y1(b))
-    return overlap / max(1.0, union)
+    return max(_projection_overlap_ratio_x(a, b), _projection_overlap_ratio_y(a, b))
 
 
 def _geometry_distance(
@@ -991,326 +800,38 @@ def _geometry_distance(
     *,
     image_width: int,
     image_height: Optional[int],
-    cross_ids: set[int],
 ) -> float:
     page_w = max(float(image_width), 1.0)
     page_h = max(float(image_height or 0), max(_y2(pending), _y2(anchor), 1.0))
     scale = max(page_w, page_h, 1.0)
 
     direction_conflict = _direction(pending) != _direction(anchor)
-    low_projection = _projection_score(pending, anchor) < 0.30
+    low_projection = _projection_score(pending, anchor) < 0.20
     phi1 = 1.0 if direction_conflict and low_projection else 0.0
 
-    dx = abs(_cx(pending) - _cx(anchor))
-    dy = abs(_cy(pending) - _cy(anchor))
-    axis_aligned = _overlap_1d(_x1(pending), _x2(pending), _x1(anchor), _x2(anchor)) > 0 or _overlap_1d(_y1(pending), _y2(pending), _y1(anchor), _y2(anchor)) > 0
-    phi2 = min(dx, dy) if axis_aligned else dx + dy
+    phi2 = _edge_gap(pending, anchor) / scale
 
-    if id(pending) in cross_ids and _y1(pending) > _y2(anchor):
-        phi3 = -_y2(anchor)
+    if _y1(pending) >= _y2(anchor):
+        vertical_gap = _y1(pending) - _y2(anchor)
+    elif _y1(anchor) >= _y2(pending):
+        vertical_gap = _y1(anchor) - _y2(pending)
     else:
-        phi3 = _y1(anchor)
+        vertical_gap = abs(_cy(pending) - _cy(anchor)) * 0.20
+    phi3 = vertical_gap / scale
 
-    phi4 = _x1(anchor)
+    phi4 = abs(_cx(pending) - _cx(anchor)) / scale
 
-    base = [scale * scale, scale, 1.0, 1.0 / scale]
     if pending.block_type == BlockType.TITLE:
-        semantic = [1.0, 0.1, 0.1, 1.0] if _direction(pending) == "horizontal" else [0.2, 0.1, 1.0, 1.0]
-    elif id(pending) in cross_ids:
-        semantic = [1.0, 1.0, 0.1, 1.0]
+        weights = (90.0, 8.0, 4.0, 0.8)
+    elif pending.block_type in _VISUAL_TYPES:
+        weights = (80.0, 10.0, 1.2, 0.8)
+    elif pending.block_type in _CAPTION_TYPES:
+        weights = (80.0, 12.0, 2.5, 0.6)
     else:
-        semantic = [1.0, 1.0, 1.0, 0.1]
+        weights = (90.0, 9.0, 2.0, 1.0)
 
-    w1, w2, w3, w4 = [a * b for a, b in zip(base, semantic)]
+    w1, w2, w3, w4 = weights
     return w1 * phi1 + w2 * phi2 + w3 * phi3 + w4 * phi4
-
-
-def _semantic_candidate_entries(
-    pending: "Block",
-    ordered_entries: Sequence[tuple[float, int, "Block"]],
-    *,
-    image_width: int,
-    image_height: Optional[int],
-    cross_ids: set[int],
-    barrier_width_ratio: float,
-) -> List[tuple[float, int, "Block"]]:
-    page_w = max(float(image_width), 1.0)
-    page_h = max(float(image_height or 0), max(_y2(pending), 1.0))
-    page_scale = max(page_w, page_h, 1.0)
-    candidates: List[tuple[tuple[float, float, float, float, float, float], tuple[float, int, "Block"]]] = []
-    for anchor_pos, anchor_priority, anchor in ordered_entries:
-        if pending.block_type == BlockType.TITLE:
-            if anchor.block_type not in {
-                BlockType.TITLE,
-                BlockType.TEXT,
-                BlockType.REFERENCE,
-                BlockType.ABSTRACT,
-                BlockType.CODE,
-                BlockType.LIST,
-            }:
-                continue
-        elif pending.block_type in _VISUAL_TYPES:
-            if anchor.block_type in _CAPTION_TYPES or anchor.block_type in _STRIP_TYPES:
-                continue
-        elif pending.block_type in _CAPTION_TYPES:
-            if anchor.block_type not in _VISUAL_TYPES:
-                continue
-        x_overlap = _projection_overlap_ratio_x(pending, anchor)
-        y_overlap = _projection_overlap_ratio_y(pending, anchor)
-        below_gap = max(0.0, _y1(anchor) - _y2(pending))
-        above_gap = max(0.0, _y1(pending) - _y2(anchor))
-        nearest_gap = max(below_gap, above_gap)
-        center_dx = abs(_cx(pending) - _cx(anchor))
-
-        if pending.block_type == BlockType.TITLE:
-            is_spanning_title = id(pending) in cross_ids or _w(pending) >= page_w * 0.38
-            if x_overlap < 0.12:
-                if not is_spanning_title:
-                    continue
-                if nearest_gap > page_scale * 0.06:
-                    continue
-            overlap_tolerance = max(24.0, page_h * 0.018)
-            future_bias = 0.0 if _y1(anchor) >= _y2(pending) - overlap_tolerance else 1.0
-            pref = (future_bias, nearest_gap, -x_overlap, center_dx, _y1(anchor), _x1(anchor))
-        elif pending.block_type in _VISUAL_TYPES:
-            if x_overlap < 0.10 and nearest_gap > page_scale * 0.10:
-                continue
-            if _w(pending) >= page_w * barrier_width_ratio:
-                direction_bias = 0.0 if _y2(anchor) <= _y1(pending) + 4.0 else 1.0
-            else:
-                direction_bias = 0.0 if _y1(anchor) >= _y2(pending) - 4.0 else 1.0
-            pref = (direction_bias, -max(x_overlap, y_overlap), nearest_gap, center_dx, _y1(anchor), _x1(anchor))
-        elif pending.block_type in _CAPTION_TYPES:
-            edge_gap = _edge_gap(pending, anchor)
-            if x_overlap < 0.12 and y_overlap < 0.40 and edge_gap > max(18.0, page_scale * 0.04):
-                continue
-            vertical_gap = min(abs(_y1(pending) - _y2(anchor)), abs(_y2(pending) - _y1(anchor)))
-            pref = (0.0, vertical_gap, center_dx, -max(x_overlap, y_overlap), _y1(anchor), _x1(anchor))
-        elif id(pending) in cross_ids:
-            pref = (0.0, nearest_gap, center_dx, -x_overlap, _y1(anchor), _x1(anchor))
-        else:
-            continue
-        candidates.append((pref, (anchor_pos, anchor_priority, anchor)))
-
-    candidates.sort(key=lambda item: item[0])
-    return [entry for _, entry in candidates]
-
-
-def _choose_best_anchor(
-    pending: "Block",
-    search_entries: Sequence[tuple[float, int, "Block"]],
-    *,
-    image_width: int,
-    image_height: Optional[int],
-    cross_ids: set[int],
-) -> tuple[float, "Block", float] | None:
-    best_anchor_idx = 0.0
-    best_anchor: Optional["Block"] = None
-    best_dist = float("inf")
-    for anchor_pos, _anchor_priority, anchor in search_entries:
-        dcurr = 0.0
-        # Paper-style early termination over accumulated phi terms.
-        full_dist = _geometry_distance(
-            pending,
-            anchor,
-            image_width=image_width,
-            image_height=image_height,
-            cross_ids=cross_ids,
-        )
-        dcurr = full_dist
-        if dcurr < best_dist:
-            best_dist = dcurr
-            best_anchor_idx = anchor_pos
-            best_anchor = anchor
-    if best_anchor is None:
-        return None
-    return (best_anchor_idx, best_anchor, best_dist)
-
-
-def _preferred_below_anchor(
-    pending: "Block",
-    ordered_entries: Sequence[tuple[float, int, "Block"]],
-    *,
-    allowed_types: Sequence[BlockType] | set[BlockType] | frozenset[BlockType],
-    min_x_overlap: float,
-) -> tuple[float, int, "Block"] | None:
-    candidates: List[tuple[float, float, float, int, "Block"]] = []
-    for anchor_pos, anchor_priority, anchor in ordered_entries:
-        if anchor.block_type not in allowed_types:
-            continue
-        if _y1(anchor) < _y2(pending) - 4.0:
-            continue
-        if _projection_overlap_ratio_x(pending, anchor) < min_x_overlap:
-            continue
-        vertical_gap = max(0.0, _y1(anchor) - _y2(pending))
-        center_dx = abs(_cx(pending) - _cx(anchor))
-        candidates.append((vertical_gap, center_dx, anchor_pos, anchor_priority, anchor))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: (item[0], item[1], item[2], _y1(item[4]), _x1(item[4])))
-    _, _, anchor_pos, anchor_priority, anchor = candidates[0]
-    return (anchor_pos, anchor_priority, anchor)
-
-
-def _preferred_above_anchor(
-    pending: "Block",
-    ordered_entries: Sequence[tuple[float, int, "Block"]],
-    *,
-    allowed_types: Sequence[BlockType] | set[BlockType] | frozenset[BlockType],
-    min_x_overlap: float,
-) -> tuple[float, int, "Block"] | None:
-    candidates: List[tuple[float, float, float, int, "Block"]] = []
-    for anchor_pos, anchor_priority, anchor in ordered_entries:
-        if anchor.block_type not in allowed_types:
-            continue
-        if _y2(anchor) > _y1(pending) + 4.0:
-            continue
-        if _projection_overlap_ratio_x(pending, anchor) < min_x_overlap:
-            continue
-        vertical_gap = max(0.0, _y1(pending) - _y2(anchor))
-        center_dx = abs(_cx(pending) - _cx(anchor))
-        candidates.append((vertical_gap, center_dx, -anchor_pos, anchor_priority, anchor))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: (item[0], item[1], item[2], -_y2(item[4]), _x1(item[4])))
-    _, _, neg_anchor_pos, anchor_priority, anchor = candidates[0]
-    return (-neg_anchor_pos, anchor_priority, anchor)
-
-
-def _preferred_spanning_parent_above(
-    pending: "Block",
-    ordered_entries: Sequence[tuple[float, int, "Block"]],
-    *,
-    image_width: int,
-    image_height: Optional[int],
-    cross_ids: set[int],
-) -> tuple[float, int, "Block"] | None:
-    page_w = max(float(image_width), 1.0)
-    page_h = max(float(image_height or 0), max(_y2(pending), 1.0))
-    if not _is_top_centered_attachment(
-        pending,
-        [entry[2] for entry in ordered_entries] + [pending],
-        cross_ids=cross_ids,
-        image_width=image_width,
-        image_height=image_height,
-    ):
-        return None
-    candidates: List[tuple[float, float, float, int, "Block"]] = []
-    for anchor_pos, anchor_priority, anchor in ordered_entries:
-        if anchor.block_type != BlockType.TITLE or id(anchor) not in cross_ids:
-            continue
-        if _w(anchor) < page_w * 0.45 or _y1(anchor) > page_h * 0.16:
-            continue
-        if _y2(anchor) > _y1(pending) + max(24.0, page_h * 0.025):
-            continue
-        vertical_gap = max(0.0, _y1(pending) - _y2(anchor))
-        center_dx = abs(_cx(pending) - _cx(anchor))
-        candidates.append((vertical_gap, center_dx, -_w(anchor), anchor_priority, anchor))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: item[:3])
-    _, _, _, anchor_priority, anchor = candidates[0]
-    anchor_pos = next(pos for pos, _, blk in ordered_entries if blk is anchor)
-    return (anchor_pos, anchor_priority, anchor)
-
-
-def _latest_above_anchor(
-    pending: "Block",
-    ordered_entries: Sequence[tuple[float, int, "Block"]],
-    *,
-    allowed_types: Sequence[BlockType] | set[BlockType] | frozenset[BlockType],
-) -> tuple[float, int, "Block"] | None:
-    candidates: List[tuple[float, float, float, int, "Block"]] = []
-    for anchor_pos, anchor_priority, anchor in ordered_entries:
-        if anchor.block_type not in allowed_types:
-            continue
-        if _y2(anchor) > _y1(pending) + 4.0:
-            continue
-        vertical_gap = max(0.0, _y1(pending) - _y2(anchor))
-        candidates.append((vertical_gap, -anchor_pos, -_y2(anchor), anchor_priority, anchor))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: (item[0], item[1], item[2], _x1(item[4])))
-    _, neg_anchor_pos, _, anchor_priority, anchor = candidates[0]
-    return (-neg_anchor_pos, anchor_priority, anchor)
-
-
-def _preferred_visual_anchor_for_caption(
-    pending: "Block",
-    ordered_entries: Sequence[tuple[float, int, "Block"]],
-    *,
-    image_width: int,
-    image_height: Optional[int],
-) -> tuple[float, int, "Block"] | None:
-    page_scale = max(float(image_width), float(image_height or 0), 1.0)
-    max_gap = max(18.0, page_scale * 0.04)
-    candidates: List[tuple[float, float, float, int, "Block"]] = []
-    for anchor_pos, anchor_priority, anchor in ordered_entries:
-        if anchor.block_type not in _VISUAL_TYPES:
-            continue
-        x_overlap = _projection_overlap_ratio_x(pending, anchor)
-        y_overlap = _projection_overlap_ratio_y(pending, anchor)
-        edge_gap = _edge_gap(pending, anchor)
-        if x_overlap < 0.12 and y_overlap < 0.40 and edge_gap > max_gap:
-            continue
-        vertical_gap = min(abs(_y1(pending) - _y2(anchor)), abs(_y2(pending) - _y1(anchor)))
-        center_dx = abs(_cx(pending) - _cx(anchor))
-        candidates.append((vertical_gap, center_dx, anchor_pos, anchor_priority, anchor))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: (item[0], item[1], item[2], _y1(item[4]), _x1(item[4])))
-    _, _, anchor_pos, anchor_priority, anchor = candidates[0]
-    return (anchor_pos, anchor_priority, anchor)
-
-
-def _spanning_visual_floor_anchor(
-    pending: "Block",
-    ordered_entries: Sequence[tuple[float, int, "Block"]],
-    *,
-    image_width: int,
-    image_height: Optional[int],
-    barrier_width_ratio: float,
-) -> tuple[float, int, "Block"] | None:
-    if pending.block_type not in _VISUAL_TYPES:
-        return None
-    page_w = max(float(image_width), 1.0)
-    page_h = max(float(image_height or 0), max(_y2(pending), 1.0))
-    if _y1(pending) > page_h * 0.40:
-        return None
-
-    below = [
-        (pos, pri, blk)
-        for pos, pri, blk in ordered_entries
-        if blk.block_type in _COLUMN_ANCHOR_TYPES
-        and _y1(blk) >= _y2(pending) - 8.0
-        and _projection_overlap_ratio_x(pending, blk) >= 0.18
-    ]
-    if not below:
-        return None
-    centers = sorted(_cx(blk) for _, _, blk in below)
-    min_center_gap = max(40.0, page_w * 0.08)
-    covered_column_groups = 1
-    last_center = centers[0]
-    for center in centers[1:]:
-        if center - last_center >= min_center_gap:
-            covered_column_groups += 1
-            last_center = center
-    if _w(pending) < page_w * barrier_width_ratio and covered_column_groups < 2:
-        return None
-
-    candidates: List[tuple[float, float, float, float, int, "Block"]] = []
-    for pos, pri, blk in below:
-        candidates.append((
-            pos,
-            max(0.0, _y1(blk) - _y2(pending)),
-            -_projection_overlap_ratio_x(pending, blk),
-            _x1(blk),
-            pri,
-            blk,
-        ))
-    candidates.sort(key=lambda item: item[:4])
-    pos, _, _, _, pri, blk = candidates[0]
-    return (pos, pri, blk)
 
 
 def _nearest_anchor(
@@ -1329,11 +850,131 @@ def _nearest_anchor(
             anchor,
             image_width=image_width,
             image_height=image_height,
-            cross_ids=set(),
         )
         if best is None or dist < best[2]:
             best = (rank, anchor, dist)
     return best
+
+
+def _rank_by_vertical_band(
+    pending: "Block",
+    ranked: Sequence[tuple[float, "Block"]],
+    *,
+    prefer_before: bool,
+) -> Optional[float]:
+    # Restrict to same-column anchors so masked elements anchor within their
+    # own column instead of leaking into adjacent columns.
+    same_col = [(rank, blk) for rank, blk in ranked
+                if _projection_overlap_ratio_x(pending, blk) >= 0.15]
+    target = same_col if same_col else list(ranked)
+
+    above = [(rank, blk) for rank, blk in target if _y2(blk) <= _y1(pending)]
+    below = [(rank, blk) for rank, blk in target if _y1(blk) >= _y2(pending)]
+    if prefer_before:
+        if below:
+            _, anchor = below[0]
+            _mark(pending, restore_anchor_id=_block_id(anchor))
+            return min(rank for rank, _ in below) - 0.45
+        if target:
+            return min(rank for rank, _ in target) - 0.45
+    else:
+        if above and below:
+            above_max = max(rank for rank, _ in above)
+            below_min = min(rank for rank, _ in below)
+            return (above_max + below_min) * 0.5
+        if above:
+            return max(rank for rank, _ in above) + 0.45
+        if below:
+            return min(rank for rank, _ in below) - 0.20
+    return None
+
+
+def _choose_restore_rank(
+    pending: "Block",
+    ranked: Sequence[tuple[float, "Block"]],
+    *,
+    cross_ids: set[int],
+    image_width: int,
+    image_height: Optional[int],
+    barrier_width_ratio: float,
+) -> float:
+    if not ranked:
+        return float(_y1(pending) * 10000.0 + _x1(pending))
+
+    page_w = max(float(image_width), 1.0)
+    page_h = max(float(image_height or 0), max((_y2(b) for _, b in ranked), default=1.0))
+    wide = _w(pending) >= page_w * barrier_width_ratio or id(pending) in cross_ids
+
+    if pending.block_type in {BlockType.HEADER, BlockType.TITLE}:
+        # A section title within a column (has text above it) should sit
+        # between the above and below content.  A page-top / spanning title
+        # should sit before everything that follows.
+        has_text_above = not wide and any(
+            _projection_overlap_ratio_x(pending, blk) >= 0.15 and _y2(blk) <= _y1(pending)
+            for _, blk in ranked
+        )
+        prefer_before = not has_text_above
+        rank = _rank_by_vertical_band(pending, ranked, prefer_before=prefer_before)
+        if rank is not None:
+            return rank
+
+    # Wide text-like blocks: place before content if in upper half (header-like),
+    # after content if in lower half (footer-like).
+    if wide and pending.block_type in _TEXTLIKE_TYPES:
+        if _cy(pending) <= page_h * 0.45:
+            rank = _rank_by_vertical_band(pending, ranked, prefer_before=True)
+        else:
+            rank = _rank_by_vertical_band(pending, ranked, prefer_before=False)
+        if rank is not None:
+            return rank
+
+    if pending.block_type in {BlockType.FOOTER, BlockType.PAGE_NUMBER}:
+        rank = _rank_by_vertical_band(pending, ranked, prefer_before=False)
+        if rank is not None:
+            return rank
+
+    if pending.block_type in _VISUAL_TYPES or (wide and pending.block_type not in {BlockType.TITLE, BlockType.HEADER}):
+        rank = _rank_by_vertical_band(pending, ranked, prefer_before=False)
+        if rank is not None:
+            return rank
+
+    if pending.block_type in _CAPTION_TYPES:
+        # Caption above a visual (e.g. table caption): place just before the visual.
+        visual_below = [
+            (rank, blk) for rank, blk in ranked
+            if blk.block_type in _VISUAL_TYPES
+            and _y1(blk) >= _y2(pending) - max(_h(pending), 20.0) * 0.8
+            and _projection_overlap_ratio_x(pending, blk) >= 0.12
+        ]
+        if visual_below:
+            return min(rank for rank, _ in visual_below) - 0.10
+        # Caption below a visual (e.g. figure caption): place just after the visual.
+        visual_above = [
+            (rank, blk) for rank, blk in ranked
+            if blk.block_type in _VISUAL_TYPES
+            and _y2(blk) <= _y1(pending) + max(_h(pending), 20.0) * 0.5
+            and _projection_overlap_ratio_x(pending, blk) >= 0.12
+        ]
+        if visual_above:
+            return max(rank for rank, _ in visual_above) + 0.10
+
+    nearest = _nearest_anchor(
+        pending,
+        ranked,
+        image_width=image_width,
+        image_height=image_height,
+    )
+    if nearest is None:
+        return 0.0
+    anchor_rank, anchor, dist = nearest
+    _mark(pending, restore_anchor_id=_block_id(anchor), restore_distance=round(dist, 5))
+    if _y2(pending) <= _y1(anchor):
+        return anchor_rank - 0.20
+    if _y1(pending) >= _y2(anchor):
+        return anchor_rank + 0.20
+    if _x1(pending) < _x1(anchor):
+        return anchor_rank - 0.05
+    return anchor_rank + 0.05
 
 
 def _restore_masked_elements(
@@ -1345,176 +986,35 @@ def _restore_masked_elements(
     image_height: Optional[int],
     barrier_width_ratio: float,
 ) -> List["Block"]:
-    ordered_entries: List[tuple[float, int, "Block"]] = [
-        (float(i), _priority(blk, cross_ids), blk) for i, blk in enumerate(anchors)
-    ]
-    if not ordered_entries:
+    ranked: List[tuple[float, "Block"]] = [(float(i), blk) for i, blk in enumerate(anchors, start=1)]
+
+    if not ranked:
         ordered = _sort_yx(masked)
         for i, blk in enumerate(ordered):
             _mark(blk, final_order=i, phase="fallback_all_masked")
         return ordered
 
-    stage_order = [
-        lambda b: b.block_type == BlockType.TITLE and id(b) in cross_ids,
-        lambda b: b.block_type == BlockType.TITLE,
-        lambda b: id(b) in cross_ids,
-        lambda b: b.block_type in _VISUAL_TYPES,
-        lambda b: True,
-    ]
+    for seq, blk in enumerate(sorted(masked, key=lambda b: (_priority(b, cross_ids), _y1(b), _x1(b)))):
+        rank = _choose_restore_rank(
+            blk,
+            ranked,
+            cross_ids=cross_ids,
+            image_width=image_width,
+            image_height=image_height,
+            barrier_width_ratio=barrier_width_ratio,
+        )
+        rank += 0.001 * (_priority(blk, cross_ids) + seq / 1000.0)
+        _mark(blk, restore_rank=round(rank, 6), restore_priority=_priority(blk, cross_ids))
+        ranked.append((rank, blk))
+        ranked.sort(key=lambda item: (item[0], _y1(item[1]), _x1(item[1])))
 
-    for stage_idx, predicate in enumerate(stage_order):
-        pending_blocks = [b for b in masked if predicate(b)]
-        masked = [b for b in masked if b not in pending_blocks]
-        stage_entries: List[tuple[float, int, "Block"]] = []
-        for pending in pending_blocks:
-            top_anchor_pos = min((anchor_pos for anchor_pos, _, _ in ordered_entries), default=0.0)
-            top_anchor_y1 = min((_y1(anchor) for _, _, anchor in ordered_entries), default=float("inf"))
-            is_top_spanning_text = (
-                (_w(pending) >= max(float(image_width), 1.0) * barrier_width_ratio)
-                and (_y2(pending) <= top_anchor_y1 + 12.0)
-                and (
-                    pending.block_type == BlockType.TITLE
-                    or (
-                        id(pending) in cross_ids
-                        and pending.block_type not in _VISUAL_TYPES
-                    )
-                )
-            )
-            if is_top_spanning_text:
-                _mark(
-                    pending,
-                    restore_anchor_id="__page_top__",
-                    restore_distance=0.0,
-                    restore_priority=_priority(pending, cross_ids),
-                )
-                stage_entries.append((top_anchor_pos - 1.0, _priority(pending, cross_ids), pending))
-                continue
-            if pending.block_type == BlockType.TITLE or (
-                id(pending) in cross_ids and pending.block_type not in _VISUAL_TYPES
-            ):
-                search_entries = _semantic_candidate_entries(
-                    pending,
-                    ordered_entries,
-                    image_width=image_width,
-                    image_height=image_height,
-                    cross_ids=cross_ids,
-                    barrier_width_ratio=barrier_width_ratio,
-                ) or list(ordered_entries)
-            elif pending.block_type in _VISUAL_TYPES:
-                preferred = _spanning_visual_floor_anchor(
-                    pending,
-                    ordered_entries,
-                    image_width=image_width,
-                    image_height=image_height,
-                    barrier_width_ratio=barrier_width_ratio,
-                )
-                if preferred is None:
-                    preferred = _preferred_below_anchor(
-                        pending,
-                        ordered_entries,
-                        allowed_types=_TEXTLIKE_TYPES | _VISUAL_TYPES,
-                        min_x_overlap=0.18,
-                    )
-                if preferred is None and _w(pending) >= max(float(image_width), 1.0) * barrier_width_ratio:
-                    preferred = _latest_above_anchor(
-                        pending,
-                        ordered_entries,
-                        allowed_types=_TEXTLIKE_TYPES | _VISUAL_TYPES,
-                    )
-                if preferred is None:
-                    preferred = _preferred_above_anchor(
-                        pending,
-                        ordered_entries,
-                        allowed_types=_TEXTLIKE_TYPES | _VISUAL_TYPES,
-                        min_x_overlap=0.18,
-                    )
-                search_entries = [preferred] if preferred is not None else list(ordered_entries)
-            elif pending.block_type in _CAPTION_TYPES:
-                preferred = _preferred_visual_anchor_for_caption(
-                    pending,
-                    ordered_entries,
-                    image_width=image_width,
-                    image_height=image_height,
-                )
-                search_entries = [preferred] if preferred is not None else list(ordered_entries)
-            else:
-                preferred = _preferred_spanning_parent_above(
-                    pending,
-                    ordered_entries,
-                    image_width=image_width,
-                    image_height=image_height,
-                    cross_ids=cross_ids,
-                )
-                search_entries = [preferred] if preferred is not None else list(ordered_entries)
-            semantic_locked = (
-                pending.block_type == BlockType.TITLE
-                or _is_top_centered_attachment(
-                    pending,
-                    [entry[2] for entry in ordered_entries] + [pending],
-                    cross_ids=cross_ids,
-                    image_width=image_width,
-                    image_height=image_height,
-                )
-            )
-            if semantic_locked and search_entries:
-                best_anchor_idx, _best_anchor_priority, best_anchor = search_entries[0]
-                best_dist = _geometry_distance(
-                    pending,
-                    best_anchor,
-                    image_width=image_width,
-                    image_height=image_height,
-                    cross_ids=cross_ids,
-                )
-                best_match = (best_anchor_idx, best_anchor, best_dist)
-            else:
-                best_match = _choose_best_anchor(
-                    pending,
-                    search_entries,
-                    image_width=image_width,
-                    image_height=image_height,
-                    cross_ids=cross_ids,
-                )
-            if best_match is not None:
-                best_anchor_idx, best_anchor, best_dist = best_match
-            else:
-                best_anchor_idx, best_anchor, best_dist = 0.0, None, float("inf")
-            if best_anchor is not None:
-                _mark(
-                    pending,
-                    restore_anchor_id=_block_id(best_anchor),
-                    restore_distance=round(best_dist, 5),
-                    restore_priority=_priority(pending, cross_ids),
-                )
-                if pending.block_type in _CAPTION_TYPES and best_anchor.block_type in _VISUAL_TYPES and _y1(pending) >= _y2(best_anchor):
-                    position = best_anchor_idx + 0.05
-                elif _is_top_centered_attachment(
-                    pending,
-                    [entry[2] for entry in ordered_entries] + [pending],
-                    cross_ids=cross_ids,
-                    image_width=image_width,
-                    image_height=image_height,
-                ):
-                    position = best_anchor_idx + 0.05
-                elif id(pending) in cross_ids and best_anchor.block_type == BlockType.TITLE:
-                    position = best_anchor_idx + 0.05
-                elif pending.block_type == BlockType.TITLE and _cy(pending) <= _cy(best_anchor):
-                    position = best_anchor_idx - 0.05
-                elif _y2(pending) <= _y1(best_anchor):
-                    position = best_anchor_idx - 0.25
-                elif _y1(pending) >= _y2(best_anchor):
-                    position = best_anchor_idx + 0.25
-                elif _x1(pending) < _x1(best_anchor):
-                    position = best_anchor_idx - 0.05
-                else:
-                    position = best_anchor_idx + 0.05
-            else:
-                position = float(len(ordered_entries))
-            stage_entries.append((position, _priority(pending, cross_ids), pending))
+    ordered = [blk for _, blk in ranked]
+    return ordered
 
-        ordered_entries.extend(stage_entries)
-        ordered_entries.sort(key=lambda item: (item[0], -item[1], _y1(item[2]), _x1(item[2])))
 
-    return [blk for _, _, blk in ordered_entries]
+# ---------------------------------------------------------------------------
+# Column metadata assignment
+# ---------------------------------------------------------------------------
 
 
 def _assign_single_column(blocks: Sequence["Block"]) -> None:
@@ -1524,6 +1024,70 @@ def _assign_single_column(blocks: Sequence["Block"]) -> None:
         blk.spanned_cols = [0]
 
 
+def _assign_column_metadata(
+    ordered: Sequence["Block"],
+    *,
+    image_width: int,
+    image_height: Optional[int],
+    max_cols: int,
+    cluster_thresh: float,
+) -> None:
+    ordered = list(ordered)
+    if not ordered:
+        return
+
+    page_w = max(float(image_width), 1.0)
+    # Exclude titles, visuals, captions, strips, and top-attachments from column
+    # detection — they are structural elements, not column body text.
+    candidates = [
+        blk for blk in ordered
+        if blk.block_type not in _COLUMN_EXCLUDED_TYPES
+        and blk.block_type != BlockType.TITLE
+        and _marked(blk, "mask_reason") != "top_attachment"
+        and _w(blk) <= page_w * 0.60
+    ]
+    if len(candidates) < 2:
+        candidates = [
+            blk for blk in ordered
+            if blk.block_type not in _COLUMN_EXCLUDED_TYPES
+            and blk.block_type != BlockType.TITLE
+            and _marked(blk, "mask_reason") != "top_attachment"
+        ]
+    if len(candidates) < 2:
+        candidates = [blk for blk in ordered if blk.block_type not in _VISUAL_TYPES]
+    if len(candidates) < 2:
+        _assign_single_column(ordered)
+        return
+
+    columns, col_bounds = detect_columns(
+        candidates,
+        image_width,
+        max_cols=max_cols,
+        cluster_thresh=cluster_thresh,
+    )
+    if len(columns) <= 1:
+        _assign_single_column(ordered)
+        return
+
+    for col_idx, members in enumerate(columns):
+        for blk in members:
+            blk.col_count = len(columns)
+            blk.col_index = col_idx
+            blk.spanned_cols = [col_idx]
+
+    unassigned = [blk for blk in ordered if int(getattr(blk, "col_count", 0) or 0) != len(columns)]
+    if unassigned:
+        detect_spanned_blocks(unassigned, col_bounds)
+        for blk in unassigned:
+            blk.col_count = len(columns)
+            if _marked(blk, "mask_reason") == "top_attachment":
+                blk.col_count = 1
+                blk.col_index = 0
+                blk.spanned_cols = [0]
+
+    for blk in ordered:
+        if _marked(blk, "mask_reason") != "top_attachment":
+            blk.col_count = len(columns)
 _INLINE_EQUATION_LABEL_RE = re.compile(r"^\(\s*\d+[a-zA-Z]?\s*\)$")
 _NUMBERED_SECTION_RE = re.compile(r"^\s*\d+(?:\.\d+)*\b")
 
@@ -1937,6 +1501,8 @@ def _is_section_band_leader(
     text = _block_text(block).strip()
     if not text or _line_count(block) > 2:
         return False
+    if _y1(block) <= page_h * 0.12:
+        return False
     if _w(block) < page_w * 0.28:
         return False
     if _h(block) > page_h * 0.08:
@@ -2199,8 +1765,9 @@ def _sort_same_column_text_runs_by_geometry(
     while idx < len(seq):
         block = seq[idx]
         cols = getattr(block, "spanned_cols", []) or [getattr(block, "col_index", 0)]
+        col_count = int(getattr(block, "col_count", 1) or 1)
         block_proto = (getattr(block, "attributes", None) or {}).get("xycutpp_proto", {})
-        if block.block_type not in _TEXTLIKE_TYPES or len(cols) != 1:
+        if block.block_type not in _TEXTLIKE_TYPES or len(cols) != 1 or col_count <= 1:
             out.append(block)
             idx += 1
             continue
@@ -2232,6 +1799,67 @@ def _sort_same_column_text_runs_by_geometry(
                 continue
         out.extend(run)
     return out
+
+
+def _promote_upper_visual_family_before_lower_band(
+    ordered: Sequence["Block"],
+    *,
+    image_width: int,
+    image_height: Optional[int],
+) -> List["Block"]:
+    seq = list(ordered)
+    if len(seq) < 5:
+        return seq
+
+    page_w = max(float(image_width), 1.0)
+    page_h = max(float(image_height or 0), max((_y2(b) for b in seq), default=1.0))
+    for figure in list(seq):
+        if figure.block_type not in _VISUAL_TYPES or _w(figure) < page_w * 0.42:
+            continue
+        if _y1(figure) > page_h * 0.32:
+            continue
+
+        figure_idx = seq.index(figure)
+        family = [figure]
+        next_idx = figure_idx + 1
+        while next_idx < len(seq):
+            cand = seq[next_idx]
+            proto = (getattr(cand, "attributes", None) or {}).get("xycutpp_proto", {})
+            if (
+                cand.block_type == BlockType.FIGURE_CAPTION
+                and isinstance(proto, dict)
+                and proto.get("figure_family_anchor_id") == _block_id(figure)
+            ):
+                family.append(cand)
+                next_idx += 1
+                continue
+            break
+        family_ids = {id(block) for block in family}
+        family_bottom = max(_y2(block) for block in family)
+        blockers = [
+            block for block in seq
+            if id(block) not in family_ids
+            and block.block_type in _TEXTLIKE_TYPES
+            and block.block_type not in _STRIP_TYPES
+            and _y1(block) >= _y1(figure) + max(72.0, page_h * 0.05)
+            and _y1(block) <= family_bottom + max(48.0, page_h * 0.04)
+            and _projection_overlap_ratio_x(block, figure) >= 0.05
+        ]
+        if not blockers:
+            continue
+
+        first_blocker = min(blockers, key=lambda block: seq.index(block))
+        blocker_idx = seq.index(first_blocker)
+        family_first_idx = min(seq.index(block) for block in family)
+        if family_first_idx <= blocker_idx:
+            continue
+
+        moving = [block for block in seq if id(block) in family_ids]
+        remain = [block for block in seq if id(block) not in family_ids]
+        insert_pos = remain.index(first_blocker)
+        seq = remain[:insert_pos] + moving + remain[insert_pos:]
+        _mark(figure, upper_visual_band_promoted=True, upper_visual_blocker_id=_block_id(first_blocker))
+    return seq
 
 
 def _promote_textbook_intro_sidebar(
@@ -2376,6 +2004,128 @@ def _enforce_column_local_visual_neighbors(
     return seq
 
 
+def _enforce_local_title_before_side_visual(
+    ordered: Sequence["Block"],
+    *,
+    image_width: int,
+    image_height: Optional[int],
+) -> List["Block"]:
+    seq = list(ordered)
+    if len(seq) < 4:
+        return seq
+
+    page_w = max(float(image_width), 1.0)
+    page_h = max(float(image_height or 0), max((_y2(b) for b in seq), default=1.0))
+    local_titles = [
+        blk for blk in seq
+        if blk.block_type == BlockType.TITLE
+        and _w(blk) <= page_w * 0.22
+        and abs(_cx(blk) - page_w * 0.5) <= page_w * 0.14
+    ]
+    if not local_titles:
+        return seq
+
+    for title in local_titles:
+        title_idx = seq.index(title)
+        candidates = [
+            blk for blk in seq
+            if blk.block_type in _VISUAL_TYPES
+            and _x1(blk) >= page_w * 0.54
+            and _w(blk) <= page_w * 0.38
+            and _y1(blk) >= _y2(title) - 12.0
+            and _y1(blk) <= _y2(title) + max(96.0, page_h * 0.06)
+        ]
+        if not candidates:
+            continue
+        visual = min(candidates, key=lambda b: (_y1(b), _x1(b)))
+        visual_idx = seq.index(visual)
+        if title_idx < visual_idx:
+            continue
+        seq.pop(title_idx)
+        visual_idx = seq.index(visual)
+        seq.insert(visual_idx, title)
+        _mark(title, local_title_visual_anchor_id=_block_id(visual))
+
+    return seq
+
+
+def _defer_side_figure_family_until_body_continuation(
+    ordered: Sequence["Block"],
+    *,
+    image_width: int,
+    image_height: Optional[int],
+) -> List["Block"]:
+    seq = list(ordered)
+    if len(seq) < 5:
+        return seq
+
+    page_w = max(float(image_width), 1.0)
+    page_h = max(float(image_height or 0), max((_y2(b) for b in seq), default=1.0))
+    below_slack = max(120.0, page_h * 0.08)
+    overlap_slack = max(28.0, page_h * 0.025)
+
+    for figure in list(seq):
+        if figure.block_type not in _VISUAL_TYPES:
+            continue
+        if _x1(figure) < page_w * 0.54 or _w(figure) < page_w * 0.14 or _w(figure) > page_w * 0.38:
+            continue
+
+        figure_idx = seq.index(figure)
+        family = [figure]
+        next_idx = figure_idx + 1
+        while next_idx < len(seq):
+            cand = seq[next_idx]
+            proto = (getattr(cand, "attributes", None) or {}).get("xycutpp_proto", {})
+            if (
+                cand.block_type == BlockType.FIGURE_CAPTION
+                and isinstance(proto, dict)
+                and proto.get("figure_family_anchor_id") == _block_id(figure)
+            ):
+                family.append(cand)
+                next_idx += 1
+                continue
+            break
+        family_ids = {id(block) for block in family}
+
+        next_title_y = min(
+            (
+                _y1(block)
+                for block in seq
+                if id(block) not in family_ids
+                and block.block_type == BlockType.TITLE
+                and _y1(block) > _y1(figure) + 8.0
+            ),
+            default=page_h + 1.0,
+        )
+        continuation = [
+            blk for blk in seq
+            if id(blk) not in family_ids
+            and blk.block_type in _TEXTLIKE_TYPES
+            and blk.block_type not in _STRIP_TYPES
+            and _x1(blk) <= page_w * 0.24
+            and _w(blk) >= page_w * 0.60
+            and _projection_overlap_ratio_x(figure, blk) >= 0.22
+            and _y1(blk) <= min(next_title_y, _y2(figure) + below_slack)
+            and _y2(blk) >= _y2(figure) - overlap_slack
+        ]
+        if not continuation:
+            continue
+
+        last_body = max(continuation, key=lambda blk: (_y2(blk), _x2(blk), seq.index(blk)))
+        last_body_idx = seq.index(last_body)
+        family_last_idx = max(seq.index(block) for block in family)
+        if last_body_idx <= family_last_idx:
+            continue
+
+        moving = [block for block in seq if id(block) in family_ids]
+        seq = [block for block in seq if id(block) not in family_ids]
+        insert_pos = seq.index(last_body) + 1
+        seq[insert_pos:insert_pos] = moving
+        _mark(figure, body_continuation_anchor_id=_block_id(last_body), body_continuation_deferred=True)
+
+    return seq
+
+
 def _enforce_spanning_visual_after_covered_columns(
     ordered: Sequence["Block"],
     *,
@@ -2509,6 +2259,12 @@ def _enforce_lower_section_wraparound_columns(
     """
     seq = list(ordered)
     if len(seq) < 6:
+        return seq
+    if _has_locked_global_multicol_skeleton(
+        seq,
+        image_width=image_width,
+        image_height=image_height,
+    ):
         return seq
 
     page_w = max(float(image_width), 1.0)
@@ -2869,6 +2625,12 @@ def _enforce_spanning_article_column_continuity(
     image_height: Optional[int],
 ) -> List["Block"]:
     seq = list(ordered)
+    if _has_locked_global_multicol_skeleton(
+        seq,
+        image_width=image_width,
+        image_height=image_height,
+    ):
+        return seq
     for region in _find_spanning_article_regions(
         seq,
         image_width=image_width,
@@ -3099,9 +2861,6 @@ def _region_placement(
 ) -> _RegionPlacement:
     first_idx = min(seq.index(block) for block in region.blocks)
     last_idx = max(seq.index(block) for block in region.blocks)
-    for block in prefix:
-        first_idx = min(first_idx, seq.index(block))
-        last_idx = max(last_idx, seq.index(block))
     return _RegionPlacement(
         first_idx=first_idx,
         last_idx=last_idx,
@@ -3123,9 +2882,10 @@ def _apply_local_parallel_region(
     band_top = float(region.top)
     band_bottom = float(region.bottom)
     group_ids = {id(block) for block in group}
+    prefix_ids: set[int] = set()
 
     prefix = list(_select_region_prefix_blocks(seq, region=region, page_w=page_w, page_h=page_h))
-    placement = _region_placement(seq, region=region, prefix=prefix)
+    prefix_ids = {id(block) for block in prefix}
 
     for prefix_block in prefix:
         prefix_block.col_count = len(columns)
@@ -3149,23 +2909,32 @@ def _apply_local_parallel_region(
             )
         reordered.extend(members)
 
-    for block in seq[placement.first_idx:placement.last_idx + 1]:
-        if id(block) in group_ids:
-            continue
+    remain = [
+        block for block in seq
+        if id(block) not in group_ids and id(block) not in prefix_ids
+    ]
+    top_slack = max(24.0, page_h * 0.015)
+    attached: List["Block"] = []
+    before: List["Block"] = []
+    after: List["Block"] = []
+    for block in remain:
         if _intersects_region(block, (0.0, band_top, page_w, band_bottom)):
             detect_spanned_blocks([block], col_bounds)
             block.col_count = len(columns)
             _mark(block, region_id=region.region_id, region_kind=region.region_kind, region_role="attached")
-        elif _w(block) >= page_w * 0.60:
+            attached.append(block)
+        elif _y2(block) <= band_top + top_slack:
             block.col_count = 1
             block.col_index = 0
             block.spanned_cols = [0]
+            before.append(block)
+        else:
+            block.col_count = 1
+            block.col_index = 0
+            block.spanned_cols = [0]
+            after.append(block)
 
-    middle = [
-        block for block in seq[placement.first_idx:placement.last_idx + 1]
-        if id(block) not in group_ids and block not in prefix
-    ]
-    return seq[:placement.first_idx] + prefix + reordered + middle + seq[placement.last_idx + 1:]
+    return before + prefix + reordered + attached + after
 
 
 def _enforce_local_parallel_text_band_columns(
@@ -3177,6 +2946,12 @@ def _enforce_local_parallel_text_band_columns(
     """Recover local multi-column text bands inside otherwise single-column pages."""
     seq = list(ordered)
     if len(seq) < 3:
+        return seq
+    if _has_locked_global_multicol_skeleton(
+        seq,
+        image_width=image_width,
+        image_height=image_height,
+    ):
         return seq
 
     page_w = max(float(image_width), 1.0)
@@ -3337,7 +3112,22 @@ def postprocess_xycutpp_local_attachments(
         image_width=image_width,
         image_height=image_height,
     )
+    seq = _promote_upper_visual_family_before_lower_band(
+        seq,
+        image_width=image_width,
+        image_height=image_height,
+    )
+    seq = _enforce_local_title_before_side_visual(
+        seq,
+        image_width=image_width,
+        image_height=image_height,
+    )
     seq = _enforce_column_local_visual_neighbors(
+        seq,
+        image_width=image_width,
+        image_height=image_height,
+    )
+    seq = _defer_side_figure_family_until_body_continuation(
         seq,
         image_width=image_width,
         image_height=image_height,
@@ -3389,111 +3179,24 @@ def postprocess_xycutpp_local_attachments(
         image_width=image_width,
         image_height=image_height,
     )
+    seq = _enforce_local_title_before_side_visual(
+        seq,
+        image_width=image_width,
+        image_height=image_height,
+    )
     seq = _enforce_lower_section_wraparound_columns(
         seq,
         image_width=image_width,
         image_height=image_height,
     )
+    seq = _enforce_inline_equation_label_adjacency(seq)
     return seq
 
 
-def _assign_column_metadata(
-    ordered: Sequence["Block"],
-    *,
-    image_width: int,
-    image_height: Optional[int],
-    max_cols: int,
-    cluster_thresh: float,
-) -> None:
-    ordered = list(ordered)
-    if not ordered:
-        return
+# ---------------------------------------------------------------------------
+# Public entry points
+# ---------------------------------------------------------------------------
 
-    page_w = max(float(image_width), 1.0)
-    if _has_single_column_wide_body_dominance(
-        ordered,
-        image_width=image_width,
-        image_height=image_height,
-    ):
-        _assign_single_column(ordered)
-        return
-
-    candidates = [
-        blk for blk in ordered
-        if blk.block_type in _COLUMN_ANCHOR_TYPES
-        and _w(blk) <= page_w * 0.60
-        and _marked(blk, "mask_reason") != "top_attachment"
-    ]
-    if len(candidates) < 2:
-        candidates = [
-            blk for blk in ordered
-            if blk.block_type not in _COLUMN_EXCLUDED_TYPES
-            and blk.block_type != BlockType.TITLE
-            and _w(blk) <= page_w * 0.60
-            and _marked(blk, "mask_reason") != "top_attachment"
-        ]
-    if len(candidates) < 2:
-        candidates = [
-            blk for blk in ordered
-            if blk.block_type not in _COLUMN_EXCLUDED_TYPES
-            and _w(blk) <= page_w * 0.60
-            and _marked(blk, "mask_reason") != "top_attachment"
-        ]
-    if len(candidates) < 2:
-        candidates = [blk for blk in ordered if blk.block_type not in _VISUAL_TYPES]
-    if len(candidates) < 2:
-        _assign_single_column(ordered)
-        return
-
-    columns, col_bounds = detect_columns(
-        candidates,
-        image_width,
-        max_cols=max_cols,
-        cluster_thresh=cluster_thresh,
-    )
-
-    if len(columns) <= 1 and any(blk.block_type == BlockType.TITLE for blk in candidates):
-        body_candidates = [
-            blk for blk in candidates
-            if blk.block_type != BlockType.TITLE
-        ]
-        if len(body_candidates) >= 2:
-            columns, col_bounds = detect_columns(
-                body_candidates,
-                image_width,
-                max_cols=max_cols,
-                cluster_thresh=cluster_thresh,
-            )
-
-    if len(columns) <= 1:
-        _assign_single_column(ordered)
-        return
-
-    candidate_ids = {id(blk) for col in columns for blk in col}
-    for blk in ordered:
-        blk.col_count = 0
-        blk.col_index = 0
-        blk.spanned_cols = []
-
-    for col_idx, members in enumerate(columns):
-        for blk in members:
-            blk.col_count = len(columns)
-            blk.col_index = col_idx
-            blk.spanned_cols = [col_idx]
-
-    unassigned = [blk for blk in ordered if id(blk) not in candidate_ids]
-    if unassigned:
-        detect_spanned_blocks(unassigned, col_bounds)
-        for blk in unassigned:
-            blk.col_count = len(columns)
-            if _marked(blk, "mask_reason") == "top_attachment":
-                blk.col_count = 1
-                blk.col_index = 0
-                blk.spanned_cols = [0]
-
-    for blk in ordered:
-        if _marked(blk, "mask_reason") != "top_attachment":
-            blk.col_count = len(columns)
 
 def _sort_layout_xycutpp_core(
     blocks: List["Block"],
@@ -3514,8 +3217,8 @@ def _sort_layout_xycutpp_core(
 ) -> List["Block"]:
     """Sort blocks by the paper-style XY-Cut++ core pipeline.
 
-    Legacy parameters are kept for call-site compatibility even if not used by
-    the underlying prototype.
+    Legacy parameters are kept for call-site compatibility even if unused by
+    the current pipeline.
     """
     del column_confidence_min, zone_strip_height_ratio, title_width_ratio
 
@@ -3540,7 +3243,7 @@ def _sort_layout_xycutpp_core(
         min_projection_overlap=min_projection_overlap,
         overlap_threshold=overlap_threshold,
     )
-    active, masked, precut_targets = _split_mask_sets(
+    active, masked = _split_mask_sets(
         valid,
         cross_ids=cross_ids,
         image_width=image_width,
@@ -3551,12 +3254,12 @@ def _sort_layout_xycutpp_core(
     anchors = _sort_active_anchors(
         active,
         masked,
-        precut_targets,
         image_width=image_width,
         image_height=image_height,
         cross_ids=cross_ids,
         density_threshold=density_threshold,
         min_gap_px=min_gap_px,
+        barrier_width_ratio=barrier_width_ratio,
     )
     ordered = _restore_masked_elements(
         anchors,

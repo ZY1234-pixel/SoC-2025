@@ -66,7 +66,6 @@ class LayoutPredictor(object):
         "formula_number": "equation",
         "image": "figure",
         "figure_title": "figure_caption",
-        "table": "table",
         "table_title": "table_caption",
         "seal": "figure",
         "chart_title": "figure_caption",
@@ -83,6 +82,7 @@ class LayoutPredictor(object):
     def __init__(self, args):
         resize_size = [800, 608]
         inference_cfg = os.path.join(args.layout_model_dir or "", "inference.yml")
+        layout_model_path = str(args.layout_model_dir or "")
         if os.path.isfile(inference_cfg):
             try:
                 with open(inference_cfg, "r", encoding="utf-8") as f:
@@ -116,6 +116,10 @@ class LayoutPredictor(object):
             inferred_imgsz = self._infer_ncnn_imgsz(args.layout_model_dir)
             if inferred_imgsz is not None:
                 resize_size = [inferred_imgsz, inferred_imgsz]
+        if layout_model_path.lower().endswith(".onnx"):
+            inferred_onnx_size = self._infer_onnx_input_size(layout_model_path)
+            if inferred_onnx_size is not None:
+                resize_size = inferred_onnx_size
 
         pre_process_list = [
             {"Resize": {"size": resize_size}},
@@ -184,7 +188,7 @@ class LayoutPredictor(object):
                 self.output_tensors,
                 self.config,
             ) = utility.create_predictor(args, "layout", logger)
-            self.use_onnx = args.use_onnx
+            self.use_onnx = bool(args.use_onnx) or str(args.layout_model_dir or "").lower().endswith(".onnx")
             self.input_names = None if self.use_onnx else self.predictor.get_input_names()
 
     @staticmethod
@@ -236,6 +240,27 @@ class LayoutPredictor(object):
             if os.path.isfile(param_path) and os.path.isfile(model_path):
                 return param_path, model_path
         return None, None
+
+    @staticmethod
+    def _infer_onnx_input_size(layout_model_path):
+        if not layout_model_path or not os.path.isfile(layout_model_path):
+            return None
+        try:
+            import onnxruntime as ort
+
+            session = ort.InferenceSession(
+                layout_model_path,
+                providers=["CPUExecutionProvider"],
+            )
+            shape = session.get_inputs()[0].shape
+            if len(shape) < 4:
+                return None
+            height, width = shape[2], shape[3]
+            if isinstance(height, int) and isinstance(width, int) and height > 0 and width > 0:
+                return [int(width), int(height)]
+        except Exception:
+            return None
+        return None
 
     def _letterbox_image(self, img):
         new_shape = (self.ncnn_input_size[1], self.ncnn_input_size[0])

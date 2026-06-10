@@ -22,6 +22,8 @@ from docflow.model.zone import Zone
 from docflow.layout.sorter import sort_layout
 from docflow.layout.paragraph_detector import split_into_paragraphs
 from docflow.layout.style_inferrer import infer_block_styles
+from docflow.layout.color_inferrer import infer_text_colors
+from docflow.layout.font_classifier import FontClassifier
 from docflow.renderer.base import BaseRenderer
 from docflow.renderer.docx_renderer import DocxRenderer
 from docflow.renderer.markdown_renderer import MarkdownRenderer
@@ -53,7 +55,9 @@ _STRIP_TYPES = {
     BlockType.FOOTER,
     BlockType.PAGE_NUMBER,
 }
-_TITLE_LEVEL_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)(?:[\.、])?\s*\S")
+_TITLE_LEVEL_RE = re.compile(
+    r"^\s*(?:(\d+(?:\.\d+)*)(?:[\.、])?|[（(]?([一二三四五六七八九十百]+)[)）\.、])\s*\S"
+)
 _FOOTER_LIKE_RE = re.compile(r"(©|copyright|https?://|www\.|journal\.com|verlag|kgaa)", re.IGNORECASE)
 _FIGURE_CAPTION_RE = re.compile(r"^\s*(?:图|fig(?:ure)?\.?)\s*[\d一二三四五六七八九十]+(?:[-－—]\d+)?\s*\S*", re.IGNORECASE)
 _TABLE_CAPTION_RE = re.compile(r"^\s*(?:表|table)\s*[\d一二三四五六七八九十]+(?:[-－—]\d+)?\s*\S*", re.IGNORECASE)
@@ -71,7 +75,10 @@ def _infer_title_heading_level(text: str) -> Optional[int]:
     match = _TITLE_LEVEL_RE.match(normalized)
     if not match:
         return None
-    return match.group(1).count(".") + 1
+    numeric = match.group(1)
+    if numeric:
+        return numeric.count(".") + 1
+    return 1
 
 
 class RecoveryPipeline:
@@ -94,6 +101,7 @@ class RecoveryPipeline:
     def __init__(self, config: Optional[RecoveryConfig] = None) -> None:
         self.config = config or RecoveryConfig()
         self._renderers: Dict[str, BaseRenderer] = {}
+        self._font_classifier: Optional[FontClassifier] = None
 
     # ------------------------------------------------------------------
     # 主入口
@@ -320,9 +328,12 @@ class RecoveryPipeline:
 
         # -- 估算字号 --------------------------------------------
         mapper = page.coord_mapper
+        font_mapper = page.full_coord_mapper
         for block in blocks:
             if isinstance(block, TextBlock):
-                block.estimate_font_size(mapper)
+                block.estimate_font_size(font_mapper)
+
+        font_classification_stats = self._classify_block_fonts(page, blocks)
 
         # -- 将区块分组到 Zone ----------------------------------------
         page.zones = self._blocks_to_zones(
@@ -330,6 +341,9 @@ class RecoveryPipeline:
             image_width=page.image_width,
             image_height=page.image_height,
         )
+        weak_multicolumn_evidence = self._has_weak_multicolumn_evidence(page, blocks)
+        if weak_multicolumn_evidence:
+            self._collapse_to_single_column(page, blocks)
 
         # -- 样式推断（字号、对齐、行距、缩进、bold/italic 等）-----------
         # 仅填充 JSON 中未明确提供的字段，已有值不覆盖
@@ -338,7 +352,9 @@ class RecoveryPipeline:
             mapper,
             justify_min_lines=self.config.align_justify_min_lines,
             page_width_px=page.image_width,
+            font_mapper=font_mapper,
         )
+        color_inference_stats = infer_text_colors(page, blocks)
 
         self._annotate_page_profile(page, blocks)
         if page.attributes is None:
@@ -354,7 +370,12 @@ class RecoveryPipeline:
             "spurious_visual_suppressed": spurious_visual_suppressed,
             "figure_text_dedup_suppressed": figure_text_dedup_suppressed,
             "zone_count": len(page.zones),
+            "weak_multicolumn_collapsed": int(weak_multicolumn_evidence),
         }
+        if font_classification_stats:
+            page.attributes["font_classification"] = font_classification_stats
+        if color_inference_stats:
+            page.attributes["color_inference"] = color_inference_stats
         page.attributes["quality_metrics"] = self._page_quality_metrics(page, blocks)
 
         return page
@@ -362,6 +383,28 @@ class RecoveryPipeline:
     # ------------------------------------------------------------------
     # 辅助方法
     # ------------------------------------------------------------------
+
+    def _get_font_classifier(self) -> Optional[FontClassifier]:
+        if not bool(getattr(self.config, "font_classification_enabled", True)):
+            return None
+        if self._font_classifier is not None:
+            return self._font_classifier
+        try:
+            self._font_classifier = FontClassifier.from_config(self.config)
+        except Exception:
+            self._font_classifier = None
+        return self._font_classifier
+
+    def _classify_block_fonts(self, page: Page, blocks: List[Block]) -> Optional[dict]:
+        if not bool(getattr(self.config, "font_classification_enabled", True)):
+            return None
+        classifier = self._get_font_classifier()
+        if classifier is None:
+            return {"enabled": True, "available": False, "reason": "classifier_init_failed", "applied": 0}
+        try:
+            return classifier.classify_page(page, blocks)
+        except Exception as exc:
+            return {"enabled": True, "available": False, "reason": str(exc), "applied": 0}
 
     @staticmethod
     def _fix_block_categories(
@@ -462,6 +505,14 @@ class RecoveryPipeline:
                     or (near_footer_band and academic_footer_note)
                 ):
                     block.block_type = BlockType.FOOTER
+                    changes += 1
+                elif (
+                    _infer_title_heading_level(text) is not None
+                    and len(text) <= 36
+                    and block.count_lines() <= 2
+                    and float(block.bbox.width) <= max(float(page_width) * 0.45, 1.0)
+                ):
+                    block.block_type = BlockType.TITLE
                     changes += 1
 
             if block.block_type == BlockType.TITLE:
@@ -1098,6 +1149,8 @@ class RecoveryPipeline:
             return "table_heavy"
         if max_cols <= 1:
             return "single_column"
+        if RecoveryPipeline._has_weak_multicolumn_evidence(page, blocks):
+            return "single_column"
         if max_cols == 2 and cjk_ratio < 0.25 and title_count <= 4:
             return "academic_two_col"
         if max_cols >= 3 and figure_count >= 1 and title_count >= 2:
@@ -1105,6 +1158,76 @@ class RecoveryPipeline:
         if cjk_ratio >= 0.35 and (table_count >= 1 or figure_count >= 1):
             return "textbook_mixed"
         return "generic_complex"
+
+    @staticmethod
+    def _collapse_to_single_column(page: Page, blocks: List[Block]) -> None:
+        """将已判定为弱分栏的页面元数据折叠为单栏。
+
+        该步骤不改变阅读顺序，只清理早期分栏猜测留下的列索引，
+        防止后续对齐/渲染继续把短文本块当作独立列处理。
+        """
+        for block in blocks:
+            block.col_count = 1
+            block.col_index = 0
+            block.spanned_cols = [0]
+        for zone in page.zones:
+            zone.col_count = 1
+            zone.has_spanned = False
+
+    @staticmethod
+    def _has_weak_multicolumn_evidence(page: Page, blocks: List[Block]) -> bool:
+        """判断当前多栏判定是否缺少稳定的并行正文证据。
+
+        真正的分栏通常会在至少两个列中各自形成多个窄正文块；如果页面
+        主要由跨栏/宽文本块组成，少量短块不应把整页推成多栏渲染。
+        """
+        max_cols = max((zone.col_count for zone in page.zones), default=1)
+        if max_cols <= 1:
+            return False
+
+        figure_count = sum(1 for b in blocks if b.block_type in FIGURE_TYPES or b.block_type == BlockType.FIGURE)
+        table_count = sum(1 for b in blocks if b.block_type == BlockType.TABLE)
+        if figure_count or table_count:
+            return False
+
+        text_blocks = [
+            b for b in blocks
+            if isinstance(b, TextBlock)
+            and b.block_type in {BlockType.TEXT, BlockType.TITLE, BlockType.ABSTRACT, BlockType.REFERENCE}
+        ]
+        if len(text_blocks) < 3:
+            return False
+
+        page_width = max(float(page.image_width), 1.0)
+        total_area = sum(max(float(b.bbox.area), 0.0) for b in text_blocks)
+        if total_area <= 0:
+            return False
+
+        wide_or_spanned_area = 0.0
+        confined_by_col: dict[int, list[TextBlock]] = {}
+        for block in text_blocks:
+            width_ratio = float(block.bbox.width) / page_width
+            spanned = len(getattr(block, "spanned_cols", []) or []) > 1 or int(getattr(block, "col_count", 1) or 1) <= 1
+            if spanned or width_ratio >= 0.52:
+                wide_or_spanned_area += max(float(block.bbox.area), 0.0)
+                continue
+
+            text = (block.full_text() or "").strip()
+            if len(text) >= 12 or block.count_lines() >= 2:
+                confined_by_col.setdefault(int(getattr(block, "col_index", 0) or 0), []).append(block)
+
+        stable_columns = 0
+        for col_blocks in confined_by_col.values():
+            col_blocks = sorted(col_blocks, key=lambda b: (float(b.bbox.y1), float(b.bbox.x1)))
+            if len(col_blocks) < 2:
+                continue
+            y_span = max(float(b.bbox.y2) for b in col_blocks) - min(float(b.bbox.y1) for b in col_blocks)
+            text_len = sum(len((b.full_text() or "").strip()) for b in col_blocks)
+            if y_span >= float(page.image_height) * 0.12 and text_len >= 40:
+                stable_columns += 1
+
+        wide_ratio = wide_or_spanned_area / total_area
+        return wide_ratio >= 0.60 and stable_columns < 2
 
     @staticmethod
     def _page_quality_metrics(page: Page, blocks: List[Block]) -> dict:
@@ -1121,6 +1244,7 @@ class RecoveryPipeline:
             "figure_count": figure_count,
             "title_count": title_count,
             "content_density": round(block_area / page_area, 4),
+            "weak_multicolumn_evidence": RecoveryPipeline._has_weak_multicolumn_evidence(page, blocks),
         }
 
     @staticmethod
@@ -1204,6 +1328,23 @@ class RecoveryPipeline:
                 return str(debug.get("region_kind", "") or "")
             return ""
 
+        def _is_structural_region_kind(kind: str) -> bool:
+            return kind in {
+                "local_parallel_text_band",
+                "wraparound_section",
+                "spanning_article_band",
+            }
+
+        def _same_zone_region(
+            left_region_id: str,
+            left_region_kind: str,
+            right_region_id: str,
+            right_region_kind: str,
+        ) -> bool:
+            if left_region_id == right_region_id:
+                return True
+            return not _is_structural_region_kind(left_region_kind) and not _is_structural_region_kind(right_region_kind)
+
         def _is_top_strip_block(block: Block) -> bool:
             if block.block_type not in _STRIP_TYPES:
                 return False
@@ -1259,9 +1400,17 @@ class RecoveryPipeline:
             if (
                 block.col_count == current_col_count
                 and block_flow_id == current_flow_id
-                and block_region_id == current_region_id
+                and _same_zone_region(
+                    current_region_id,
+                    current_region_kind,
+                    block_region_id,
+                    block_region_kind,
+                )
             ):
                 current_blocks.append(block)
+                if current_region_id != block_region_id:
+                    current_region_id = ""
+                    current_region_kind = ""
             else:
                 has_spanned = any(
                     len(b.spanned_cols) > 1 for b in current_blocks
@@ -1438,12 +1587,20 @@ class RecoveryPipeline:
                 if (
                     zone.col_count == prev.col_count
                     and zone.flow_id == prev.flow_id
-                    and zone.region_id == prev.region_id
+                    and _same_zone_region(
+                        prev.region_id,
+                        prev.region_kind,
+                        zone.region_id,
+                        zone.region_kind,
+                    )
                     and zone.rendering_strategy != "strip_row"
                     and prev.rendering_strategy != "strip_row"
                 ):
                     prev.blocks.extend(zone.blocks)
                     prev.has_spanned = prev.has_spanned or zone.has_spanned
+                    if prev.region_id != zone.region_id:
+                        prev.region_id = ""
+                        prev.region_kind = ""
                     _preserve_order(prev.blocks)
                 else:
                     consolidated.append(zone)
