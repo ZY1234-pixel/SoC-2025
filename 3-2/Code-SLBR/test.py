@@ -15,7 +15,7 @@ from options import Options
 import torch.nn.functional as F
 import pytorch_ssim
 from evaluation import compute_IoU, FScore, AverageMeter, compute_RMSE, normPRED
-from skimage.measure import compare_ssim as ssim
+from skimage.metrics import peak_signal_noise_ratio as ssim
 import time
 
 
@@ -79,7 +79,7 @@ def main(args):
         dataset_func = datasets.LVWDataset
     
     val_loader = torch.utils.data.DataLoader(dataset_func('test',args),batch_size=args.test_batch, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
+        num_workers=0, pin_memory=True)
     data_loaders = (None,val_loader)
 
     Machine = models.__dict__[args.models](datasets=data_loaders, args=args)
