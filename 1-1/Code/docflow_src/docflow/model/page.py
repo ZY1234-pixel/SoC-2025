@@ -140,6 +140,24 @@ class Page:
             )
         return self._coord_mapper
 
+    @property
+    def full_coord_mapper(self) -> CoordMapper:
+        """返回基于整页尺寸的坐标映射器。
+
+        该映射器不扣除页边距，适合估算字号、文本行高等物理尺寸；
+        正文排版位置仍应使用 :attr:`coord_mapper`。
+        """
+        return CoordMapper(
+            image_width=self.image_width,
+            image_height=self.image_height,
+            page_width_pt=self.page_width_pt,
+            page_height_pt=self.page_height_pt,
+            margin_left_pt=0.0,
+            margin_right_pt=0.0,
+            margin_top_pt=0.0,
+            margin_bottom_pt=0.0,
+        )
+
     # -- 页面尺寸检测 -------------------------------------------------
 
     def detect_page_size(self) -> None:

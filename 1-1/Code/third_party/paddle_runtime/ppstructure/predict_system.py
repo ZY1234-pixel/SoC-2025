@@ -145,6 +145,11 @@ class StructureSystem(object):
                 text_res, ocr_time_dict = self._predict_text(img)
                 time_dict["det"] += ocr_time_dict["det"]
                 time_dict["rec"] += ocr_time_dict["rec"]
+                layout_res = self._augment_layout_with_uncovered_text_lines(
+                    layout_res,
+                    text_res,
+                    img.shape,
+                )
 
             res_list = []
             for region in layout_res:
@@ -260,6 +265,149 @@ class StructureSystem(object):
             if self._has_intersection(bbox, rect):
                 res.append(r)
         return res
+
+    def _augment_layout_with_uncovered_text_lines(self, layout_res, text_res, image_shape):
+        extra_regions = self._recall_uncovered_text_layouts(layout_res, text_res, image_shape)
+        if not extra_regions:
+            return layout_res
+        return list(layout_res) + extra_regions
+
+    @classmethod
+    def _recall_uncovered_text_layouts(cls, layout_res, text_res, image_shape):
+        if not text_res:
+            return []
+        img_h, img_w = image_shape[:2]
+        uncovered = []
+        for line in text_res:
+            text = str(line.get("text", "")).strip()
+            if not text:
+                continue
+            confidence = float(line.get("confidence", 0.0) or 0.0)
+            if confidence < 0.80:
+                continue
+            bbox = cls._ocr_line_bbox(line.get("text_region"))
+            if bbox is None:
+                continue
+            x1, y1, x2, y2 = bbox
+            width = max(0.0, x2 - x1)
+            height = max(0.0, y2 - y1)
+            if width < max(32.0, float(img_w) * 0.035) or height < 6.0:
+                continue
+            if y2 < float(img_h) * 0.05 or y1 > float(img_h) * 0.88:
+                continue
+            if cls._line_covered_by_layout(bbox, layout_res, img_w, img_h):
+                continue
+            uncovered.append((bbox, line, confidence))
+
+        if not uncovered:
+            return []
+
+        uncovered.sort(key=lambda item: (item[0][1], item[0][0]))
+        groups = []
+        for bbox, line, confidence in uncovered:
+            if groups and cls._same_recall_text_group(groups[-1], bbox):
+                group = groups[-1]
+                group["bbox"] = cls._union_rect(group["bbox"], bbox)
+                group["lines"].append(line)
+                group["score"] = min(group["score"], confidence)
+            else:
+                groups.append({"bbox": list(bbox), "lines": [line], "score": confidence})
+
+        return [
+            {
+                "bbox": np.asarray(group["bbox"], dtype=np.float32),
+                "label": "text",
+                "score": float(group["score"]),
+            }
+            for group in groups
+        ]
+
+    @staticmethod
+    def _ocr_line_bbox(text_region):
+        if not isinstance(text_region, (list, tuple)) or not text_region:
+            return None
+        points = []
+        for point in text_region:
+            if isinstance(point, (list, tuple)) and len(point) >= 2:
+                points.append((float(point[0]), float(point[1])))
+        if not points:
+            return None
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        return [min(xs), min(ys), max(xs), max(ys)]
+
+    @classmethod
+    def _line_covered_by_layout(cls, line_bbox, layout_res, image_width, image_height):
+        line_area = cls._rect_area(line_bbox)
+        if line_area <= 1.0:
+            return True
+        line_cx = (line_bbox[0] + line_bbox[2]) * 0.5
+        line_cy = (line_bbox[1] + line_bbox[3]) * 0.5
+        expand = max(4.0, min(float(image_width), float(image_height)) * 0.003)
+        for region in layout_res or []:
+            raw_bbox = region.get("bbox")
+            if raw_bbox is None:
+                continue
+            bbox = [float(v) for v in raw_bbox]
+            if cls._rect_area(bbox) <= 1.0:
+                continue
+            inter = cls._intersection_area(line_bbox, bbox) / line_area
+            if inter >= 0.55:
+                return True
+            expanded = [
+                bbox[0] - expand,
+                bbox[1] - expand,
+                bbox[2] + expand,
+                bbox[3] + expand,
+            ]
+            if (
+                expanded[0] <= line_cx <= expanded[2]
+                and expanded[1] <= line_cy <= expanded[3]
+                and cls._axis_overlap(line_bbox, expanded, axis="x") >= 0.55
+            ):
+                return True
+        return False
+
+    @classmethod
+    def _same_recall_text_group(cls, group, bbox):
+        prev = group["bbox"]
+        prev_height = max(1.0, prev[3] - prev[1])
+        curr_height = max(1.0, bbox[3] - bbox[1])
+        vertical_gap = max(0.0, bbox[1] - prev[3])
+        if vertical_gap > max(10.0, min(prev_height, curr_height) * 0.9):
+            return False
+        return cls._axis_overlap(prev, bbox, axis="x") >= 0.55
+
+    @staticmethod
+    def _rect_area(bbox):
+        return max(0.0, float(bbox[2]) - float(bbox[0])) * max(0.0, float(bbox[3]) - float(bbox[1]))
+
+    @staticmethod
+    def _intersection_area(b1, b2):
+        width = max(0.0, min(float(b1[2]), float(b2[2])) - max(float(b1[0]), float(b2[0])))
+        height = max(0.0, min(float(b1[3]), float(b2[3])) - max(float(b1[1]), float(b2[1])))
+        return width * height
+
+    @staticmethod
+    def _axis_overlap(b1, b2, axis="x"):
+        if axis == "x":
+            left = max(float(b1[0]), float(b2[0]))
+            right = min(float(b1[2]), float(b2[2]))
+            span = min(max(1.0, float(b1[2]) - float(b1[0])), max(1.0, float(b2[2]) - float(b2[0])))
+        else:
+            left = max(float(b1[1]), float(b2[1]))
+            right = min(float(b1[3]), float(b2[3]))
+            span = min(max(1.0, float(b1[3]) - float(b1[1])), max(1.0, float(b2[3]) - float(b2[1])))
+        return max(0.0, right - left) / span
+
+    @staticmethod
+    def _union_rect(b1, b2):
+        return [
+            min(float(b1[0]), float(b2[0])),
+            min(float(b1[1]), float(b2[1])),
+            max(float(b1[2]), float(b2[2])),
+            max(float(b1[3]), float(b2[3])),
+        ]
 
     def _has_intersection(self, rect1, rect2):
         x_min1, y_min1, x_max1, y_max1 = rect1
