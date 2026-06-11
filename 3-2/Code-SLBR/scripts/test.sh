@@ -7,14 +7,14 @@ INPUT_SIZE=256
 DATASET=CLWD
 NAME=slbr_v1
 
-CUDA_VISIBLE_DEVICES=1 python3  test.py \
+CUDA_VISIBLE_DEVICES=0 python3  test.py \
   --nets slbr \
   --models slbr \
   --input-size ${INPUT_SIZE} \
   --crop_size ${INPUT_SIZE} \
   --test-batch 1 \
   --evaluate\
-  --dataset_dir /media/sda/datasets/Watermark/${DATASET} \
+  --dataset_dir /home/fauyn/Aproject/watermark/SLBR-Visible-Watermark-Removal-master/datasets/${DATASET} \
   --preprocess resize \
   --no_flip \
   --name ${NAME} \

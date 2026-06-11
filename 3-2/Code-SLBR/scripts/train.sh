@@ -13,13 +13,13 @@ INPUT_SIZE=256
 DATASET=CLWD
 NAME=slbr_v1
 # nohup python -u   main.py \
-CUDA_VISIBLE_DEVICES=1 python -u train.py \
+CUDA_VISIBLE_DEVICES=0 python -u train.py \
  --epochs 100 \
  --schedule 65 \
  --lr 1e-3 \
- --gpu_id 1 \
- --checkpoint /media/sda/Watermark \
- --dataset_dir /media/sda/datasets/Watermark/${DATASET} \
+ --gpu_id 0 \
+ --checkpoint /home/fauyn/Aproject/watermark/SLBR-Visible-Watermark-Removal-master/checkpoint \
+ --dataset_dir /home/fauyn/Aproject/watermark/SLBR-Visible-Watermark-Removal-master/datasets/${DATASET} \
  --nets slbr  \
  --sltype vggx \
  --mask_mode ${MASK_MODE} \
@@ -33,9 +33,9 @@ CUDA_VISIBLE_DEVICES=1 python -u train.py \
  --models slbr \
   --input-size ${INPUT_SIZE} \
  --crop_size ${INPUT_SIZE} \
- --train-batch 8 \
+ --train-batch 6 \
  --test-batch 1 \
- --preprocess resize \
+ --preprocess  resize\
  --name ${NAME} \
  --k_center ${K_CENTER} \
  --dataset ${DATASET} \

@@ -6,9 +6,9 @@ MASK_MODE=res
 
 INPUT_SIZE=256
 NAME=slbr_v1
-TEST_DIR=/Volumes/FILES/pythonwork/project3/WatermarkRemover-AI-master/水印
+TEST_DIR=/home/fauyn/Aproject/watermark/bentu-test
 
-CUDA_VISIBLE_DEVICES= python3  test_custom_raw.py \
+CUDA_VISIBLE_DEVICES=0 python3  test_custom.py \
   --name ${NAME} \
   --nets slbr \
   --models slbr \
@@ -23,6 +23,6 @@ CUDA_VISIBLE_DEVICES= python3  test_custom_raw.py \
   --use_refine \
   --k_refine ${K_REFINE} \
   --k_skip_stage ${K_SKIP} \
-  --resume /Volumes/FILES/pythonwork/project3/SLBR-Visible-Watermark-Removal-master/model_best.pth.tar \
+  --resume /home/fauyn/Aproject/watermark/SLBR-Visible-Watermark-Removal-master/checkpoint/slbr_v1/checkpoint.pth.tar \
   --test_dir ${TEST_DIR}
 
