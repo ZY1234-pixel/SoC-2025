@@ -1,170 +1,181 @@
-import sys
+from __future__ import print_function, absolute_import
 
-sys.path.append('../')
-from PIL import Image
+import argparse
 import torch
-from torchvision.transforms import ToTensor
-from torchvision.utils import save_image
 import os
+from math import log10
+import cv2
+import numpy as np
 
-from model.DocDiff import DocDiff
-from schedule.diffusionSample import GaussianDiffusion
-from schedule.schedule import Schedule
+torch.backends.cudnn.benchmark = True
 
-
-# -------------------------- 核心工具函数（尺寸严格对齐） --------------------------
-def min_max(array):
-    """安全归一化到0-1范围"""
-    return (array - array.min()) / (array.max() - array.min() + 1e-8)
-
-
-def crop_concat_preserve_size(img, crop_size=128):
-    """
-    分块但严格保留原始尺寸信息
-    img: [1, C, H, W] 原始输入
-    return: 分块张量 + 原始尺寸(H,W)
-    """
-    B, C, H, W = img.shape
-
-    # 计算需要填充的尺寸（仅填充到crop_size的整数倍）
-    pad_h = (crop_size - H % crop_size) % crop_size
-    pad_w = (crop_size - W % crop_size) % crop_size
-
-    # 填充图片（仅在需要时）
-    img_padded = torch.nn.functional.pad(img, (0, pad_w, 0, pad_h), mode='reflect')
-    _, _, H_pad, W_pad = img_padded.shape
-
-    # 分块
-    patches = []
-    for i in range(H_pad // crop_size):
-        for j in range(W_pad // crop_size):
-            patch = img_padded[:, :,
-            i * crop_size:(i + 1) * crop_size,
-            j * crop_size:(j + 1) * crop_size]
-            patches.append(patch)
-
-    return torch.cat(patches, dim=0), (H, W)  # 只返回原始尺寸，不返回分块数
+import datasets as datasets
+import src.models as models
+from options import Options
+import torch.nn.functional as F
+import pytorch_ssim
+from evaluation import compute_IoU, FScore, AverageMeter, compute_RMSE, normPRED
+from skimage.metrics import peak_signal_noise_ratio as ssim
+import time
 
 
-def crop_concat_back_preserve_size(patches, original_size, crop_size=128):
-    """
-    拼接回原始尺寸（精确裁剪，无尺寸误差）
-    patches: 分块推理结果
-    original_size: (H, W) 原始输入尺寸
-    return: [1, C, H, W] 与输入尺寸完全一致的输出
-    """
-    H_ori, W_ori = original_size
-    B = 1  # 固定batch_size=1
-    C = patches.shape[1]
-
-    # 计算分块数
-    n_patches = patches.shape[0] // B
-    n_w = int((W_ori + crop_size - 1) // crop_size)  # 向上取整
-    n_h = n_patches // n_w
-
-    # 按行拼接
-    rows = []
-    for i in range(n_h):
-        row_patches = patches[i * n_w * B: (i + 1) * n_w * B]
-        row = torch.cat([row_patches[j * B:(j + 1) * B] for j in range(n_w)], dim=3)
-        rows.append(row)
-
-    # 按列拼接
-    full_img = torch.cat(rows, dim=2)
-
-    # 精确裁剪回原始尺寸（关键！）
-    full_img = full_img[:, :, :H_ori, :W_ori]
-
-    return full_img
+def is_dic(x):
+    return type(x) == type([])
 
 
-# -------------------------- 主函数（无强制裁剪，保留原始尺寸） --------------------------
-def main():
-    # ====================== 只需改这里的路径 ======================
-    init_path = "/watermark/DocDiff-main/checksave/model_init_200000.pth"
-    denoiser_path = "/watermark/DocDiff-main/checksave/model_denoiser_200000.pth"
-    blur_img_path = "/home/fauyn/Aproject/watermark/DocDiff-main/demo/d238fbad8ae61fcaeb22ebc8a4afd6bd_720.jpg"
-    out_final = "./final_result.png"  # 输出图（尺寸和输入完全一致）
-    crop_size = 128  # 分块尺寸（可调整，建议128/256）
-    # ========================================================
 
-    # 检查文件
-    for f in [blur_img_path, init_path, denoiser_path]:
-        if not os.path.exists(f):
-            print(f"文件不存在: {f}")
-            sys.exit(1)
+def tensor2np(x, isMask=False):
+    if isMask:
+        if x.shape[1] == 1:
+            x = x.repeat(1,3,1,1)
+        x = ((x.cpu().detach()))*255
+    else:
+        x = x.cpu().detach()
+        mean = 0
+        std = 1
+        x = (x * std + mean)*255
+		
+    return x.numpy().transpose(0,2,3,1).astype(np.uint8)
 
-    # 加载图片（不做任何裁剪！保留原始尺寸）
-    img = Image.open(blur_img_path).convert('RGB')
-    original_width, original_height = img.size  # 记录原始尺寸
-    print(f"输入图原始尺寸: {original_width} x {original_height}")
+def save_output(inputs, preds, save_dir, img_fn, extra_infos=None,  verbose=False, alpha=0.5):
+    outs = []
+    image, bg_gt,mask_gt = inputs['I'], inputs['bg'], inputs['mask']
+    image = cv2.cvtColor(tensor2np(image)[0], cv2.COLOR_RGB2BGR)
+    # fg_gt = cv2.cvtColor(tensor2np(fg_gt)[0], cv2.COLOR_RGB2BGR)
+    bg_gt = cv2.cvtColor(tensor2np(bg_gt)[0], cv2.COLOR_RGB2BGR)
+    mask_gt = tensor2np(mask_gt, isMask=True)[0]
 
-    # 仅转换为张量，不做任何裁剪/缩放
-    img_tensor = ToTensor()(img).unsqueeze(0)  # [1, 3, H, W] 完全匹配原始尺寸
-    B, C, H, W = img_tensor.shape
-    print(f"输入张量尺寸: {H} x {W} (H x W)")
+    bg_pred,mask_preds = preds['bg'], preds['mask']
+    # fg_pred = cv2.cvtColor(tensor2np(fg_pred)[0], cv2.COLOR_RGB2BGR)
+    bg_pred = cv2.cvtColor(tensor2np(bg_pred)[0], cv2.COLOR_RGB2BGR)
+    mask_preds = [tensor2np(m, isMask=True)[0] for m in mask_preds]
+    main_mask = mask_preds[-2]
+    mask_pred = mask_preds[0]
+    outs = [image, bg_gt, bg_pred, mask_gt, mask_pred] #, main_mask]
+    outimg = np.concatenate(outs, axis=1)
+	
+    if verbose==True:
+        # print("show")
+        cv2.imshow("out",outimg)
+        cv2.waitKey(0)
+    else:
+        psnr = extra_infos['psnr']
+        rmsew = extra_infos['rmsew']
+        f1 = extra_infos['f1']
 
-    # 设备
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
+        img_fn = os.path.split(img_fn)[-1]
+        out_fn = os.path.join(save_dir, "{}_psnr_{:.2f}_rmsew_{:.2f}_f1_{:.4f}{}".format(os.path.splitext(img_fn)[0],psnr,rmsew, f1, os.path.splitext(img_fn)[1]))
+        cv2.imwrite(out_fn, outimg)
 
-    # 加载模型
-    network = DocDiff(
-        input_channels=6,
-        output_channels=3,
-        n_channels=32,
-        ch_mults=[1, 2, 3, 4],
-        n_blocks=1,
-    ).to(device)
 
-    # 加载权重
-    network.init_predictor.load_state_dict(
-        torch.load(init_path, map_location=device),
-        strict=False
-    )
-    network.denoiser.load_state_dict(
-        torch.load(denoiser_path, map_location=device),
-        strict=False
-    )
-    network.eval()
 
-    # 采样器
-    schedule = Schedule('linear', 100)
-    sampler = GaussianDiffusion(network.denoiser, 100, schedule).to(device)
 
-    # ====================== 分块推理（严格保留原始尺寸） ======================
-    print("生成最终修复图（尺寸与输入一致）...")
+
+def main(args):
+    args.dataset = args.dataset.lower()
+    if args.dataset == 'clwd':
+        dataset_func = datasets.CLWDDataset
+    elif args.dataset == 'lvw':
+        dataset_func = datasets.LVWDataset
+    
+    val_loader = torch.utils.data.DataLoader(dataset_func('test',args),batch_size=args.test_batch, shuffle=False,
+        num_workers=0, pin_memory=True)
+    data_loaders = (None,val_loader)
+
+    Machine = models.__dict__[args.models](datasets=data_loaders, args=args)
+
+    
+    model = Machine
+    model.model.eval()
+    print("==> testing VM model ")
+    rmses = AverageMeter()
+    rmsews = AverageMeter()
+    ssimesx = AverageMeter()
+    psnresx = AverageMeter()
+    maskIoU = AverageMeter()
+    maskF1 = AverageMeter()
+    prime_maskIoU = AverageMeter()
+    prime_maskF1 = AverageMeter()
+    processTime = AverageMeter()
+
+    prediction_dir = os.path.join(args.checkpoint,'rst')
+    if not os.path.exists(prediction_dir): os.makedirs(prediction_dir)
+    
+    save_flag = False
     with torch.no_grad():
-        # 分块（保留原始尺寸信息）
-        img_cropped, original_size = crop_concat_preserve_size(img_tensor, crop_size)
-        img_cropped_device = img_cropped.to(device)
+        for i, batches in enumerate(model.val_loader):
 
-        # 模型推理
-        noisyImage = torch.randn_like(img_cropped_device).to(device)
-        init_predict = network.init_predictor(img_cropped_device, 0)
-        sampledImgs = sampler(noisyImage, init_predict, 'True')
-        finalImgs = sampledImgs + init_predict
+            inputs = batches['image'].to(model.device)
+            target = batches['target'].to(model.device)
+            mask =batches['mask'].to(model.device)
+            wm =  batches['wm'].float().to(model.device)
+            img_path = batches['img_path']
 
-        # 拼接回原始尺寸（精确裁剪，无误差）
-        finalImgs = crop_concat_back_preserve_size(
-            finalImgs.cpu(),
-            original_size,
-            crop_size
-        )
+            # select the outputs by the giving arch
+            start_time = time.time()
+            outputs = model.model(model.norm(inputs))
+            process_time = time.time() - start_time
+            processTime.update((process_time*1000), inputs.size(0))
 
-        # 归一化（保证图片正常显示）
-        finalImgs = min_max(finalImgs)
+            imoutput,immask_all,imwatermark = outputs
+            imoutput = imoutput[0] if is_dic(imoutput) else imoutput
+            
+            immask = immask_all[0]
 
-    # 保存最终图（尺寸和输入100%一致）
-    save_image(finalImgs, out_final, normalize=False)
+            imfinal =imoutput*immask + model.norm(inputs)*(1-immask)
+            psnrx = 10 * log10(1 / F.mse_loss(imfinal,target).item())       
+            final_np = (imfinal.detach().cpu().numpy()[0].transpose(1,2,0)*255).astype(np.uint8)
+            target_np = (target.detach().cpu().numpy()[0].transpose(1,2,0)*255).astype(np.uint8)
+            # ssimx = ssim(final_np, target_np, multichannel=True)
+            ssimx = pytorch_ssim.ssim(imfinal, target)
+            
+            
+            
+            rmsex = compute_RMSE(imfinal, target, mask, is_w=False)
+            rmsewx = compute_RMSE(imfinal, target, mask, is_w=True)
+            rmses.update(rmsex, inputs.size(0))
+            rmsews.update(rmsewx, inputs.size(0))
+            psnresx.update(psnrx, inputs.size(0))
+            ssimesx.update(ssimx, inputs.size(0))
 
-    # 验证尺寸
-    output_img = Image.open(out_final)
-    output_width, output_height = output_img.size
-    print(f"输出图最终尺寸: {output_width} x {output_height}")
-    print(f"尺寸是否匹配: {output_width == original_width and output_height == original_height}")
-    print(f"✅ 最终修复图已保存：{out_final}")
+
+            main_mask = immask_all[1::2]
+            comp_mask = immask_all[2::2]
+            out_mask = main_mask[-1]
+            comp_mask = comp_mask[-1]
+            
+            comp_sets = []
+            prime_mask_pred = torch.where(out_mask > 0.5, torch.ones_like(out_mask), torch.zeros_like(out_mask)).to(out_mask.device)
+            mask_pred = torch.where(comp_mask > 0.5, torch.ones_like(out_mask), torch.zeros_like(out_mask)).to(out_mask.device)
+           
+            iou = compute_IoU(prime_mask_pred, mask)
+            prime_maskIoU.update(iou)
+            f1 = FScore(prime_mask_pred, mask).item()
+            prime_maskF1.update(f1, inputs.size(0))
+
+            iou = compute_IoU(mask_pred, mask)
+            maskIoU.update(iou)
+            f1 = FScore(mask_pred, mask).item()
+            maskF1.update(f1, inputs.size(0))
+
+            if save_flag:
+                save_output(
+                    inputs={'I':inputs, 'bg':target,  'mask':mask}, 
+                    preds={'bg':imfinal, 'mask':immask_all}, 
+                    save_dir=prediction_dir, 
+                    img_fn=img_path[0], 
+                    extra_infos={"psnr":psnrx, "rmsew":rmsewx, "f1":f1},
+                    verbose=False
+                )
+            if i % 100 == 0:
+                print("Batch[%d/%d]| PSNR:%.4f | SSIM:%.4f | RMSE:%.4f | RMSEw:%.4f | primeIoU:%.4f, primeF1:%.4f | maskIoU:%.4f | maskF1:%.4f | time:%.2f"
+                %(i,len(model.val_loader),psnresx.avg,ssimesx.avg, rmses.avg, rmsews.avg, prime_maskIoU.avg, prime_maskF1.avg, maskIoU.avg, maskF1.avg, processTime.avg))
+    print("Total:\nPSNR:%.4f | SSIM:%.4f | RMSE:%.4f | RMSEw:%.4f | primeIoU:%.4f, primeF1:%.4f | maskIoU:%.4f | maskF1:%.4f | time:%.2f"
+                %(psnresx.avg,ssimesx.avg, rmses.avg, rmsews.avg, prime_maskIoU.avg, prime_maskF1.avg, maskIoU.avg, maskF1.avg, processTime.avg))
+    print("DONE.\n")
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    parser=Options().init(argparse.ArgumentParser(description='WaterMark Removal'))
+    main(parser.parse_args())
+    
