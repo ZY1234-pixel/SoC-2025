@@ -9,6 +9,7 @@ import io
 import os
 import logging
 import math
+from pathlib import Path
 from collections import defaultdict
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
@@ -67,7 +68,9 @@ _LISTISH_RE = re.compile(
 _NUMBERED_TITLE_RE = re.compile(
     r"^\s*(\d+(?:\.\d+)*[\.、]|\d+[)）]|\(?\d+\)|[（(]?[一二三四五六七八九十百]+[)）\.、])\s*\S+"
 )
-_NUMBERED_TITLE_LEVEL_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)(?:[\.、])?\s*\S")
+_NUMBERED_TITLE_LEVEL_RE = re.compile(
+    r"^\s*(?:(\d+(?:\.\d+)*)(?:[\.、])?|[（(]?([一二三四五六七八九十百]+)[)）\.、])\s*\S"
+)
 
 
 class DocxRenderer(BaseRenderer):
@@ -105,12 +108,17 @@ class DocxRenderer(BaseRenderer):
     def render(self, document: "Document", output_path: str, **options) -> None:
         expected_pages = int(options.get("expected_pages", len(document.pages)))
         enforce_single_page = bool(options.get("enforce_single_page", True))
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        tmp_output = output.with_name(f".{output.name}.tmp")
         if enforce_single_page and expected_pages == 1:
             doc = self._render_single_page_fit(document, expected_pages, **options)
-            doc.save(output_path)
+            doc.save(tmp_output)
+            tmp_output.replace(output)
             return
         doc = self._build_docx(document, **options)
-        doc.save(output_path)
+        doc.save(tmp_output)
+        tmp_output.replace(output)
 
     def render_bytes(self, document: "Document", **options) -> bytes:
         expected_pages = int(options.get("expected_pages", len(document.pages)))
@@ -205,6 +213,7 @@ class DocxRenderer(BaseRenderer):
                     col_width_pt=usable_w_pt,
                     col_left_px=cl, col_right_px=cr,
                 )
+                setattr(ctx, "render_mode", page_render_mode)
                 prev_y = 0
                 for block in zone.blocks:
                     gap = max(0, block.bbox.y1 - prev_y)
@@ -1069,12 +1078,41 @@ class DocxRenderer(BaseRenderer):
         return max(1.0, width_ratio * wrap_risk)
 
     @staticmethod
-    def _is_wide_centered_single_line_title(block: TextBlock, page: "Page", alignment: str) -> bool:
+    def _visual_row_count(block: TextBlock) -> int:
+        centers: List[float] = []
+        heights: List[float] = []
+        for line in block.lines or []:
+            if line.y1 is None or line.y2 is None:
+                continue
+            y1 = float(line.y1)
+            y2 = float(line.y2)
+            centers.append((y1 + y2) * 0.5)
+            heights.append(max(y2 - y1, 1.0))
+        if not centers:
+            return block.count_lines()
+
+        heights_sorted = sorted(heights)
+        median_h = heights_sorted[len(heights_sorted) // 2]
+        threshold = max(median_h * 0.55, 2.0)
+        rows: List[float] = []
+        row_counts: List[int] = []
+        for center in sorted(centers):
+            if not rows or abs(center - rows[-1]) > threshold:
+                rows.append(center)
+                row_counts.append(1)
+                continue
+            count = row_counts[-1]
+            rows[-1] = (rows[-1] * count + center) / (count + 1)
+            row_counts[-1] = count + 1
+        return max(1, len(rows))
+
+    @classmethod
+    def _is_wide_centered_single_line_title(cls, block: TextBlock, page: "Page", alignment: str) -> bool:
         if block.block_type != BlockType.TITLE:
             return False
         if (alignment or "").lower() != "center":
             return False
-        if block.count_lines() != 1:
+        if cls._visual_row_count(block) != 1:
             return False
         return float(block.bbox.width) >= max(float(page.image_width) * 0.55, 1.0)
 
@@ -1091,7 +1129,10 @@ class DocxRenderer(BaseRenderer):
         match = _NUMBERED_TITLE_LEVEL_RE.match(text)
         if not match:
             return None
-        return match.group(1).count(".") + 1
+        numeric = match.group(1)
+        if numeric:
+            return numeric.count(".") + 1
+        return 1
 
     @staticmethod
     def _is_numbered_section_title(block: TextBlock) -> bool:
@@ -1108,14 +1149,12 @@ class DocxRenderer(BaseRenderer):
         title_level = self._title_level(block)
         if self._is_masthead_title(block, page, alignment):
             return min(font_size_pt * cfg.title_masthead_scale, cfg.title_masthead_cap)
-        if title_level == 1:
-            return min(font_size_pt * cfg.title_level1_scale, font_size_pt + cfg.title_level1_add, cfg.title_level1_cap)
-        if title_level == 2:
-            return min(font_size_pt * cfg.title_level2_scale, font_size_pt + cfg.title_level2_add, cfg.title_level2_cap)
-        if title_level and title_level >= 3:
-            return min(font_size_pt * cfg.title_level3_scale, font_size_pt + cfg.title_level3_add, cfg.title_level3_cap)
+        if title_level is not None:
+            return font_size_pt
         if self._is_wide_centered_single_line_title(block, page, alignment):
             return min(font_size_pt * cfg.title_wide_centered_scale, cfg.title_wide_centered_cap)
+        if self._visual_row_count(block) >= 2:
+            return min(font_size_pt * 1.06, cfg.title_default_cap)
         return min(font_size_pt * cfg.title_default_scale, cfg.title_default_cap)
 
     @staticmethod
@@ -1186,8 +1225,16 @@ class DocxRenderer(BaseRenderer):
 
         mapper = ctx.coord_mapper
         bbox = block.bbox
-        # 宽度上限：min(bbox宽度, 列宽98%)
+        # In table cells, recover image scale relative to the local column width
+        # instead of the full-page mapper; otherwise side-column figures become
+        # visibly undersized after the layout table narrows the available area.
+        local_col_px = max(float(ctx.col_right_px) - float(ctx.col_left_px), 1.0)
+        local_ratio = max(float(bbox.width), 1.0) / local_col_px
         pw = min(mapper.w(bbox.width), ctx.col_width_pt * 0.98)
+        if getattr(ctx, "in_table_cell", False):
+            pw = min(max(pw, ctx.col_width_pt * min(local_ratio, 0.98)), ctx.col_width_pt * 0.98)
+            if getattr(block, "block_type", None) == BlockType.FIGURE:
+                pw = min(max(pw, ctx.col_width_pt * 0.72), ctx.col_width_pt * 0.98)
         # 高度校正：仅对极宽的图片（宽高比 > 1.8，如横幅/全景图）才用高度约束，
         # 避免报纸/杂志中常见的横图（宽高比 ~1.2~1.6）被不必要地缩小。
         # 对于这类图片，目标列/跨列单元格通常足够高，按宽度渲染不会溢出。
@@ -1372,24 +1419,25 @@ class DocxRenderer(BaseRenderer):
             run = p.add_run(run_text)
             if is_title:
                 title_alignment = str(block_effective.get("alignment") or "left")
-                is_masthead = self._is_masthead_title(block, ctx.page, title_alignment)
-                title_level = self._title_level(block)
                 title_font_size = self._resolve_title_font_size_pt(
                     block=block,
                     page=ctx.page,
                     font_size_pt=float(run_style.get("font_size_pt") or self.config.default_font_size_pt),
                     alignment=title_alignment,
                 )
+                title_east_asia = self.config.title_font
+                if bs is not None and getattr(bs, "font_family", None):
+                    title_east_asia = east_asia
                 set_run_font(
                     run,
                     font_size=self._scale_font(title_font_size),
-                    bold=(bold or is_masthead or title_level is not None),
+                    bold=bold,
                     italic=italic,
                     underline=underline,
                     strikethrough=strike,
                     superscript=superscript,
                     subscript=subscript,
-                    east_asia=self.config.title_font,
+                    east_asia=title_east_asia,
                     font_name=font_name,
                     color_rgb=color,
                 )
@@ -1436,6 +1484,7 @@ class DocxRenderer(BaseRenderer):
                     preserve_breaks_on_ambiguous_justify=preserve_breaks_on_ambiguous_justify,
                     ambiguous_justify=ambiguous_justify,
                     visual_rows=visual_rows,
+                    render_mode=str(getattr(ctx, "render_mode", "") or ""),
                 )
                 for ri, row in enumerate(visual_rows):
                     prev_text = ""
@@ -1541,7 +1590,11 @@ class DocxRenderer(BaseRenderer):
             same_row = False
             if current_range is not None and y_range is not None and overlap_threshold is not None:
                 overlap = min(current_range[1], y_range[1]) - max(current_range[0], y_range[0])
-                if overlap > overlap_threshold:
+                row_center = (current_range[0] + current_range[1]) * 0.5
+                line_center = (y_range[0] + y_range[1]) * 0.5
+                center_delta = abs(line_center - row_center)
+                center_threshold = max(avg_h * 0.48, 2.0) if avg_h > 0 else 2.0
+                if overlap > overlap_threshold and center_delta <= center_threshold:
                     same_row = True
 
             if same_row:
@@ -1604,10 +1657,13 @@ class DocxRenderer(BaseRenderer):
         preserve_breaks_on_ambiguous_justify: bool,
         ambiguous_justify: bool,
         visual_rows: List[List[object]],
+        render_mode: str = "",
     ) -> bool:
         if block.block_type in _CAPTION_TYPES:
             return True
         if not preserve_line_breaks:
+            return False
+        if render_mode == "reflow" and block.block_type == BlockType.TEXT:
             return False
 
         row_count = len(visual_rows)
@@ -1879,28 +1935,6 @@ class DocxRenderer(BaseRenderer):
                             col_width_pt=mwidth, col_left_px=sl,
                             col_right_px=sr, in_table_cell=True)
 
-        span_top = min((b.bbox.y1 for b in span_blks), default=float("inf"))
-        span_bottom = max((b.bbox.y2 for b in span_blks), default=float("-inf"))
-        above = {ci: [] for ci in spanned_cols}
-        below = {ci: [] for ci in spanned_cols}
-        for ci in spanned_cols:
-            col_singletons = sorted(
-                [b for b in blocks if b.col_index == ci and len(b.spanned_cols) == 1],
-                key=lambda b: b.bbox.y1,
-            )
-            for block in col_singletons:
-                if not span_blks:
-                    above[ci].append(block)
-                    continue
-                if float(block.bbox.y2) <= float(span_top) + 8.0:
-                    above[ci].append(block)
-                elif float(block.bbox.y1) >= float(span_bottom) - 8.0:
-                    below[ci].append(block)
-                elif ((float(block.bbox.y1) + float(block.bbox.y2)) * 0.5) <= ((float(span_top) + float(span_bottom)) * 0.5):
-                    above[ci].append(block)
-                else:
-                    below[ci].append(block)
-
         def _render_spanned_singletons(grouped_blocks: dict) -> None:
             if not any(len(v) > 0 for v in grouped_blocks.values()):
                 return
@@ -1943,16 +1977,42 @@ class DocxRenderer(BaseRenderer):
                     for block in grouped_blocks[ci]:
                         self._render_block(mcell, block, ctx_fallback, space_before=0)
 
-        _render_spanned_singletons(above)
+        singletons_by_col = {
+            ci: sorted(
+                [b for b in blocks if b.col_index == ci and len(b.spanned_cols) == 1],
+                key=lambda b: (b.bbox.y1, b.bbox.x1, b.bbox.y2),
+            )
+            for ci in spanned_cols
+        }
+        consumed_singletons: set[int] = set()
+
+        def _blocks_before_y(limit_y: float) -> dict:
+            grouped = {ci: [] for ci in spanned_cols}
+            for ci in spanned_cols:
+                for block in singletons_by_col[ci]:
+                    if id(block) in consumed_singletons:
+                        continue
+                    if float(block.bbox.y1) < float(limit_y) - 2.0:
+                        grouped[ci].append(block)
+                        consumed_singletons.add(id(block))
+            return grouped
 
         prev_y = 0
         for block in span_blks:
+            _render_spanned_singletons(_blocks_before_y(float(block.bbox.y1)))
             gap = max(0, block.bbox.y1 - prev_y)
             sp = self._scale(min(mapper.h(gap), 12)) if (prev_y > 0 and gap > 2) else 0
             self._render_block(mcell, block, ctx, space_before=sp)
             prev_y = block.bbox.y2
 
-        _render_spanned_singletons(below)
+        tail = {ci: [] for ci in spanned_cols}
+        for ci in spanned_cols:
+            for block in singletons_by_col[ci]:
+                if id(block) in consumed_singletons:
+                    continue
+                tail[ci].append(block)
+                consumed_singletons.add(id(block))
+        _render_spanned_singletons(tail)
         self._prune_leading_empty_cell_paragraphs(mcell)
 
     # ------------------------------------------------------------------

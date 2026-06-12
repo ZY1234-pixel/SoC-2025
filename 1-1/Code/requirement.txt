@@ -9,6 +9,8 @@ Pillow>=9.0
 pyyaml>=6.0
 tqdm>=4.66
 requests>=2.31
+torch>=2.0
+torchvision>=0.15
 
 # OCR 运行依赖（CPU）
 paddlepaddle==3.0.0

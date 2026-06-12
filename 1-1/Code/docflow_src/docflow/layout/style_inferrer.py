@@ -36,7 +36,19 @@ _CAPTION_TYPES: frozenset = frozenset({
     BlockType.TABLE_FOOTNOTE,
     BlockType.FORMULA_CAPTION,
 })
-_NUMBERED_TITLE_LEVEL_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)(?:[\.、])?\s*\S")
+_NUMBERED_TITLE_LEVEL_RE = re.compile(
+    r"^\s*(?:(\d+(?:\.\d+)*)(?:[\.、])?|[（(]?([一二三四五六七八九十百]+)[)）\.、])\s*\S"
+)
+
+
+def _numbered_title_level(text: str) -> Optional[int]:
+    match = _NUMBERED_TITLE_LEVEL_RE.match((text or "").strip())
+    if not match:
+        return None
+    numeric = match.group(1)
+    if numeric:
+        return numeric.count(".") + 1
+    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +60,7 @@ def infer_block_styles(
     mapper: "CoordMapper",
     justify_min_lines: int = 3,
     page_width_px: float = 0.0,
+    font_mapper: Optional["CoordMapper"] = None,
 ) -> None:
     """推断并填充所有 TextBlock 的 block.style。
 
@@ -60,8 +73,11 @@ def infer_block_styles(
         已完成 col_index 分配的 Zone 列表（来自 pipeline 的 _blocks_to_zones）。
     mapper:
         坐标映射器，用于 px → pt 转换。
+    font_mapper:
+        字号/行高换算使用的坐标映射器。未提供时回退为 *mapper*。
     """
     all_text_blocks: List[TextBlock] = []
+    font_mapper = font_mapper or mapper
 
     for zone in zones:
         # 列边界优先使用文本块；若该列无文本块，再回退到全区块边界。
@@ -101,16 +117,18 @@ def infer_block_styles(
                     col_px_text=col_px_text,
                     col_px_all=col_px_all,
                     mapper=mapper,
+                    font_mapper=font_mapper,
                     justify_min_lines=justify_min_lines,
                 )
                 all_text_blocks.append(block)
 
     # 对同类别区块的字号离群值归一化
     _normalize_category_styles(all_text_blocks)
+    _normalize_numbered_heading_styles(all_text_blocks)
 
     # 使用推断出的行距修正字号（设计文档 §4.1：字号应在源页面坐标系中推断）
     # 初始估算假设 line_spacing ≈ 1.15，现用实际推断值修正
-    _refine_font_size_from_line_spacing(all_text_blocks, mapper)
+    _refine_font_size_from_line_spacing(all_text_blocks, font_mapper)
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +140,7 @@ def _infer_text_block(
     col_px_text: dict,
     col_px_all: dict,
     mapper: "CoordMapper",
+    font_mapper: "CoordMapper",
     justify_min_lines: int,
 ) -> None:
     """对单个 TextBlock 推断并填充缺失的 style 字段。
@@ -165,7 +184,7 @@ def _infer_text_block(
 
     # ── 行距（乘数） ──────────────────────────────────────────────────
     if bs.line_spacing is None:
-        ls_mul = _estimate_line_spacing(block, font_size, mapper)
+        ls_mul = _estimate_line_spacing(block, font_size, font_mapper)
         if ls_mul is not None:
             bs.line_spacing = ls_mul
 
@@ -235,12 +254,36 @@ def _infer_paragraph_indents(block: TextBlock) -> None:
 # ---------------------------------------------------------------------------
 
 def _extract_line_edges(block: TextBlock) -> List[Tuple[float, float]]:
-    line_edges: List[Tuple[float, float]] = []
+    segments: List[Tuple[float, float, float, float]] = []
     for ln in block.lines:
-        if ln.x1 is None or ln.x2 is None:
+        if ln.x1 is None or ln.x2 is None or ln.y1 is None or ln.y2 is None:
             continue
-        line_edges.append((float(ln.x1), float(ln.x2)))
-    return line_edges
+        segments.append((float(ln.x1), float(ln.y1), float(ln.x2), float(ln.y2)))
+    if not segments:
+        return []
+
+    # OCR often splits a single visual title row into several adjacent text
+    # snippets. Alignment should be based on visual rows, not individual snippets.
+    segments.sort(key=lambda item: (((item[1] + item[3]) * 0.5), item[0]))
+    rows: List[List[Tuple[float, float, float, float]]] = []
+    for seg in segments:
+        _, y1, _, y2 = seg
+        center_y = (y1 + y2) * 0.5
+        height = max(y2 - y1, 1.0)
+        if not rows:
+            rows.append([seg])
+            continue
+        last = rows[-1]
+        last_y1 = min(item[1] for item in last)
+        last_y2 = max(item[3] for item in last)
+        last_center_y = (last_y1 + last_y2) * 0.5
+        last_height = max(last_y2 - last_y1, 1.0)
+        if abs(center_y - last_center_y) <= max(height, last_height) * 0.58:
+            last.append(seg)
+        else:
+            rows.append([seg])
+
+    return [(min(item[0] for item in row), max(item[2] for item in row)) for row in rows]
 
 
 def _center_evidence(
@@ -279,11 +322,7 @@ def _detect_alignment(
 ) -> str:
     """按文本行几何分布推断对齐方式（行级主导）。"""
     def _title_level() -> Optional[int]:
-        text = (block.full_text() or "").strip()
-        match = _NUMBERED_TITLE_LEVEL_RE.match(text)
-        if not match:
-            return None
-        return match.group(1).count(".") + 1
+        return _numbered_title_level(block.full_text() or "")
 
     if is_caption:
         return "center"
@@ -466,6 +505,45 @@ def _normalize_category_styles(blocks: List[TextBlock]) -> None:
         _cluster_normalize_line_spacing(cat_blocks, merge_gap=0.15)
 
 
+def _normalize_numbered_heading_styles(blocks: List[TextBlock]) -> None:
+    """同级编号标题字号归一。
+
+    版面模型可能把同级标题切成不同高度的 bbox；编号标题的层级提供了
+    更强的结构证据，因此在同一层级内使用中位数字号消除测量噪声。
+    """
+    from collections import defaultdict
+
+    by_level: dict[int, List[TextBlock]] = defaultdict(list)
+    body_sizes: List[float] = []
+    for block in blocks:
+        if (
+            block.block_type == BlockType.TEXT
+            and block.style is not None
+            and block.style.font_size_pt is not None
+            and block.count_lines() >= 2
+        ):
+            body_sizes.append(float(block.style.font_size_pt))
+        if block.block_type != BlockType.TITLE or block.style is None:
+            continue
+        if block.style.font_size_pt is None:
+            continue
+        level = _numbered_title_level(block.full_text() or "")
+        if level is None:
+            continue
+        by_level[level].append(block)
+
+    for level_blocks in by_level.values():
+        if len(level_blocks) < 2:
+            continue
+        sizes = [float(block.style.font_size_pt) for block in level_blocks]
+        norm_fs = round(_weighted_median(sizes) * 2) / 2.0
+        if body_sizes:
+            body_ref = _weighted_median(body_sizes)
+            norm_fs = min(norm_fs, round(body_ref * 1.12 * 2) / 2.0)
+        for block in level_blocks:
+            block.style.font_size_pt = norm_fs
+
+
 def _cluster_1d(values: List[float], merge_gap: float):
     """对一维有序数值做贪心聚类，返回 list[list[int]]（每簇的原始索引列表）。
 
@@ -489,7 +567,10 @@ def _cluster_1d(values: List[float], merge_gap: float):
 def _weighted_median(values: List[float]) -> float:
     """简单中位数（不做加权，对小样本足够鲁棒）。"""
     s = sorted(values)
-    return s[len(s) // 2]
+    mid = len(s) // 2
+    if len(s) % 2:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2.0
 
 
 def _cluster_normalize_font_size(

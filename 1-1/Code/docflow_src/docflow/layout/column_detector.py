@@ -159,6 +159,154 @@ def _should_collapse_single_row_fragments(blocks: List["Block"], image_width: in
     return True
 
 
+def _x_center(block: "Block") -> float:
+    return (float(block.bbox.x1) + float(block.bbox.x2)) * 0.5
+
+
+def _is_textlike_for_skeleton(block: "Block") -> bool:
+    return _block_type_value(block) in _ROW_TEXTLIKE_TYPES
+
+
+def _is_narrow_body_candidate(block: "Block", image_width: int) -> bool:
+    page_w = max(float(image_width), 1.0)
+    width = max(1.0, float(block.bbox.width))
+    text = _block_text(block).strip()
+    if not _is_textlike_for_skeleton(block):
+        return False
+    if _block_type_value(block) in _ROW_CAPTION_TYPES:
+        return False
+    # 极短的单字/单标签更像局部标记，不应成为全局列骨架锚点。
+    if width <= page_w * 0.10 and _line_count(block) <= 1 and len(text) <= 8:
+        return False
+    # 先用更稳定的窄正文骨架做全局列提案，避免局部宽块把相邻列粘连。
+    return width <= page_w * 0.32
+
+
+def _cluster_by_centers(
+    blocks: List["Block"],
+    image_width: int,
+    *,
+    max_cols: int,
+    cluster_thresh: float,
+) -> List[Tuple[float, List["Block"]]]:
+    if not blocks:
+        return []
+
+    threshold = max(float(image_width) * cluster_thresh, 1.0)
+    columns: List[Tuple[float, List["Block"]]] = []
+    for blk in sorted(blocks, key=lambda b: (_x_center(b), float(b.bbox.x1), float(b.bbox.y1))):
+        center = _x_center(blk)
+        best_idx = -1
+        best_dist = float("inf")
+        for idx, (avg_center, _members) in enumerate(columns):
+            dist = abs(center - avg_center)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+
+        if best_idx >= 0 and best_dist < threshold:
+            avg_center, members = columns[best_idx]
+            members.append(blk)
+            columns[best_idx] = (
+                (avg_center * (len(members) - 1) + center) / len(members),
+                members,
+            )
+        else:
+            columns.append((center, [blk]))
+
+    columns.sort(key=lambda item: item[0])
+    while len(columns) > max_cols:
+        min_gap = float("inf")
+        merge_idx = 0
+        for i in range(len(columns) - 1):
+            gap = columns[i + 1][0] - columns[i][0]
+            if gap < min_gap:
+                min_gap = gap
+                merge_idx = i
+        avg1, members1 = columns[merge_idx]
+        avg2, members2 = columns[merge_idx + 1]
+        merged_members = members1 + members2
+        merged_avg = (avg1 * len(members1) + avg2 * len(members2)) / max(len(merged_members), 1)
+        columns[merge_idx] = (merged_avg, merged_members)
+        del columns[merge_idx + 1]
+    return columns
+
+
+def _cluster_by_left_edges(
+    blocks: List["Block"],
+    image_width: int,
+    *,
+    max_cols: int,
+    cluster_thresh: float,
+) -> List[Tuple[float, List["Block"]]]:
+    if not blocks:
+        return []
+
+    sorted_blocks = sorted(blocks, key=lambda b: float(b.bbox.x1))
+    threshold = max(float(image_width) * cluster_thresh, 1.0)
+    columns: List[Tuple[float, List["Block"]]] = []
+
+    for blk in sorted_blocks:
+        x1 = float(blk.bbox.x1)
+        x_center = _x_center(blk)
+        best_idx = -1
+        best_dist = float("inf")
+
+        for idx, (avg_x1, _members) in enumerate(columns):
+            dist = abs(x1 - avg_x1)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+
+        if best_dist < threshold and best_idx >= 0:
+            avg_x1, members = columns[best_idx]
+            members.append(blk)
+            columns[best_idx] = (
+                (avg_x1 * (len(members) - 1) + x1) / len(members),
+                members,
+            )
+            continue
+
+        contained_idx = -1
+        for idx, (_avg_x1, members) in enumerate(columns):
+            col_x1 = min(float(b.bbox.x1) for b in members)
+            col_x2 = max(float(b.bbox.x2) for b in members)
+            if col_x1 <= x_center <= col_x2:
+                contained_idx = idx
+                break
+        if contained_idx >= 0:
+            avg_x1, members = columns[contained_idx]
+            members.append(blk)
+            columns[contained_idx] = (
+                (avg_x1 * (len(members) - 1) + x1) / len(members),
+                members,
+            )
+        else:
+            columns.append((x1, [blk]))
+
+    def _col_center(col_tuple: Tuple[float, List["Block"]]) -> float:
+        _avg_x1, members = col_tuple
+        return sum(_x_center(b) for b in members) / max(len(members), 1)
+
+    columns.sort(key=_col_center)
+    while len(columns) > max_cols:
+        min_gap = float("inf")
+        merge_idx = 0
+        for i in range(len(columns) - 1):
+            gap = _col_center(columns[i + 1]) - _col_center(columns[i])
+            if gap < min_gap:
+                min_gap = gap
+                merge_idx = i
+
+        avg1, members1 = columns[merge_idx]
+        avg2, members2 = columns[merge_idx + 1]
+        merged_members = members1 + members2
+        merged_avg = (avg1 * len(members1) + avg2 * len(members2)) / max(len(merged_members), 1)
+        columns[merge_idx] = (merged_avg, merged_members)
+        del columns[merge_idx + 1]
+    return columns
+
+
 # ------------------------------------------------------------------
 # 列检测
 # ------------------------------------------------------------------
@@ -202,85 +350,44 @@ def detect_columns(
         x2_robust = x2_values[1] if len(x2_values) > 1 else x2_values[0]
         return [members], [(x1_min, x2_robust)]
 
-    sorted_blocks = sorted(text_blocks, key=lambda b: b.bbox.x1)
-    threshold = image_width * cluster_thresh
+    skeleton_source = [blk for blk in text_blocks if _is_narrow_body_candidate(blk, image_width)]
+    if len(skeleton_source) >= 3:
+        columns = _cluster_by_centers(
+            skeleton_source,
+            image_width,
+            max_cols=max_cols,
+            cluster_thresh=min(cluster_thresh, 0.08),
+        )
+    else:
+        columns = _cluster_by_left_edges(
+            text_blocks,
+            image_width,
+            max_cols=max_cols,
+            cluster_thresh=cluster_thresh,
+        )
 
-    # 每列表示为 (average_x1, [blocks])
-    columns: List[Tuple[float, List["Block"]]] = []
+    if not columns:
+        return [], []
 
-    for blk in sorted_blocks:
-        x1 = blk.bbox.x1
-        x_center = (blk.bbox.x1 + blk.bbox.x2) / 2
-        best_idx = -1
-        best_dist = float("inf")
+    if len(columns) == 1 and len(skeleton_source) >= 2:
+        relaxed = _cluster_by_centers(
+            skeleton_source,
+            image_width,
+            max_cols=max_cols,
+            cluster_thresh=min(cluster_thresh, 0.055),
+        )
+        if len(relaxed) > len(columns):
+            columns = relaxed
 
-        for idx, (avg_x1, _members) in enumerate(columns):
-            dist = abs(x1 - avg_x1)
-            if dist < best_dist:
-                best_dist = dist
-                best_idx = idx
-
-        if best_dist < threshold and best_idx >= 0:
-            avg_x1, members = columns[best_idx]
-            members.append(blk)
-            # 更新 x1 的移动平均
-            columns[best_idx] = (
-                (avg_x1 * (len(members) - 1) + x1) / len(members),
-                members,
-            )
-        else:
-            # 创建新列前，检查区块的 x 中心是否
-            # 落在已有列的 x 范围内。  This handles
-            # 处理x1远离列平均值但仍属于该列
-            # 的窄区块（如公式编号、短标题）。
-            contained_idx = -1
-            for idx, (_avg_x1, members) in enumerate(columns):
-                col_x1 = min(b.bbox.x1 for b in members)
-                col_x2 = max(b.bbox.x2 for b in members)
-                if col_x1 <= x_center <= col_x2:
-                    contained_idx = idx
-                    break
-            if contained_idx >= 0:
-                avg_x1, members = columns[contained_idx]
-                members.append(blk)
-                columns[contained_idx] = (
-                    (avg_x1 * (len(members) - 1) + x1) / len(members),
-                    members,
-                )
-            else:
-                columns.append((x1, [blk]))
-
-    # 按成员的平均中心 x 从左到右排序列
     def _col_center(col_tuple: Tuple[float, List["Block"]]) -> float:
-        _avg_x1, members = col_tuple
-        return sum((b.bbox.x1 + b.bbox.x2) / 2 for b in members) / max(len(members), 1)
-
-    columns.sort(key=_col_center)
-
-    # 合并多余的列：反复合并间距最小的
-    # 两个相邻列。
-    while len(columns) > max_cols:
-        min_gap = float("inf")
-        merge_idx = 0
-        for i in range(len(columns) - 1):
-            gap = _col_center(columns[i + 1]) - _col_center(columns[i])
-            if gap < min_gap:
-                min_gap = gap
-                merge_idx = i
-
-        # 合并 columns[merge_idx] 和 columns[merge_idx + 1]
-        avg1, members1 = columns[merge_idx]
-        avg2, members2 = columns[merge_idx + 1]
-        merged_members = members1 + members2
-        merged_avg = (avg1 * len(members1) + avg2 * len(members2)) / max(len(merged_members), 1)
-        columns[merge_idx] = (merged_avg, merged_members)
-        del columns[merge_idx + 1]
+        _avg, members = col_tuple
+        return sum(_x_center(b) for b in members) / max(len(members), 1)
 
     # 构建输出列表
     col_blocks: List[List["Block"]] = []
     col_bounds: List[Tuple[float, float]] = []
 
-    for _avg_x1, members in columns:
+    for _avg_x1, members in sorted(columns, key=_col_center):
         col_blocks.append(members)
         x1_min = min(b.bbox.x1 for b in members)
         x2_values = sorted([b.bbox.x2 for b in members], reverse=True)
@@ -288,7 +395,23 @@ def detect_columns(
         x2_robust = x2_values[1] if len(x2_values) > 1 else x2_values[0]
         col_bounds.append((x1_min, x2_robust))
 
-    return col_blocks, col_bounds
+    # 合并 X 范围明显重叠的相邻列（防止窄块被错误聚成独立列）
+    merged_blocks: List[List["Block"]] = []
+    merged_bounds: List[Tuple[float, float]] = []
+    for i, (blocks_i, (x1_i, x2_i)) in enumerate(zip(col_blocks, col_bounds)):
+        if merged_bounds:
+            prev_blocks = merged_blocks[-1]
+            _px1, px2 = merged_bounds[-1]
+            overlap = min(x2_i, px2) - max(x1_i, _px1)
+            narrower = min(x2_i - x1_i, px2 - _px1)
+            if narrower > 0 and overlap > narrower * 0.30:
+                merged_blocks[-1] = prev_blocks + blocks_i
+                merged_bounds[-1] = (min(_px1, x1_i), max(px2, x2_i))
+                continue
+        merged_blocks.append(blocks_i)
+        merged_bounds.append((x1_i, x2_i))
+
+    return merged_blocks, merged_bounds
 
 
 # ------------------------------------------------------------------
