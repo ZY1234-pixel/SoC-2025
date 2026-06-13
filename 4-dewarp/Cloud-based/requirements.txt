@@ -1,0 +1,9 @@
+# Tested with Python 3.9.
+# CUDA 12.8 PyTorch wheel. If the target GPU server uses another CUDA stack,
+# install the matching torch wheel from https://pytorch.org/get-started/locally/.
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch==2.8.0+cu128
+numpy==2.0.2
+opencv-python>=4.10.0,<5
+Pillow==11.3.0
