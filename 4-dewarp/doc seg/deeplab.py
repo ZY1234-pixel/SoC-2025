@@ -37,6 +37,15 @@ def refine_mask(mask):
     return mask.astype(np.uint8)
 
 
+def mask_to_edge(mask, edge_width=2):
+    edge_width = max(1, int(edge_width))
+    mask = (mask > 0).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    edge = np.zeros_like(mask)
+    cv2.drawContours(edge, contours, -1, 255, thickness=edge_width)
+    return edge.astype(np.uint8)
+
+
 class DeeplabV3:
     def __init__(
         self,
@@ -45,6 +54,8 @@ class DeeplabV3:
         downsample_factor=8,
         book_threshold=0.65,
         blend_alpha=0.7,
+        # 0: blend output, 1: 0-255 mask output.
+        mix_type=1,
     ):
         self.model_path = model_path
         self.num_classes = 2
@@ -52,6 +63,7 @@ class DeeplabV3:
         self.downsample_factor = downsample_factor
         self.book_threshold = book_threshold
         self.blend_alpha = blend_alpha
+        self.mix_type = mix_type
         self.colors = np.array([(0, 0, 0), (128, 0, 0)], dtype=np.uint8)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.net = self._load_model()
@@ -95,9 +107,21 @@ class DeeplabV3:
         mask = (prediction[..., 1] >= self.book_threshold).astype(np.uint8)
         return refine_mask(mask)
 
-    def detect_image(self, image):
+    def detect_image(self, image, output_type="mask", edge_width=2):
         image = cvtColor(image)
         mask = self._predict_mask(image)
+        if output_type == "edge":
+            return Image.fromarray(mask_to_edge(mask, edge_width=edge_width))
+
+        if output_type != "mask":
+            raise ValueError("output_type only supports 'mask' or 'edge'")
+
+        if self.mix_type == 1:
+            return Image.fromarray((mask * 255).astype(np.uint8))
+
+        if self.mix_type != 0:
+            raise ValueError("mix_type only supports 0(blend image) or 1(0-255 mask)")
+
         overlay = self.colors[mask.reshape(-1)].reshape(mask.shape[0], mask.shape[1], 3)
         overlay = Image.fromarray(overlay)
         return Image.blend(image, overlay, self.blend_alpha)

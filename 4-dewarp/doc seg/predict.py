@@ -8,6 +8,12 @@ from deeplab import DeeplabV3
 IMAGE_EXTENSIONS = (".bmp", ".dib", ".png", ".jpg", ".jpeg", ".pbm", ".pgm", ".ppm", ".tif", ".tiff")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Change this value to choose output:
+# "mask": save segmentation mask
+# "edge": save contour edge
+OUTPUT_TYPE = "mask"
+EDGE_WIDTH = 2
+
 
 def main():
     image_dir = os.path.join(BASE_DIR, "img")
@@ -21,10 +27,15 @@ def main():
             continue
 
         image_path = os.path.join(image_dir, image_name)
-        save_path = os.path.join(save_dir, image_name)
+        save_name = os.path.splitext(image_name)[0] + ".png"
+        save_path = os.path.join(save_dir, save_name)
 
         image = Image.open(image_path)
-        result = deeplab.detect_image(image)
+        result = deeplab.detect_image(
+            image,
+            output_type=OUTPUT_TYPE,
+            edge_width=EDGE_WIDTH,
+        )
         result.save(save_path)
         print(f"saved: {save_path}")
 
