@@ -4,13 +4,10 @@
 #include <filesystem>
 #include <chrono>
 #include <algorithm>
-#include <cerrno>
 #include <cctype>
 #include <cstdint>
-#include <cstring>
 #include <fstream>
-#include <sys/wait.h>
-#include <unistd.h>
+#include <iomanip>
 #include <opencv2/opencv.hpp>
 
 #include "deeplabv3p_ncnn.h"
@@ -147,17 +144,51 @@ static fs::path make_filled_save_path(const fs::path& mask_save_path) {
     return filled_path;
 }
 
-static fs::path current_executable_path(const char* argv0) {
-    char path_buf[4096] = {0};
-    ssize_t len = readlink("/proc/self/exe", path_buf, sizeof(path_buf) - 1);
-    if (len > 0) {
-        path_buf[len] = '\0';
-        return fs::path(path_buf);
-    }
-    return fs::absolute(argv0);
+static fs::path make_mask_save_path(const fs::path& image_save_path) {
+    fs::path mask_dir = image_save_path.parent_path() / "mask";
+    return mask_dir / (image_save_path.stem().string() + ".png");
 }
 
-static bool process_one(const fs::path& input_path, const fs::path& save_path) {
+static const char* keypoint_name(size_t index) {
+    if (index == 0) return "spine_top";
+    if (index == 1) return "spine_bottom";
+    return "keypoint";
+}
+
+static void append_keypoints_csv(
+    const fs::path& csv_path,
+    const std::string& image_name,
+    const std::vector<DeeplabV3_NCNN::KeypointResult>& keypoints
+) {
+    bool write_header = true;
+    if (fs::exists(csv_path)) {
+        std::error_code ec;
+        write_header = fs::file_size(csv_path, ec) == 0;
+    }
+
+    std::ofstream csv(csv_path, std::ios::app);
+    if (!csv) {
+        std::cerr << "Failed to open keypoints csv: " << csv_path << std::endl;
+        return;
+    }
+
+    if (write_header) {
+        csv << "image,point_index,point_name,x,y,score\n";
+    }
+
+    csv << std::fixed << std::setprecision(3);
+    for (size_t i = 0; i < keypoints.size(); ++i) {
+        csv << image_name << ','
+            << i << ','
+            << keypoint_name(i) << ','
+            << keypoints[i].point.x << ','
+            << keypoints[i].point.y << ','
+            << std::setprecision(6) << keypoints[i].score
+            << std::setprecision(3) << '\n';
+    }
+}
+
+static bool process_one(DeeplabV3_NCNN& deeplab, const fs::path& input_path, const fs::path& save_path) {
     cv::Mat image = cv::imread(input_path.string(), cv::IMREAD_COLOR | cv::IMREAD_IGNORE_ORIENTATION);
     if (image.empty()) {
         std::cerr << "Failed to read image: " << input_path << std::endl;
@@ -165,10 +196,11 @@ static bool process_one(const fs::path& input_path, const fs::path& save_path) {
     }
     apply_exif_orientation(image, read_exif_orientation(input_path));
 
-    auto start = std::chrono::high_resolution_clock::now();
-    DeeplabV3_NCNN deeplab;
     cv::Mat filled_image;
-    cv::Mat result = deeplab.detect_image(image, &filled_image);
+    cv::Mat mask;
+    std::vector<DeeplabV3_NCNN::KeypointResult> keypoints;
+    auto start = std::chrono::high_resolution_clock::now();
+    cv::Mat result = deeplab.detect_image(image, &filled_image, &keypoints, &mask);
     auto end = std::chrono::high_resolution_clock::now();
 
     if (result.empty()) {
@@ -195,6 +227,24 @@ static bool process_one(const fs::path& input_path, const fs::path& save_path) {
         return false;
     }
 
+    fs::path mask_save_path;
+    if (!mask.empty()) {
+        mask_save_path = make_mask_save_path(actual_save_path);
+        if (!fs::exists(mask_save_path.parent_path())) {
+            fs::create_directories(mask_save_path.parent_path());
+        }
+        if (!cv::imwrite(mask_save_path.string(), mask)) {
+            std::cerr << "Failed to save mask: " << mask_save_path << std::endl;
+            return false;
+        }
+    }
+
+    append_keypoints_csv(
+        actual_save_path.parent_path() / "keypoints.csv",
+        input_path.filename().string(),
+        keypoints
+    );
+
     fs::path filled_save_path;
     if (!filled_image.empty()) {
         filled_save_path = make_filled_save_path(actual_save_path);
@@ -211,6 +261,12 @@ static bool process_one(const fs::path& input_path, const fs::path& save_path) {
               << " | inference time: "
               << infer_time_ms << " ms"
               << " | saved: " << actual_save_path;
+    if (!mask.empty()) {
+        std::cout << " | mask: " << mask_save_path;
+    }
+    if (!keypoints.empty()) {
+        std::cout << " | keypoints: " << keypoints.size();
+    }
     if (!filled_image.empty()) {
         std::cout << " | filled: " << filled_save_path;
     }
@@ -219,53 +275,11 @@ static bool process_one(const fs::path& input_path, const fs::path& save_path) {
     return true;
 }
 
-static bool process_one_in_child(const fs::path& exe_path, const fs::path& input_path, const fs::path& save_path) {
-    if (!fs::exists(save_path.parent_path())) {
-        fs::create_directories(save_path.parent_path());
-    }
-
-    std::string exe = exe_path.string();
-    std::string input = input_path.string();
-    std::string output = save_path.string();
-
-    constexpr int max_attempts = 3;
-    for (int attempt = 1; attempt <= max_attempts; ++attempt) {
-        pid_t pid = fork();
-        if (pid < 0) {
-            std::cerr << "Failed to fork for image: " << input_path << std::endl;
-            return false;
-        }
-
-        if (pid == 0) {
-            execl(exe.c_str(), exe.c_str(), input.c_str(), output.c_str(), static_cast<char*>(nullptr));
-            std::cerr << "Failed to exec child process: " << exe_path
-                      << " error=" << std::strerror(errno) << std::endl;
-            _exit(127);
-        }
-
-        int status = 0;
-        if (waitpid(pid, &status, 0) < 0) {
-            std::cerr << "Failed to wait child process: " << input_path << std::endl;
-            return false;
-        }
-
-        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-            return true;
-        }
-
-        std::cerr << "Child inference failed: " << input_path
-                  << " attempt=" << attempt
-                  << " status=" << status << std::endl;
-    }
-
-    return false;
-}
-
 int main(int argc, char** argv) {
     std::cout << "main start" << std::endl;
-    fs::path exe_path = current_executable_path(argv[0]);
     fs::path dir_origin_path = DeeplabV3_NCNN::kDefaultInputPath;
     fs::path dir_save_path   = DeeplabV3_NCNN::kDefaultSavePath;
+    DeeplabV3_NCNN deeplab;
 
     if (argc >= 2) {
         fs::path input_path = argv[1];
@@ -280,7 +294,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 fs::path save_path = output_dir / entry.path().filename();
-                if (process_one_in_child(exe_path, entry.path(), save_path)) {
+                if (process_one(deeplab, entry.path(), save_path)) {
                     processed++;
                 } else {
                     failed++;
@@ -291,7 +305,7 @@ int main(int argc, char** argv) {
         }
 
         fs::path save_path = argc >= 3 ? fs::path(argv[2]) : (dir_save_path / input_path.filename());
-        bool ok = process_one(input_path, save_path);
+        bool ok = process_one(deeplab, input_path, save_path);
         return ok ? 0 : 1;
     }
 
@@ -308,7 +322,7 @@ int main(int argc, char** argv) {
 
         std::string filename = entry.path().filename().string();
         fs::path save_path = fs::path(dir_save_path) / filename;
-        if (process_one_in_child(exe_path, entry.path(), save_path)) {
+        if (process_one(deeplab, entry.path(), save_path)) {
             processed++;
         } else {
             failed++;

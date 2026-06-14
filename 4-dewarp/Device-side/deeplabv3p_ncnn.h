@@ -1,10 +1,16 @@
 #pragma once
 #include <memory>
+#include <vector>
 #include <opencv2/opencv.hpp>
 #include <ncnn/net.h>
 
 class DeeplabV3_NCNN {
 public:
+    struct KeypointResult {
+        cv::Point2f point;
+        float score = 0.0f;
+    };
+
     static constexpr const char* kParamPath =
         "deeplabv3p.ncnn.param";
     static constexpr const char* kBinPath =
@@ -19,6 +25,12 @@ public:
     void set_corner_lost_process(bool enabled);
     cv::Mat detect_image(const cv::Mat& image);
     cv::Mat detect_image(const cv::Mat& image, cv::Mat* filled_image);
+    cv::Mat detect_image(
+        const cv::Mat& image,
+        cv::Mat* filled_image,
+        std::vector<KeypointResult>* keypoints,
+        cv::Mat* mask_out = nullptr
+    );
 
 private:
     std::unique_ptr<ncnn::Net> net;

@@ -1,7 +1,9 @@
 #include "deeplabv3p_ncnn.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 #include "CornerLostProcess.cpp"
@@ -136,6 +138,106 @@ cv::Mat build_segmentation_overlay(const cv::Mat& image, const cv::Mat& mask_255
     return blended;
 }
 
+float sigmoid(float x)
+{
+    if (x >= 0.0f) {
+        return 1.0f / (1.0f + std::exp(-x));
+    }
+    float e = std::exp(x);
+    return e / (1.0f + e);
+}
+
+std::vector<DeeplabV3_NCNN::KeypointResult> decode_keypoints(
+    const ncnn::Mat& heatmaps,
+    int left,
+    int top,
+    int new_w,
+    int new_h,
+    int original_w,
+    int original_h
+) {
+    std::vector<DeeplabV3_NCNN::KeypointResult> keypoints;
+    if (heatmaps.empty() || heatmaps.c <= 0 || heatmaps.w <= 0 || heatmaps.h <= 0 ||
+        new_w <= 0 || new_h <= 0 || original_w <= 0 || original_h <= 0) {
+        return keypoints;
+    }
+
+    keypoints.reserve(static_cast<size_t>(heatmaps.c));
+    int w = heatmaps.w;
+    int h = heatmaps.h;
+
+    for (int ch = 0; ch < heatmaps.c; ++ch) {
+        ncnn::Mat hm_channel = heatmaps.channel(ch);
+        const float* hm = hm_channel;
+        int max_idx = 0;
+        float max_logit = -std::numeric_limits<float>::infinity();
+        for (int i = 0; i < w * h; ++i) {
+            if (hm[i] > max_logit) {
+                max_logit = hm[i];
+                max_idx = i;
+            }
+        }
+
+        float x = static_cast<float>(max_idx % w);
+        float y = static_cast<float>(max_idx / w);
+        float score = sigmoid(max_logit);
+
+        if (x >= 1.0f && x < static_cast<float>(w - 1) &&
+            y >= 1.0f && y < static_cast<float>(h - 1)) {
+            int ix = static_cast<int>(x);
+            int iy = static_cast<int>(y);
+            auto value = [&](int yy, int xx) -> float {
+                return sigmoid(hm[yy * w + xx]);
+            };
+
+            float center = value(iy, ix);
+            float denom_x = value(iy, ix - 1) + value(iy, ix + 1) - 2.0f * center + 1e-8f;
+            float denom_y = value(iy - 1, ix) + value(iy + 1, ix) - 2.0f * center + 1e-8f;
+            x += 0.5f * (value(iy, ix - 1) - value(iy, ix + 1)) / denom_x;
+            y += 0.5f * (value(iy - 1, ix) - value(iy + 1, ix)) / denom_y;
+        }
+
+        float mapped_x = (x - static_cast<float>(left)) * (static_cast<float>(original_w) / new_w);
+        float mapped_y = (y - static_cast<float>(top)) * (static_cast<float>(original_h) / new_h);
+        mapped_x = std::clamp(mapped_x, 0.0f, static_cast<float>(original_w - 1));
+        mapped_y = std::clamp(mapped_y, 0.0f, static_cast<float>(original_h - 1));
+
+        keypoints.push_back({cv::Point2f(mapped_x, mapped_y), score});
+    }
+
+    return keypoints;
+}
+
+void draw_keypoints(cv::Mat& image, const std::vector<DeeplabV3_NCNN::KeypointResult>& keypoints)
+{
+    if (image.empty() || image.channels() != 3 || keypoints.empty()) {
+        return;
+    }
+
+    if (keypoints.size() >= 2) {
+        cv::line(image, keypoints[0].point, keypoints[1].point, cv::Scalar(0, 180, 255), 4, cv::LINE_AA);
+    }
+
+    for (size_t i = 0; i < keypoints.size(); ++i) {
+        const cv::Point2f& p = keypoints[i].point;
+        cv::circle(image, p, 7, cv::Scalar(40, 40, 255), cv::FILLED, cv::LINE_AA);
+        cv::circle(image, p, 7, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+
+        char label[32];
+        std::snprintf(label, sizeof(label), "%zu:%.2f", i, keypoints[i].score);
+        cv::putText(
+            image,
+            label,
+            cv::Point(static_cast<int>(p.x) + 10, static_cast<int>(p.y) - 10),
+            cv::FONT_HERSHEY_SIMPLEX,
+            0.55,
+            cv::Scalar(255, 255, 255),
+            2,
+            cv::LINE_AA
+        );
+    }
+}
+
 cv::Mat apply_corner_lost_process(const cv::Mat& mask_255, const cv::Mat& image, cv::Mat* filled_image)
 {
     if (filled_image != nullptr) {
@@ -166,7 +268,20 @@ cv::Mat apply_corner_lost_process(const cv::Mat& mask_255, const cv::Mat& image,
 void DeeplabV3_NCNN::configure_net()
 {
     net->opt.num_threads = 8;
-    net->opt.use_packing_layout = false;
+    net->opt.openmp_blocktime = 0;
+    net->opt.lightmode = false;
+    net->opt.use_packing_layout = false; // 不能打开，不然会有条带。
+    net->opt.use_int8_inference = false;
+    net->opt.use_int8_packed = false;
+    net->opt.use_int8_storage = false;
+    net->opt.use_int8_arithmetic = false;
+    net->opt.use_bf16_storage = false;
+    net->opt.use_bf16_packed = false;
+    net->opt.use_fp16_packed = false;
+    net->opt.use_fp16_storage = false;
+    net->opt.use_fp16_arithmetic = false;
+    net->opt.use_local_pool_allocator = false;   // 不能打开，否则在某些设备上会导致内存分配失败，尤其是当输入图像较大时。"
+    net->opt.use_vulkan_compute = false;
 }
 
 void DeeplabV3_NCNN::load_net()
@@ -278,9 +393,25 @@ cv::Mat DeeplabV3_NCNN::detect_image(const cv::Mat& image_in)
 
 cv::Mat DeeplabV3_NCNN::detect_image(const cv::Mat& image_in, cv::Mat* filled_image)
 {
+    return detect_image(image_in, filled_image, nullptr, nullptr);
+}
+
+cv::Mat DeeplabV3_NCNN::detect_image(
+    const cv::Mat& image_in,
+    cv::Mat* filled_image,
+    std::vector<KeypointResult>* keypoints,
+    cv::Mat* mask_out
+)
+{
     if (image_in.empty()) return cv::Mat();
     if (filled_image != nullptr) {
         filled_image->release();
+    }
+    if (keypoints != nullptr) {
+        keypoints->clear();
+    }
+    if (mask_out != nullptr) {
+        mask_out->release();
     }
 
     cv::Mat image = image_in.clone();
@@ -290,16 +421,19 @@ cv::Mat DeeplabV3_NCNN::detect_image(const cv::Mat& image_in, cv::Mat* filled_im
     int nw, nh;
     cv::Mat input = preprocess(image, nw, nh);
 
-    ncnn::Mat in = ncnn::Mat::from_pixels(
-        input.data,
-        ncnn::Mat::PIXEL_RGB,
-        input.cols,
-        input.rows,
-        input.step
-    );
-
-    const float norm_vals[3] = {1.f/255.f, 1.f/255.f, 1.f/255.f};
-    in.substract_mean_normalize(nullptr, norm_vals);
+    ncnn::Mat in(input.cols, input.rows, 3);
+    for (int y = 0; y < input.rows; ++y) {
+        const cv::Vec3b* row = input.ptr<cv::Vec3b>(y);
+        float* r = in.channel(0);
+        float* g = in.channel(1);
+        float* b = in.channel(2);
+        for (int x = 0; x < input.cols; ++x) {
+            int idx = y * input.cols + x;
+            r[idx] = row[x][0] / 255.0f;
+            g[idx] = row[x][1] / 255.0f;
+            b[idx] = row[x][2] / 255.0f;
+        }
+    }
 
     ncnn::Extractor ex = net->create_extractor();
     ex.set_light_mode(false);
@@ -312,6 +446,13 @@ cv::Mat DeeplabV3_NCNN::detect_image(const cv::Mat& image_in, cv::Mat* filled_im
         return cv::Mat();
     }
 
+    ncnn::Mat kpt_out;
+    ret = ex.extract("out1", kpt_out);
+    if (ret != 0 || kpt_out.empty()) {
+        std::cerr << "extract out1 failed: " << ret << std::endl;
+        return cv::Mat();
+    }
+
     int w = out.w;
     int h = out.h;
     int c = out.c;   // class number
@@ -320,10 +461,18 @@ cv::Mat DeeplabV3_NCNN::detect_image(const cv::Mat& image_in, cv::Mat* filled_im
     // 1. two-class logits -> book probability only
     // -----------------------------
     cv::Mat book_prob(h, w, CV_32F);
+    ncnn::Mat bg_channel;
+    ncnn::Mat book_channel;
     const float* bg_base = nullptr;
     const float* book_base = nullptr;
-    if (c > 0) bg_base = out.channel(0);
-    if (c > 1) book_base = out.channel(1);
+    if (c > 0) {
+        bg_channel = out.channel(0);
+        bg_base = bg_channel;
+    }
+    if (c > 1) {
+        book_channel = out.channel(1);
+        book_base = book_channel;
+    }
 
     for (int y = 0; y < h; y++)
     {
@@ -353,6 +502,19 @@ cv::Mat DeeplabV3_NCNN::detect_image(const cv::Mat& image_in, cv::Mat* filled_im
     int left = (input_w - nw) / 2;
     int top  = (input_h - nh) / 2;
 
+    std::vector<KeypointResult> decoded_keypoints = decode_keypoints(
+        kpt_out,
+        left,
+        top,
+        nw,
+        nh,
+        image.cols,
+        image.rows
+    );
+    if (keypoints != nullptr) {
+        *keypoints = decoded_keypoints;
+    }
+
     float sx = w / (float)input_w;
     float sy = h / (float)input_h;
 
@@ -373,6 +535,18 @@ cv::Mat DeeplabV3_NCNN::detect_image(const cv::Mat& image_in, cv::Mat* filled_im
     cv::Mat crop = book_prob(cv::Rect(x0, y0, cw, ch)).clone();
     cv::resize(crop, book_resized, image.size(), 0, 0, cv::INTER_LINEAR);
 
+    int finite_count = 0;
+    for (int y = 0; y < book_resized.rows; ++y) {
+        float* row = book_resized.ptr<float>(y);
+        for (int x = 0; x < book_resized.cols; ++x) {
+            if (std::isfinite(row[x])) {
+                finite_count++;
+            } else {
+                row[x] = 0.0f;
+            }
+        }
+    }
+
     // -----------------------------
     // 4. build binary label by foreground probability threshold.
     // For two-class segmentation, argmax equals p_book > 0.5. A higher
@@ -381,9 +555,10 @@ cv::Mat DeeplabV3_NCNN::detect_image(const cv::Mat& image_in, cv::Mat* filled_im
     double min_prob = 0.0;
     double max_prob = 0.0;
     cv::minMaxLoc(book_resized, &min_prob, &max_prob);
-    if (max_prob < 0.10 || std::fabs(max_prob - min_prob) < 1e-6) {
+    if (finite_count == 0 || max_prob < 0.10 || std::fabs(max_prob - min_prob) < 1e-6) {
         std::cerr << "Collapsed probability output: p_book min=" << min_prob
                   << " max=" << max_prob
+                  << " finite_count=" << finite_count
                   << " image=" << image.cols << "x" << image.rows
                   << std::endl;
         return cv::Mat();
@@ -452,10 +627,15 @@ cv::Mat DeeplabV3_NCNN::detect_image(const cv::Mat& image_in, cv::Mat* filled_im
     if (enable_corner_lost_process) {
         output_mask = apply_corner_lost_process(mask_255, image, filled_image);
     }
+    if (mask_out != nullptr) {
+        *mask_out = output_mask.clone();
+    }
 
     if (output_type == 1) {
         return output_mask;
     }
 
-    return build_segmentation_overlay(image, mask_255);
+    cv::Mat result = build_segmentation_overlay(image, output_mask);
+    draw_keypoints(result, decoded_keypoints);
+    return result;
 }
