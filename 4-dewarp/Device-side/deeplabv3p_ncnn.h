@@ -3,6 +3,7 @@
 #include <vector>
 #include <opencv2/opencv.hpp>
 #include <ncnn/net.h>
+#include "runtime_config.h"
 
 class DeeplabV3_NCNN {
 public:
@@ -15,7 +16,7 @@ public:
         "deeplabv3p.ncnn.param";
     static constexpr const char* kBinPath =
         "deeplabv3p.ncnn.bin";
-    static constexpr const char* kDefaultInputPath = "img/";
+    static constexpr const char* kDefaultInputPath = "img/lost/";
     static constexpr const char* kDefaultSavePath = "img_out/";
 
     DeeplabV3_NCNN();
@@ -29,17 +30,18 @@ public:
         const cv::Mat& image,
         cv::Mat* filled_image,
         std::vector<KeypointResult>* keypoints,
-        cv::Mat* mask_out = nullptr
+        cv::Mat* mask_out = nullptr,
+        cv::Mat* fill_mask_out = nullptr
     );
 
 private:
     std::unique_ptr<ncnn::Net> net;
 
-    int input_w = 640;
-    int input_h = 640;
-    float book_threshold = 0.65f;
-    int output_type = 0;  // 0: blended overlay, 1: 0/255 mask
-    bool enable_corner_lost_process = false;  // keep default inference aligned with Python postprocess
+    int input_w = RuntimeConfig::kInputWidth;
+    int input_h = RuntimeConfig::kInputHeight;
+    float book_threshold = RuntimeConfig::kBookThreshold;
+    int output_type = RuntimeConfig::kSaveVisualization ? 0 : 1;  // 0: blended overlay, 1: 0/255 mask
+    bool enable_corner_lost_process = RuntimeConfig::kEnableCornerLostProcess;
 
     cv::Mat preprocess(const cv::Mat& img, int& new_w, int& new_h);
     cv::Mat refine_mask(const cv::Mat& mask);

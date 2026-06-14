@@ -238,10 +238,18 @@ void draw_keypoints(cv::Mat& image, const std::vector<DeeplabV3_NCNN::KeypointRe
     }
 }
 
-cv::Mat apply_corner_lost_process(const cv::Mat& mask_255, const cv::Mat& image, cv::Mat* filled_image)
+cv::Mat apply_corner_lost_process(
+    const cv::Mat& mask_255,
+    const cv::Mat& image,
+    cv::Mat* filled_image,
+    cv::Mat* fill_mask_out
+)
 {
     if (filled_image != nullptr) {
         filled_image->release();
+    }
+    if (fill_mask_out != nullptr) {
+        fill_mask_out->release();
     }
 
     cv::Mat bin_mask = to_binary_255(mask_255);
@@ -253,12 +261,20 @@ cv::Mat apply_corner_lost_process(const cv::Mat& mask_255, const cv::Mat& image,
     BookMaskRestorer restorer(0.92, expand_margin, cv::Size(15, 15));
     ProcessResult result = restorer.process(bin_mask, "", "");
 
-    if (!is_corner_fill_reasonable(bin_mask, result)) {
+    cv::Mat fill_binary = to_binary_255(result.fill);
+    if (cv::countNonZero(fill_binary) == 0) {
+        return bin_mask;
+    }
+
+    if (RuntimeConfig::kCheckCornerFillReasonable && !is_corner_fill_reasonable(bin_mask, result)) {
         return bin_mask;
     }
 
     if (filled_image != nullptr) {
         *filled_image = build_filled_image(image, result);
+    }
+    if (fill_mask_out != nullptr) {
+        *fill_mask_out = fill_binary;
     }
 
     return to_binary_255(result.mask);
@@ -267,21 +283,21 @@ cv::Mat apply_corner_lost_process(const cv::Mat& mask_255, const cv::Mat& image,
 
 void DeeplabV3_NCNN::configure_net()
 {
-    net->opt.num_threads = 8;
-    net->opt.openmp_blocktime = 0;
-    net->opt.lightmode = false;
-    net->opt.use_packing_layout = false; // 不能打开，不然会有条带。
-    net->opt.use_int8_inference = false;
-    net->opt.use_int8_packed = false;
-    net->opt.use_int8_storage = false;
-    net->opt.use_int8_arithmetic = false;
-    net->opt.use_bf16_storage = false;
-    net->opt.use_bf16_packed = false;
-    net->opt.use_fp16_packed = false;
-    net->opt.use_fp16_storage = false;
-    net->opt.use_fp16_arithmetic = false;
-    net->opt.use_local_pool_allocator = false;   // 不能打开，否则在某些设备上会导致内存分配失败，尤其是当输入图像较大时。"
-    net->opt.use_vulkan_compute = false;
+    net->opt.num_threads = RuntimeConfig::kNumThreads;
+    net->opt.openmp_blocktime = RuntimeConfig::kOpenMPBlockTime;
+    net->opt.lightmode = RuntimeConfig::kLightMode;
+    net->opt.use_local_pool_allocator = RuntimeConfig::kUseLocalPoolAllocator;
+    net->opt.use_packing_layout = RuntimeConfig::kUsePackingLayout;
+    net->opt.use_int8_inference = RuntimeConfig::kUseInt8Inference;
+    net->opt.use_int8_packed = RuntimeConfig::kUseInt8Packed;
+    net->opt.use_int8_storage = RuntimeConfig::kUseInt8Storage;
+    net->opt.use_int8_arithmetic = RuntimeConfig::kUseInt8Arithmetic;
+    net->opt.use_bf16_storage = RuntimeConfig::kUseBF16Storage;
+    net->opt.use_bf16_packed = RuntimeConfig::kUseBF16Packed;
+    net->opt.use_fp16_packed = RuntimeConfig::kUseFP16Packed;
+    net->opt.use_fp16_storage = RuntimeConfig::kUseFP16Storage;
+    net->opt.use_fp16_arithmetic = RuntimeConfig::kUseFP16Arithmetic;
+    net->opt.use_vulkan_compute = RuntimeConfig::kUseVulkanCompute;
 }
 
 void DeeplabV3_NCNN::load_net()
@@ -393,14 +409,15 @@ cv::Mat DeeplabV3_NCNN::detect_image(const cv::Mat& image_in)
 
 cv::Mat DeeplabV3_NCNN::detect_image(const cv::Mat& image_in, cv::Mat* filled_image)
 {
-    return detect_image(image_in, filled_image, nullptr, nullptr);
+    return detect_image(image_in, filled_image, nullptr, nullptr, nullptr);
 }
 
 cv::Mat DeeplabV3_NCNN::detect_image(
     const cv::Mat& image_in,
     cv::Mat* filled_image,
     std::vector<KeypointResult>* keypoints,
-    cv::Mat* mask_out
+    cv::Mat* mask_out,
+    cv::Mat* fill_mask_out
 )
 {
     if (image_in.empty()) return cv::Mat();
@@ -412,6 +429,9 @@ cv::Mat DeeplabV3_NCNN::detect_image(
     }
     if (mask_out != nullptr) {
         mask_out->release();
+    }
+    if (fill_mask_out != nullptr) {
+        fill_mask_out->release();
     }
 
     cv::Mat image = image_in.clone();
@@ -625,7 +645,7 @@ cv::Mat DeeplabV3_NCNN::detect_image(
 
     cv::Mat output_mask = mask_255;
     if (enable_corner_lost_process) {
-        output_mask = apply_corner_lost_process(mask_255, image, filled_image);
+        output_mask = apply_corner_lost_process(mask_255, image, filled_image, fill_mask_out);
     }
     if (mask_out != nullptr) {
         *mask_out = output_mask.clone();

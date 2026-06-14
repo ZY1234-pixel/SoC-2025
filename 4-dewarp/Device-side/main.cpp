@@ -11,6 +11,7 @@
 #include <opencv2/opencv.hpp>
 
 #include "deeplabv3p_ncnn.h"
+#include "runtime_config.h"
 
 namespace fs = std::filesystem;
 
@@ -136,12 +137,10 @@ static void apply_exif_orientation(cv::Mat& image, int orientation) {
     }
 }
 
-static fs::path make_filled_save_path(const fs::path& mask_save_path) {
-    fs::path filled_path = mask_save_path;
-    filled_path.replace_filename(
-        mask_save_path.stem().string() + "_filled" + mask_save_path.extension().string()
-    );
-    return filled_path;
+static fs::path make_filled_rgb_save_path(const fs::path& mask_save_path) {
+    fs::path rgb_path = mask_save_path;
+    rgb_path.replace_filename(mask_save_path.stem().string() + "_rgb.png");
+    return rgb_path;
 }
 
 static fs::path make_mask_save_path(const fs::path& image_save_path) {
@@ -228,7 +227,7 @@ static bool process_one(DeeplabV3_NCNN& deeplab, const fs::path& input_path, con
     }
 
     fs::path mask_save_path;
-    if (!mask.empty()) {
+    if (RuntimeConfig::kSaveVisualization && !mask.empty()) {
         mask_save_path = make_mask_save_path(actual_save_path);
         if (!fs::exists(mask_save_path.parent_path())) {
             fs::create_directories(mask_save_path.parent_path());
@@ -245,11 +244,22 @@ static bool process_one(DeeplabV3_NCNN& deeplab, const fs::path& input_path, con
         keypoints
     );
 
-    fs::path filled_save_path;
+    if (RuntimeConfig::kEnableCornerLostProcess && RuntimeConfig::kSaveFilledRGB) {
+        if (filled_image.empty()) {
+            filled_image = image.clone();
+            if (result.size() != image.size()) {
+                cv::Mat canvas = cv::Mat::zeros(result.size(), image.type());
+                cv::resize(image, canvas, result.size(), 0, 0, cv::INTER_LINEAR);
+                filled_image = canvas;
+            }
+        }
+    }
+
+    fs::path filled_rgb_save_path;
     if (!filled_image.empty()) {
-        filled_save_path = make_filled_save_path(actual_save_path);
-        if (!cv::imwrite(filled_save_path.string(), filled_image)) {
-            std::cerr << "Failed to save filled image: " << filled_save_path << std::endl;
+        filled_rgb_save_path = make_filled_rgb_save_path(actual_save_path);
+        if (!cv::imwrite(filled_rgb_save_path.string(), filled_image)) {
+            std::cerr << "Failed to save filled rgb image: " << filled_rgb_save_path << std::endl;
             return false;
         }
     }
@@ -261,14 +271,14 @@ static bool process_one(DeeplabV3_NCNN& deeplab, const fs::path& input_path, con
               << " | inference time: "
               << infer_time_ms << " ms"
               << " | saved: " << actual_save_path;
-    if (!mask.empty()) {
+    if (RuntimeConfig::kSaveVisualization && !mask.empty()) {
         std::cout << " | mask: " << mask_save_path;
     }
     if (!keypoints.empty()) {
         std::cout << " | keypoints: " << keypoints.size();
     }
     if (!filled_image.empty()) {
-        std::cout << " | filled: " << filled_save_path;
+        std::cout << " | filled_rgb: " << filled_rgb_save_path;
     }
     std::cout << std::endl;
 
@@ -280,6 +290,7 @@ int main(int argc, char** argv) {
     fs::path dir_origin_path = DeeplabV3_NCNN::kDefaultInputPath;
     fs::path dir_save_path   = DeeplabV3_NCNN::kDefaultSavePath;
     DeeplabV3_NCNN deeplab;
+    deeplab.set_output_type(RuntimeConfig::kSaveVisualization ? 0 : 1);
 
     if (argc >= 2) {
         fs::path input_path = argv[1];
