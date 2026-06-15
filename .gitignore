@@ -5,3 +5,4 @@ images/
 results/
 *.jpg
 *.png
+**/__pycache__/
