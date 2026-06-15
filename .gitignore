@@ -1,2 +1,8 @@
 .idea/
-.idea/
+*.pt
+*.pth
+images/
+results/
+*.jpg
+*.png
+**/__pycache__/
