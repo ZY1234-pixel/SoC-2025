@@ -3,7 +3,7 @@
 namespace RuntimeConfig {
 
 // ==================== 运行开关集中配置 ====================
-// 当前默认：fp32 推理，关闭 packing 和内存池，保留 SGEMM/Winograd 加速。
+// 当前默认：fp16 权重推理，关闭不稳定的 packing 和内存池。
 
 // 输出相关
 static constexpr bool kSaveVisualization = false;          // false: 只保存 0-255 mask；true: 保存可视化图，测试时使用。
@@ -25,16 +25,10 @@ static constexpr bool kUseLocalPoolAllocator = false;      // 必须 false：打
 // ncnn 数据布局
 static constexpr bool kUsePackingLayout = false;           // 必须 false：打开后 mask 有条带/半张缺失。
 
-// 低精度相关
-static constexpr bool kUseInt8Inference = false;           // false: 模型不是 int8 量化模型。
-static constexpr bool kUseInt8Packed = false;              // false: 关闭 int8 packed。
-static constexpr bool kUseInt8Storage = false;             // false: 关闭 int8 存储。
-static constexpr bool kUseInt8Arithmetic = false;          // false: 关闭 int8 计算。
-static constexpr bool kUseBF16Storage = false;             // false: 保持 fp32 精度。
-static constexpr bool kUseBF16Packed = false;              // false: 关闭 bf16 packed。
-static constexpr bool kUseFP16Packed = false;              // false: 关闭 fp16 packed。
-static constexpr bool kUseFP16Storage = false;             // false: 当前使用 fp32 权重。
-static constexpr bool kUseFP16Arithmetic = false;          // false: 关闭 fp16 计算，关键点更稳。
+// fp16 相关
+static constexpr bool kUseFP16Packed = true;               // true: 使用 fp16 packed。
+static constexpr bool kUseFP16Storage = true;              // true: 使用 fp16 存储。
+static constexpr bool kUseFP16Arithmetic = true;           // true: 使用 fp16 计算。
 
 // GPU
 static constexpr bool kUseVulkanCompute = false;           // false: 只用 CPU，避免 GPU 驱动差异。

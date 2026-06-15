@@ -288,12 +288,6 @@ void DeeplabV3_NCNN::configure_net()
     net->opt.lightmode = RuntimeConfig::kLightMode;
     net->opt.use_local_pool_allocator = RuntimeConfig::kUseLocalPoolAllocator;
     net->opt.use_packing_layout = RuntimeConfig::kUsePackingLayout;
-    net->opt.use_int8_inference = RuntimeConfig::kUseInt8Inference;
-    net->opt.use_int8_packed = RuntimeConfig::kUseInt8Packed;
-    net->opt.use_int8_storage = RuntimeConfig::kUseInt8Storage;
-    net->opt.use_int8_arithmetic = RuntimeConfig::kUseInt8Arithmetic;
-    net->opt.use_bf16_storage = RuntimeConfig::kUseBF16Storage;
-    net->opt.use_bf16_packed = RuntimeConfig::kUseBF16Packed;
     net->opt.use_fp16_packed = RuntimeConfig::kUseFP16Packed;
     net->opt.use_fp16_storage = RuntimeConfig::kUseFP16Storage;
     net->opt.use_fp16_arithmetic = RuntimeConfig::kUseFP16Arithmetic;
@@ -332,7 +326,7 @@ void DeeplabV3_NCNN::set_corner_lost_process(bool enabled)
     enable_corner_lost_process = enabled;
 }
 
-// preprocess: keep-aspect resize + pad, return RGB CV_8UC3 canvas, new_w/new_h are scaled dims
+// preprocess: keep-aspect resize + pad, return BGR CV_8UC3 canvas, new_w/new_h are scaled dims
 cv::Mat DeeplabV3_NCNN::preprocess(const cv::Mat& img, int& new_w, int& new_h)
 {
     cv::Mat image = img;
@@ -345,19 +339,15 @@ cv::Mat DeeplabV3_NCNN::preprocess(const cv::Mat& img, int& new_w, int& new_h)
     new_h = std::max(1, int(h * scale));
 
     cv::Mat resized;
-    cv::resize(image, resized, cv::Size(new_w, new_h), 0, 0, cv::INTER_CUBIC);
+    cv::resize(image, resized, cv::Size(new_w, new_h), 0, 0, cv::INTER_LINEAR);
 
     cv::Mat canvas(input_h, input_w, CV_8UC3, cv::Scalar(128,128,128));
     int left = (input_w - new_w) / 2;
     int top  = (input_h - new_h) / 2;
     resized.copyTo(canvas(cv::Rect(left, top, new_w, new_h)));
 
-    // convert to RGB because ncnn::Mat::from_pixels PIXEL_RGB expects RGB ordering
-    cv::Mat canvas_rgb;
-    cv::cvtColor(canvas, canvas_rgb, cv::COLOR_BGR2RGB);
-
-    if (!canvas_rgb.isContinuous()) canvas_rgb = canvas_rgb.clone();
-    return canvas_rgb;
+    if (!canvas.isContinuous()) canvas = canvas.clone();
+    return canvas;
 }
 
 // refine_mask: mirror of Python refine (focus on class 1)
@@ -367,8 +357,11 @@ cv::Mat DeeplabV3_NCNN::refine_mask(const cv::Mat& pr)
     cv::Mat mask = (pr > 0);
     mask.convertTo(mask, CV_8U, 255);
 
-    cv::Mat erode_kernel = cv::Mat::ones(cv::Size(3, 3), CV_8U);
-    cv::erode(mask, mask, erode_kernel, cv::Point(-1, -1), 1);
+    const int min_side = std::min(mask.rows, mask.cols);
+    if (min_side >= 1000) {
+        cv::Mat erode_kernel = cv::Mat::ones(cv::Size(3, 3), CV_8U);
+        cv::erode(mask, mask, erode_kernel, cv::Point(-1, -1), 1);
+    }
 
     cv::Mat labels, stats, centroids;
     int num_labels = cv::connectedComponentsWithStats(mask, labels, stats, centroids, 8);
@@ -392,8 +385,9 @@ cv::Mat DeeplabV3_NCNN::refine_mask(const cv::Mat& pr)
     cv::Mat mask_bin;
     cv::bitwise_or(mask, flood_inv, mask_bin);
 
-    // morphology smoothing
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7,7));
+    // Small output maps use a lighter kernel to avoid eating the book contour.
+    int morph_size = min_side >= 1000 ? 7 : 3;
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(morph_size, morph_size));
     cv::morphologyEx(mask_bin, mask_bin, cv::MORPH_CLOSE, kernel);
     cv::morphologyEx(mask_bin, mask_bin, cv::MORPH_OPEN, kernel);
 
@@ -449,9 +443,9 @@ cv::Mat DeeplabV3_NCNN::detect_image(
         float* b = in.channel(2);
         for (int x = 0; x < input.cols; ++x) {
             int idx = y * input.cols + x;
-            r[idx] = row[x][0] / 255.0f;
+            r[idx] = row[x][2] / 255.0f;
             g[idx] = row[x][1] / 255.0f;
-            b[idx] = row[x][2] / 255.0f;
+            b[idx] = row[x][0] / 255.0f;
         }
     }
 
@@ -478,9 +472,9 @@ cv::Mat DeeplabV3_NCNN::detect_image(
     int c = out.c;   // class number
 
     // -----------------------------
-    // 1. two-class logits -> book probability only
+    // 1. two-class logits -> book-vs-background logit diff
     // -----------------------------
-    cv::Mat book_prob(h, w, CV_32F);
+    cv::Mat book_diff(h, w, CV_32F);
     ncnn::Mat bg_channel;
     ncnn::Mat book_channel;
     const float* bg_base = nullptr;
@@ -498,21 +492,15 @@ cv::Mat DeeplabV3_NCNN::detect_image(
     {
         const float* bg_ptr = bg_base != nullptr ? bg_base + y * w : nullptr;
         const float* book_ptr = book_base != nullptr ? book_base + y * w : nullptr;
-        float* prob_ptr = book_prob.ptr<float>(y);
+        float* diff_ptr = book_diff.ptr<float>(y);
 
         for (int x = 0; x < w; x++)
         {
-            float p = 0.f;
+            float diff = -std::numeric_limits<float>::infinity();
             if (book_ptr != nullptr && bg_ptr != nullptr) {
-                float diff = book_ptr[x] - bg_ptr[x];
-                if (diff >= 0.f) {
-                    p = 1.0f / (1.0f + std::exp(-diff));
-                } else {
-                    float e = std::exp(diff);
-                    p = e / (1.0f + e);
-                }
+                diff = book_ptr[x] - bg_ptr[x];
             }
-            prob_ptr[x] = p;
+            diff_ptr[x] = diff;
         }
     }
 
@@ -548,57 +536,64 @@ cv::Mat DeeplabV3_NCNN::detect_image(
     cw = std::min(w - x0, cw);
     ch = std::min(h - y0, ch);
 
-    // -----------------------------
-    // 3. resize book probability back to original size
-    // -----------------------------
-    cv::Mat book_resized;
-    cv::Mat crop = book_prob(cv::Rect(x0, y0, cw, ch)).clone();
-    cv::resize(crop, book_resized, image.size(), 0, 0, cv::INTER_LINEAR);
+    if (cw <= 0 || ch <= 0) {
+        std::cerr << "Invalid segmentation crop: x=" << x0
+                  << " y=" << y0
+                  << " w=" << cw
+                  << " h=" << ch
+                  << " image=" << image.cols << "x" << image.rows
+                  << std::endl;
+        return cv::Mat();
+    }
 
+    cv::Mat diff_crop = book_diff(cv::Rect(x0, y0, cw, ch)).clone();
     int finite_count = 0;
-    for (int y = 0; y < book_resized.rows; ++y) {
-        float* row = book_resized.ptr<float>(y);
-        for (int x = 0; x < book_resized.cols; ++x) {
+    double min_diff = std::numeric_limits<double>::infinity();
+    double max_diff = -std::numeric_limits<double>::infinity();
+    for (int y = 0; y < diff_crop.rows; ++y) {
+        float* row = diff_crop.ptr<float>(y);
+        for (int x = 0; x < diff_crop.cols; ++x) {
             if (std::isfinite(row[x])) {
                 finite_count++;
+                min_diff = std::min(min_diff, static_cast<double>(row[x]));
+                max_diff = std::max(max_diff, static_cast<double>(row[x]));
             } else {
-                row[x] = 0.0f;
+                row[x] = -std::numeric_limits<float>::infinity();
             }
         }
     }
 
     // -----------------------------
-    // 4. build binary label by foreground probability threshold.
-    // For two-class segmentation, argmax equals p_book > 0.5. A higher
-    // threshold suppresses boundary/background overflow at the cost of holes.
+    // 3. build binary mask on the cropped output map.
+    // p_book >= t is equivalent to book_logit - bg_logit >= log(t / (1 - t)).
     // -----------------------------
-    double min_prob = 0.0;
-    double max_prob = 0.0;
-    cv::minMaxLoc(book_resized, &min_prob, &max_prob);
-    if (finite_count == 0 || max_prob < 0.10 || std::fabs(max_prob - min_prob) < 1e-6) {
-        std::cerr << "Collapsed probability output: p_book min=" << min_prob
-                  << " max=" << max_prob
+    if (finite_count == 0 || std::fabs(max_diff - min_diff) < 1e-6) {
+        std::cerr << "Collapsed logit output: diff min=" << min_diff
+                  << " max=" << max_diff
                   << " finite_count=" << finite_count
                   << " image=" << image.cols << "x" << image.rows
                   << std::endl;
         return cv::Mat();
     }
 
-    // 5. refine + build mask
+    auto probability_threshold_to_logit = [](float threshold) -> float {
+        threshold = std::clamp(threshold, 1e-4f, 1.0f - 1e-4f);
+        return std::log(threshold / (1.0f - threshold));
+    };
+
     auto build_mask_with_threshold = [&](float threshold) -> cv::Mat {
-        cv::Mat label(image.rows, image.cols, CV_8U);
-        for (int y = 0; y < image.rows; y++)
+        const float logit_threshold = probability_threshold_to_logit(threshold);
+        cv::Mat bin(diff_crop.rows, diff_crop.cols, CV_8U);
+        for (int y = 0; y < diff_crop.rows; y++)
         {
-            const float* prob_ptr = book_resized.ptr<float>(y);
-            uchar* label_ptr = label.ptr<uchar>(y);
-            for (int x = 0; x < image.cols; x++)
+            const float* diff_ptr = diff_crop.ptr<float>(y);
+            uchar* bin_ptr = bin.ptr<uchar>(y);
+            for (int x = 0; x < diff_crop.cols; x++)
             {
-                label_ptr[x] = prob_ptr[x] >= threshold ? 1 : 0;
+                bin_ptr[x] = diff_ptr[x] >= logit_threshold ? 255 : 0;
             }
         }
 
-        cv::Mat bin;
-        cv::compare(label, 1, bin, cv::CMP_EQ);
         int raw_fg = cv::countNonZero(bin);
 
         cv::Mat mask_after_morph = refine_mask(bin);
@@ -633,15 +628,17 @@ cv::Mat DeeplabV3_NCNN::detect_image(
 
     refined_foreground = cv::countNonZero(refined_mask);
     if (refined_foreground == 0) {
-        std::cout << "Empty mask: p_book min=" << min_prob
-                  << " max=" << max_prob
+        std::cout << "Empty mask: diff min=" << min_diff
+                  << " max=" << max_diff
                   << " image=" << image.cols << "x" << image.rows
                   << std::endl;
     }
 
+    cv::Mat mask_resized;
+    cv::resize(refined_mask, mask_resized, image.size(), 0, 0, cv::INTER_LINEAR);
+
     cv::Mat mask_255;
-    refined_mask.convertTo(mask_255, CV_8U);
-    cv::threshold(mask_255, mask_255, 127, 255, cv::THRESH_BINARY);
+    cv::threshold(mask_resized, mask_255, 127, 255, cv::THRESH_BINARY);
 
     cv::Mat output_mask = mask_255;
     if (enable_corner_lost_process) {
