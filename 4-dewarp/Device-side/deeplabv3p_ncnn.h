@@ -16,7 +16,7 @@ public:
         "deeplabv3p.ncnn.param";
     static constexpr const char* kBinPath =
         "deeplabv3p.ncnn.bin";
-    static constexpr const char* kDefaultInputPath = "img/lost/";
+    static constexpr const char* kDefaultInputPath = "img/";
     static constexpr const char* kDefaultSavePath = "img_out/";
 
     DeeplabV3_NCNN();

@@ -259,14 +259,14 @@ cv::Mat apply_corner_lost_process(
 
     int expand_margin = static_cast<int>(std::max(bin_mask.rows, bin_mask.cols) * 0.15);
     BookMaskRestorer restorer(0.92, expand_margin, cv::Size(15, 15));
-    ProcessResult result = restorer.process(bin_mask, "", "");
+    ProcessResult result = restorer.process(bin_mask);
 
     cv::Mat fill_binary = to_binary_255(result.fill);
     if (cv::countNonZero(fill_binary) == 0) {
         return bin_mask;
     }
 
-    if (RuntimeConfig::kCheckCornerFillReasonable && !is_corner_fill_reasonable(bin_mask, result)) {
+    if (RuntimeConfig::kEnableCornerLostProcess && !is_corner_fill_reasonable(bin_mask, result)) {
         return bin_mask;
     }
 

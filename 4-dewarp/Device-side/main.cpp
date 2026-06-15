@@ -244,7 +244,7 @@ static bool process_one(DeeplabV3_NCNN& deeplab, const fs::path& input_path, con
         keypoints
     );
 
-    if (RuntimeConfig::kEnableCornerLostProcess && RuntimeConfig::kSaveFilledRGB) {
+    if (RuntimeConfig::kEnableCornerLostProcess) {
         if (filled_image.empty()) {
             filled_image = image.clone();
             if (result.size() != image.size()) {

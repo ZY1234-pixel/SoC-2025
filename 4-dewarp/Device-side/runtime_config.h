@@ -7,9 +7,7 @@ namespace RuntimeConfig {
 
 // 输出相关
 static constexpr bool kSaveVisualization = false;          // false: 只保存 0-255 mask；true: 保存可视化图，测试时使用。
-static constexpr bool kEnableCornerLostProcess = true;    // false: 不做缺角补绘；true: 开启缺角补绘。
-static constexpr bool kCheckCornerFillReasonable = false; // false: 不过滤补绘结果，直接输出扩边后的新 mask。
-static constexpr bool kSaveFilledRGB = true;              // true: 保存补绘后的 RGB 图。
+static constexpr bool kEnableCornerLostProcess = false;    // false: 不做缺角补绘；true: 开启缺角补绘。
 static constexpr float kBookThreshold = 0.65f;             // 书本区域阈值，越大 mask 越保守。
 
 // 输入尺寸

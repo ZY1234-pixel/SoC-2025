@@ -1,6 +1,4 @@
 ﻿#include <opencv2/opencv.hpp>
-#include <filesystem>
-#include <iostream>
 #include <vector>
 #include <string>
 #include <array>
@@ -108,9 +106,6 @@ public:
         float s = ((b1.x - a1.x) * (b2.y - b1.y) - (b1.y - a1.y) * (b2.x - b1.x)) / d;
         if (s < -1e-6f || s > 1.0f + 1e-6f) return std::nullopt;
 
-        float t = ((b1.x - a1.x) * (a2.y - a1.y) - (b1.y - a1.y) * (a2.x - a1.x)) / d;
-        if (t < -1e-6f || t > 1.0f + 1e-6f) return std::nullopt;
-
         return cv::Point2f(a1.x + s * (a2.x - a1.x), a1.y + s * (a2.y - a1.y));
     }
 
@@ -131,6 +126,11 @@ public:
         for (int i = 0; i < n; ++i) {
             cv::Point2f p1(static_cast<float>(cnt[i].x), static_cast<float>(cnt[i].y));
             cv::Point2f p2(static_cast<float>(cnt[(i + 1) % n].x), static_cast<float>(cnt[(i + 1) % n].y));
+
+            if (p1.x <= 1.0f) inters["left"].push_back(p1);
+            if (p1.x >= static_cast<float>(w - 2)) inters["right"].push_back(p1);
+            if (p1.y <= 1.0f) inters["top"].push_back(p1);
+            if (p1.y >= static_cast<float>(h - 2)) inters["bottom"].push_back(p1);
 
             for (const auto& e : edges) {
                 const std::string& side = e.first;
@@ -309,50 +309,7 @@ public:
             return line_to_polynomial(line);
         }
 
-        // 二次拟合：y = a*x^2 + b*x + cint main() {
-//     std::string input_img = "E:/VSTest/CornerLostProcess/corner-lost/input/ori-corner-lost4.jpg";
-//     std::string input_mask = "E:/VSTest/CornerLostProcess/corner-lost/input/corner-lost4.png";
-//     std::string out_path = "E:/VSTest/CornerLostProcess/corner-lost/output";
-
-//     std::filesystem::create_directories(out_path);
-
-//     cv::Mat img = cv::imread(input_img, cv::IMREAD_COLOR);
-//     cv::Mat mask = cv::imread(input_mask, cv::IMREAD_GRAYSCALE);
-
-//     if (img.empty()) {
-//         std::cerr << "Failed to read input image: " << input_img << std::endl;
-//         return 1;
-//     }
-//     if (mask.empty()) {
-//         std::cerr << "Failed to read input mask: " << input_mask << std::endl;
-//         return 1;
-//     }
-
-//     std::string filename = std::filesystem::path(input_img).filename().string();
-//     int h_ori = mask.rows;
-//     int w_ori = mask.cols;
-
-//     int expand_margin = static_cast<int>(std::max(h_ori, w_ori) * 0.15);
-
-//     BookMaskRestorer restorer(0.92, expand_margin, cv::Size(15, 15));
-//     ProcessResult res = restorer.process(mask, filename, out_path);
-
-//     int x0 = res.offset.x;
-//     int y0 = res.offset.y;
-
-//     cv::Mat result = cv::Mat::zeros(res.mask.rows, res.mask.cols, CV_8UC3);
-//     img.copyTo(result(cv::Rect(x0, y0, mask.cols, mask.rows)));
-
-//     cv::Mat fill_binary;
-//     cv::compare(res.fill, 255, fill_binary, cv::CMP_EQ);
-//     result.setTo(cv::Scalar(255, 255, 255), fill_binary);
-
-//     cv::imwrite((std::filesystem::path(out_path) / ("final_mask_" + filename)).string(), res.mask);
-//     cv::imwrite((std::filesystem::path(out_path) / ("final_filled_" + filename)).string(), result);
-
-//     std::cout << "修复完成" << std::endl;
-//     return 0;
-// }
+        // 二次拟合：y = a*x^2 + b*x + c
         double Sx = 0.0, Sx2 = 0.0, Sx3 = 0.0, Sx4 = 0.0;
         double Sy = 0.0, Sxy = 0.0, Sx2y = 0.0;
         int n = static_cast<int>(x.size());
@@ -452,553 +409,8 @@ public:
         return select_correct_intersection(intersections, w, h, side);
     }
 
-    struct CornerRule {
-        std::string name;
-        std::string side_a;
-        std::string side_b;
-        cv::Point2f anchor;
-    };
-
-    struct FitResult {
-        bool straight = true;
-        LineEq line;
-        Polynomial curve;
-    };
-
-    std::map<std::string, std::vector<cv::Point2f>> get_border_intersections(const std::vector<cv::Point>& cnt,
-        int h, int w) {
-        std::vector<std::pair<std::string, std::pair<cv::Point2f, cv::Point2f>>> edges = {
-            {"top",    {{0.f, 0.f}, {static_cast<float>(w - 1), 0.f}}},
-            {"bottom", {{0.f, static_cast<float>(h - 1)}, {static_cast<float>(w - 1), static_cast<float>(h - 1)}}},
-            {"left",   {{0.f, 0.f}, {0.f, static_cast<float>(h - 1)}}},
-            {"right",  {{static_cast<float>(w - 1), 0.f}, {static_cast<float>(w - 1), static_cast<float>(h - 1)}}}
-        };
-
-        std::map<std::string, std::vector<cv::Point2f>> inters;
-        for (const auto& e : edges) inters[e.first] = {};
-
-        auto push_unique = [](std::vector<cv::Point2f>& pts, const cv::Point2f& p) {
-            for (const auto& old : pts) {
-                if (cv::norm(old - p) < 2.0f) return;
-            }
-            pts.push_back(p);
-        };
-
-        int n = static_cast<int>(cnt.size());
-        for (int i = 0; i < n; ++i) {
-            cv::Point2f p1(static_cast<float>(cnt[i].x), static_cast<float>(cnt[i].y));
-            cv::Point2f p2(static_cast<float>(cnt[(i + 1) % n].x), static_cast<float>(cnt[(i + 1) % n].y));
-
-            if (p1.x <= 1.0f) push_unique(inters["left"], p1);
-            if (p1.x >= static_cast<float>(w - 2)) push_unique(inters["right"], p1);
-            if (p1.y <= 1.0f) push_unique(inters["top"], p1);
-            if (p1.y >= static_cast<float>(h - 2)) push_unique(inters["bottom"], p1);
-
-            for (const auto& e : edges) {
-                auto pt = seg_intersect(p1, p2, e.second.first, e.second.second);
-                if (pt.has_value()) {
-                    push_unique(inters[e.first], *pt);
-                }
-            }
-        }
-
-        return inters;
-    }
-
-    std::optional<cv::Point2f> select_corner_border_point(const std::vector<cv::Point2f>& pts,
-        const std::string& side,
-        const CornerRule& rule) {
-        if (pts.empty()) return std::nullopt;
-
-        bool prefer_max = false;
-        if (rule.name == "top_left") {
-            prefer_max = true;
-        }
-        else if (rule.name == "top_right") {
-            prefer_max = (side == "right");
-        }
-        else if (rule.name == "bottom_left") {
-            prefer_max = (side == "bottom");
-        }
-        else if (rule.name == "bottom_right") {
-            prefer_max = false;
-        }
-
-        auto value = [&](const cv::Point2f& p) {
-            if (side == "left" || side == "right") {
-                return p.y;
-            }
-            return p.x;
-        };
-
-        return *std::min_element(pts.begin(), pts.end(),
-            [&](const cv::Point2f& a, const cv::Point2f& b) {
-                return prefer_max ? value(a) > value(b) : value(a) < value(b);
-            });
-    }
-
-    std::vector<cv::Point2f> get_hull_corners(const std::vector<cv::Point>& cnt) {
-        std::vector<cv::Point> hull;
-        cv::convexHull(cnt, hull);
-        if (hull.empty()) return {};
-
-        double peri = cv::arcLength(hull, true);
-        std::vector<cv::Point> approx;
-        cv::approxPolyDP(hull, approx, std::max(3.0, peri * 0.01), true);
-
-        std::vector<cv::Point2f> corners;
-        corners.reserve(approx.size());
-        for (const auto& p : approx) {
-            corners.emplace_back(static_cast<float>(p.x), static_cast<float>(p.y));
-        }
-        return corners;
-    }
-
-    std::optional<cv::Point2f> select_visible_corner(const std::vector<cv::Point2f>& corners,
-        const std::string& side,
-        const CornerRule& rule,
-        int h,
-        int w) {
-        if (corners.empty()) return std::nullopt;
-
-        float tol = std::max(30.0f, static_cast<float>(std::max(h, w)) * 0.04f);
-        std::vector<cv::Point2f> candidates;
-        for (const auto& p : corners) {
-            bool near_side = false;
-            if (side == "left") {
-                near_side = p.x <= tol;
-            }
-            else if (side == "right") {
-                near_side = p.x >= static_cast<float>(w - 1) - tol;
-            }
-            else if (side == "top") {
-                near_side = p.y <= tol;
-            }
-            else if (side == "bottom") {
-                near_side = p.y >= static_cast<float>(h - 1) - tol;
-            }
-
-            if (near_side) {
-                candidates.push_back(p);
-            }
-        }
-
-        if (candidates.empty()) return std::nullopt;
-
-        bool prefer_max = false;
-        if (rule.name == "top_left") {
-            prefer_max = true;
-        }
-        else if (rule.name == "top_right") {
-            prefer_max = (side == "right");
-        }
-        else if (rule.name == "bottom_left") {
-            prefer_max = (side == "bottom");
-        }
-        else if (rule.name == "bottom_right") {
-            prefer_max = false;
-        }
-
-        auto value = [&](const cv::Point2f& p) {
-            if (side == "left" || side == "right") {
-                return p.y;
-            }
-            return p.x;
-        };
-
-        return *std::min_element(candidates.begin(), candidates.end(),
-            [&](const cv::Point2f& a, const cv::Point2f& b) {
-                return prefer_max ? value(a) > value(b) : value(a) < value(b);
-            });
-    }
-
-    FitResult fit_edge(const std::vector<cv::Point2f>& pts) {
-        FitResult fit;
-        fit.straight = is_straight(pts);
-        fit.line = fit_line(pts);
-        if (!fit.straight) {
-            fit.curve = fit_curve(pts);
-        }
-        return fit;
-    }
-
-    std::vector<cv::Point2f> intersect_line_curve(const LineEq& line,
-        const Polynomial& curve,
-        int w,
-        int h) {
-        std::vector<cv::Point2f> intersections;
-
-        if (curve.coeffs.empty()) {
-            return intersections;
-        }
-
-        if (std::fabs(line.b) < 1e-8) {
-            if (std::fabs(line.a) < 1e-8) return intersections;
-
-            double x = -line.c / line.a;
-            double y = eval_polynomial(curve, x);
-            if (std::fabs(x) <= w * 10.0 && std::fabs(y) <= h * 10.0) {
-                intersections.emplace_back(static_cast<float>(x), static_cast<float>(y));
-            }
-            return intersections;
-        }
-
-        auto line_y = [&](double x) -> double {
-            return (-line.a * x - line.c) / line.b;
-        };
-
-        Polynomial line_poly;
-        line_poly.coeffs = { -line.a / line.b, -line.c / line.b };
-        Polynomial poly = subtract_polynomial(curve, line_poly);
-        return solve_real_roots_and_intersections(poly, line_y, w, h);
-    }
-
-    std::vector<cv::Point2f> get_fit_intersections(const FitResult& f1,
-        const FitResult& f2,
-        int w,
-        int h) {
-        std::vector<cv::Point2f> intersections;
-
-        if (f1.straight && f2.straight) {
-            double det = f1.line.a * f2.line.b - f2.line.a * f1.line.b;
-            if (std::fabs(det) < 1e-6) return intersections;
-
-            intersections.emplace_back(
-                static_cast<float>((f1.line.b * f2.line.c - f2.line.b * f1.line.c) / det),
-                static_cast<float>((f2.line.a * f1.line.c - f1.line.a * f2.line.c) / det)
-            );
-            return intersections;
-        }
-
-        if (f1.straight && !f2.straight) {
-            return intersect_line_curve(f1.line, f2.curve, w, h);
-        }
-
-        if (!f1.straight && f2.straight) {
-            return intersect_line_curve(f2.line, f1.curve, w, h);
-        }
-
-        Polynomial poly = subtract_polynomial(f1.curve, f2.curve);
-        auto curve_y = [&](double x) -> double {
-            return eval_polynomial(f1.curve, x);
-        };
-        return solve_real_roots_and_intersections(poly, curve_y, w, h);
-    }
-
-    std::vector<cv::Point2f> get_line_intersections(const LineEq& line1, const LineEq& line2) {
-        std::vector<cv::Point2f> intersections;
-        double det = line1.a * line2.b - line2.a * line1.b;
-        if (std::fabs(det) < 1e-6) return intersections;
-
-        intersections.emplace_back(
-            static_cast<float>((line1.b * line2.c - line2.b * line1.c) / det),
-            static_cast<float>((line2.a * line1.c - line1.a * line2.c) / det)
-        );
-        return intersections;
-    }
-
-    bool is_outside_corner(const cv::Point2f& p, const CornerRule& rule, int h, int w) {
-        if (rule.name == "top_left") {
-            return p.x < 0.0f && p.y < 0.0f;
-        }
-        if (rule.name == "top_right") {
-            return p.x > static_cast<float>(w - 1) && p.y < 0.0f;
-        }
-        if (rule.name == "bottom_left") {
-            return p.x < 0.0f && p.y > static_cast<float>(h - 1);
-        }
-        if (rule.name == "bottom_right") {
-            return p.x > static_cast<float>(w - 1) && p.y > static_cast<float>(h - 1);
-        }
-        return false;
-    }
-
-    bool is_in_expand_range(const cv::Point2f& p, int h, int w) {
-        return p.x >= -expand_margin_ &&
-            p.y >= -expand_margin_ &&
-            p.x <= static_cast<float>(w - 1 + expand_margin_) &&
-            p.y <= static_cast<float>(h - 1 + expand_margin_);
-    }
-
-    cv::Point2f clamp_to_expand_range(const cv::Point2f& p, int h, int w) {
-        return cv::Point2f(
-            std::clamp(p.x, -static_cast<float>(expand_margin_), static_cast<float>(w - 1 + expand_margin_)),
-            std::clamp(p.y, -static_cast<float>(expand_margin_), static_cast<float>(h - 1 + expand_margin_))
-        );
-    }
-
-    std::optional<cv::Point2f> find_corner_intersection(const std::vector<cv::Point2f>& cnt_pts,
-        const cv::Point2f& p1,
-        const cv::Point2f& p2,
-        const CornerRule& rule,
-        int h,
-        int w) {
-        std::optional<cv::Point2f> best;
-        double best_score = std::numeric_limits<double>::max();
-        const std::array<std::string, 2> dirs = { "cw", "ccw" };
-
-        for (const auto& dir1 : dirs) {
-            std::vector<cv::Point2f> pts1 = get_contour_points(cnt_pts, p1, dir1, h, w);
-            if (pts1.size() < 8) continue;
-
-            for (const auto& dir2 : dirs) {
-                std::vector<cv::Point2f> pts2 = get_contour_points(cnt_pts, p2, dir2, h, w);
-                if (pts2.size() < 8) continue;
-
-                FitResult fit1 = fit_edge(pts1);
-                FitResult fit2 = fit_edge(pts2);
-                std::vector<cv::Point2f> crosses = get_fit_intersections(fit1, fit2, w, h);
-                std::vector<cv::Point2f> line_crosses = get_line_intersections(fit1.line, fit2.line);
-                crosses.insert(crosses.end(), line_crosses.begin(), line_crosses.end());
-
-                for (const auto& cross : crosses) {
-                    if (!is_outside_corner(cross, rule, h, w)) continue;
-
-                    double score = cv::norm(cross - rule.anchor);
-                    if (score < best_score) {
-                        best_score = score;
-                        best = cross;
-                    }
-                }
-            }
-        }
-
-        return best;
-    }
-
-    std::optional<std::pair<cv::Point2f, cv::Point2f>> select_side_segment(const std::vector<cv::Point2f>& pts,
-        const std::string& side) {
-        if (pts.size() < 2) return std::nullopt;
-
-        auto value = [&](const cv::Point2f& p) {
-            if (side == "left" || side == "right") {
-                return p.y;
-            }
-            return p.x;
-        };
-
-        auto min_it = std::min_element(pts.begin(), pts.end(),
-            [&](const cv::Point2f& a, const cv::Point2f& b) {
-                return value(a) < value(b);
-            });
-        auto max_it = std::max_element(pts.begin(), pts.end(),
-            [&](const cv::Point2f& a, const cv::Point2f& b) {
-                return value(a) < value(b);
-            });
-
-        if (std::fabs(value(*max_it) - value(*min_it)) < 20.0f) {
-            return std::nullopt;
-        }
-
-        return std::make_pair(*min_it, *max_it);
-    }
-
-    bool is_outside_side(const cv::Point2f& p, const std::string& side, int h, int w) {
-        if (side == "left") {
-            return p.x < 0.0f;
-        }
-        if (side == "right") {
-            return p.x > static_cast<float>(w - 1);
-        }
-        if (side == "top") {
-            return p.y < 0.0f;
-        }
-        if (side == "bottom") {
-            return p.y > static_cast<float>(h - 1);
-        }
-        return false;
-    }
-
-    double distance_to_side_endpoint_axis(const cv::Point2f& p,
-        const cv::Point2f& p1,
-        const cv::Point2f& p2,
-        const std::string& side) {
-        if (side == "left" || side == "right") {
-            return std::min(std::fabs(p.y - p1.y), std::fabs(p.y - p2.y));
-        }
-        return std::min(std::fabs(p.x - p1.x), std::fabs(p.x - p2.x));
-    }
-
-    double side_segment_length_axis(const cv::Point2f& p1,
-        const cv::Point2f& p2,
-        const std::string& side) {
-        if (side == "left" || side == "right") {
-            return std::fabs(p2.y - p1.y);
-        }
-        return std::fabs(p2.x - p1.x);
-    }
-
-    double outside_side_distance(const cv::Point2f& p, const std::string& side, int h, int w) {
-        if (side == "left") {
-            return std::fabs(std::min(p.x, 0.0f));
-        }
-        if (side == "right") {
-            return std::fabs(std::max(p.x - static_cast<float>(w - 1), 0.0f));
-        }
-        if (side == "top") {
-            return std::fabs(std::min(p.y, 0.0f));
-        }
-        if (side == "bottom") {
-            return std::fabs(std::max(p.y - static_cast<float>(h - 1), 0.0f));
-        }
-        return 0.0;
-    }
-
-    std::optional<cv::Point2f> find_single_side_intersection(const std::vector<cv::Point2f>& cnt_pts,
-        const cv::Point2f& p1,
-        const cv::Point2f& p2,
-        const std::string& side,
-        int h,
-        int w) {
-        std::optional<cv::Point2f> best;
-        double best_score = std::numeric_limits<double>::max();
-        double side_len = side_segment_length_axis(p1, p2, side);
-        double endpoint_threshold = std::max(120.0, side_len * 0.25);
-        const std::array<std::string, 2> dirs = { "cw", "ccw" };
-
-        for (const auto& dir1 : dirs) {
-            std::vector<cv::Point2f> pts1 = get_contour_points(cnt_pts, p1, dir1, h, w);
-            if (pts1.size() < 8) continue;
-
-            for (const auto& dir2 : dirs) {
-                std::vector<cv::Point2f> pts2 = get_contour_points(cnt_pts, p2, dir2, h, w);
-                if (pts2.size() < 8) continue;
-
-                FitResult fit1 = fit_edge(pts1);
-                FitResult fit2 = fit_edge(pts2);
-                std::vector<cv::Point2f> crosses = get_fit_intersections(fit1, fit2, w, h);
-                std::vector<cv::Point2f> line_crosses = get_line_intersections(fit1.line, fit2.line);
-                crosses.insert(crosses.end(), line_crosses.begin(), line_crosses.end());
-
-                for (const auto& cross : crosses) {
-                    if (!is_outside_side(cross, side, h, w)) continue;
-                    if (!is_in_expand_range(cross, h, w)) continue;
-
-                    double endpoint_dist = distance_to_side_endpoint_axis(cross, p1, p2, side);
-                    if (endpoint_dist > endpoint_threshold) continue;
-
-                    double score = endpoint_dist + outside_side_distance(cross, side, h, w) * 0.1;
-                    if (score < best_score) {
-                        best_score = score;
-                        best = cross;
-                    }
-                }
-            }
-        }
-
-        return best;
-    }
-
-    double distance_to_axis_range(const cv::Point2f& p,
-        const cv::Point2f& p1,
-        const cv::Point2f& p2,
-        const std::string& side) {
-        double v = (side == "left" || side == "right") ? p.y : p.x;
-        double a = (side == "left" || side == "right") ? p1.y : p1.x;
-        double b = (side == "left" || side == "right") ? p2.y : p2.x;
-        double lo = std::min(a, b);
-        double hi = std::max(a, b);
-        if (v < lo) return lo - v;
-        if (v > hi) return v - hi;
-        return 0.0;
-    }
-
-    std::optional<cv::Point2f> find_side_intersection_between_corners(const std::vector<cv::Point2f>& cnt_pts,
-        const cv::Point2f& p1,
-        const cv::Point2f& p2,
-        const std::string& side,
-        int h,
-        int w) {
-        std::optional<cv::Point2f> best;
-        double best_score = std::numeric_limits<double>::max();
-        const std::array<std::string, 2> dirs = { "cw", "ccw" };
-
-        for (const auto& dir1 : dirs) {
-            std::vector<cv::Point2f> pts1 = get_contour_points(cnt_pts, p1, dir1, h, w);
-            if (pts1.size() < 8) continue;
-
-            for (const auto& dir2 : dirs) {
-                std::vector<cv::Point2f> pts2 = get_contour_points(cnt_pts, p2, dir2, h, w);
-                if (pts2.size() < 8) continue;
-
-                FitResult fit1 = fit_edge(pts1);
-                FitResult fit2 = fit_edge(pts2);
-                std::vector<cv::Point2f> crosses = get_fit_intersections(fit1, fit2, w, h);
-                std::vector<cv::Point2f> line_crosses = get_line_intersections(fit1.line, fit2.line);
-                crosses.insert(crosses.end(), line_crosses.begin(), line_crosses.end());
-
-                for (const auto& cross : crosses) {
-                    if (!is_outside_side(cross, side, h, w)) continue;
-
-                    double axis_dist = distance_to_axis_range(cross, p1, p2, side);
-                    double score = axis_dist + outside_side_distance(cross, side, h, w) * 0.1;
-                    if (score < best_score) {
-                        best_score = score;
-                        best = cross;
-                    }
-                }
-            }
-        }
-
-        return best;
-    }
-
-    std::optional<cv::Point2f> intersect_line_with_expand_side(const LineEq& line,
-        const std::string& side,
-        int h,
-        int w) {
-        if (side == "left" || side == "right") {
-            double x = (side == "left")
-                ? -static_cast<double>(expand_margin_)
-                : static_cast<double>(w - 1 + expand_margin_);
-            if (std::fabs(line.b) < 1e-8) return std::nullopt;
-
-            double y = (-line.a * x - line.c) / line.b;
-            return cv::Point2f(static_cast<float>(x), static_cast<float>(y));
-        }
-
-        double y = (side == "top")
-            ? -static_cast<double>(expand_margin_)
-            : static_cast<double>(h - 1 + expand_margin_);
-        if (std::fabs(line.a) < 1e-8) return std::nullopt;
-
-        double x = (-line.b * y - line.c) / line.a;
-        return cv::Point2f(static_cast<float>(x), static_cast<float>(y));
-    }
-
-    std::optional<cv::Point2f> extend_corner_to_expand_side(const std::vector<cv::Point2f>& cnt_pts,
-        const cv::Point2f& corner,
-        const std::string& side,
-        int h,
-        int w) {
-        std::optional<cv::Point2f> best;
-        double best_score = std::numeric_limits<double>::max();
-        double local_threshold = std::max(80.0, static_cast<double>(std::max(h, w)) * 0.08);
-        const std::array<std::string, 2> dirs = { "cw", "ccw" };
-
-        for (const auto& dir : dirs) {
-            std::vector<cv::Point2f> pts = get_contour_points(cnt_pts, corner, dir, h, w);
-            if (pts.size() < 8) continue;
-            if (cv::norm(pts.front() - corner) > local_threshold) continue;
-
-            LineEq line = fit_line(pts);
-            std::optional<cv::Point2f> pt = intersect_line_with_expand_side(line, side, h, w);
-            if (!pt.has_value()) continue;
-            if (!is_outside_side(*pt, side, h, w)) continue;
-
-            double axis_dist = distance_to_side_endpoint_axis(*pt, corner, corner, side);
-            double score = axis_dist + cv::norm(*pt - corner) * 0.01;
-            if (score < best_score) {
-                best_score = score;
-                best = pt;
-            }
-        }
-
-        return best;
-    }
-
     // ===================== 补全逻辑 =====================
-    ProcessResult restore_mask(const cv::Mat& mask, const std::string& filename, const std::string& out_path) {
+    ProcessResult restore_mask(const cv::Mat& mask) {
         int h = mask.rows;
         int w = mask.cols;
 
@@ -1023,136 +435,79 @@ public:
             cnt_pts.emplace_back(static_cast<float>(p.x), static_cast<float>(p.y));
         }
 
-        auto touch = check_boundary_touch(mask);
-        std::map<std::string, std::vector<cv::Point2f>> border_points = get_border_intersections(cnt, h, w);
-        std::vector<cv::Point2f> hull_corners = get_hull_corners(cnt);
-
-        curve1_ = Polynomial{};
-        curve2_ = Polynomial{};
-        std::vector<std::vector<cv::Point2f>> fill_polys_original;
-
-        std::vector<CornerRule> rules = {
-            {"top_left", "left", "top", cv::Point2f(0.f, 0.f)},
-            {"top_right", "right", "top", cv::Point2f(static_cast<float>(w - 1), 0.f)},
-            {"bottom_left", "left", "bottom", cv::Point2f(0.f, static_cast<float>(h - 1))},
-            {"bottom_right", "right", "bottom", cv::Point2f(static_cast<float>(w - 1), static_cast<float>(h - 1))}
-        };
-
-        for (const auto& rule : rules) {
-            if (!touch[rule.side_a] || !touch[rule.side_b]) {
-                continue;
-            }
-
-            auto p1 = select_visible_corner(hull_corners, rule.side_a, rule, h, w);
-            auto p2 = select_visible_corner(hull_corners, rule.side_b, rule, h, w);
-            if (!p1.has_value()) {
-                p1 = select_corner_border_point(border_points[rule.side_a], rule.side_a, rule);
-            }
-            if (!p2.has_value()) {
-                p2 = select_corner_border_point(border_points[rule.side_b], rule.side_b, rule);
-            }
-            if (!p1.has_value() || !p2.has_value()) {
-                continue;
-            }
-
-            std::optional<cv::Point2f> cross_a = extend_corner_to_expand_side(cnt_pts, *p1, rule.side_a, h, w);
-            std::optional<cv::Point2f> cross_b = extend_corner_to_expand_side(cnt_pts, *p2, rule.side_b, h, w);
-            if (!cross_a.has_value()) {
-                cross_a = find_side_intersection_between_corners(cnt_pts, *p1, *p2, rule.side_a, h, w);
-            }
-            if (!cross_b.has_value()) {
-                cross_b = find_side_intersection_between_corners(cnt_pts, *p1, *p2, rule.side_b, h, w);
-            }
-            if (!cross_a.has_value() || !cross_b.has_value()) {
-                continue;
-            }
-
-            cv::Point2f c1 = clamp_to_expand_range(*p1, h, w);
-            cv::Point2f c2 = clamp_to_expand_range(*cross_a, h, w);
-            cv::Point2f c3 = clamp_to_expand_range(*cross_b, h, w);
-            cv::Point2f c4 = clamp_to_expand_range(*p2, h, w);
-
-            std::vector<cv::Point2f> poly = { c1, c2, c3, c4 };
-            double area = std::fabs(cv::contourArea(poly));
-            if (area < 50.0) {
-                continue;
-            }
-
-            fill_polys_original.push_back(poly);
-        }
-
-        int touch_count = 0;
-        std::string single_side;
-        for (const auto& side : std::array<std::string, 4>{ "left", "right", "top", "bottom" }) {
-            if (touch[side]) {
-                ++touch_count;
-                single_side = side;
-            }
-        }
-
-        if (touch_count == 1) {
-            auto segment = select_side_segment(border_points[single_side], single_side);
-            if (segment.has_value()) {
-                cv::Point2f p1 = segment->first;
-                cv::Point2f p2 = segment->second;
-                std::optional<cv::Point2f> cross = find_single_side_intersection(cnt_pts, p1, p2, single_side, h, w);
-                if (cross.has_value()) {
-                    cv::Point2f c1 = clamp_to_expand_range(p1, h, w);
-                    cv::Point2f c2 = clamp_to_expand_range(p2, h, w);
-                    cv::Point2f c3 = clamp_to_expand_range(*cross, h, w);
-
-                    double area = std::fabs((c1.x * (c2.y - c3.y) + c2.x * (c3.y - c1.y) + c3.x * (c1.y - c2.y)) * 0.5);
-                    if (area >= 50.0) {
-                        fill_polys_original.push_back({
-                            c1,
-                            c2,
-                            c3
-                        });
-                    }
-                }
-            }
-        }
-
-        if (fill_polys_original.empty()) {
+        auto defect_edges = get_defect_edges(cnt, h, w);
+        if (defect_edges.empty()) {
             return { mask.clone(), cv::Point(0, 0), cv::Mat::zeros(mask.size(), mask.type()) };
         }
 
-        double min_x = 0.0;
-        double min_y = 0.0;
-        double max_x = static_cast<double>(w - 1);
-        double max_y = static_cast<double>(h - 1);
-        for (const auto& poly : fill_polys_original) {
-            for (const auto& p : poly) {
-                min_x = std::min(min_x, static_cast<double>(p.x));
-                min_y = std::min(min_y, static_cast<double>(p.y));
-                max_x = std::max(max_x, static_cast<double>(p.x));
-                max_y = std::max(max_y, static_cast<double>(p.y));
-            }
-        }
+        int x0 = expand_margin_;
+        int y0 = expand_margin_;
 
-        int min_ix = static_cast<int>(std::floor(min_x));
-        int min_iy = static_cast<int>(std::floor(min_y));
-        int max_ix = static_cast<int>(std::ceil(max_x));
-        int max_iy = static_cast<int>(std::ceil(max_y));
-
-        int x0 = -min_ix;
-        int y0 = -min_iy;
-        int canvas_w = max_ix - min_ix + 1;
-        int canvas_h = max_iy - min_iy + 1;
-
-        cv::Mat new_canvas = cv::Mat::zeros(canvas_h, canvas_w, CV_8UC1);
+        cv::Mat new_canvas = cv::Mat::zeros(h + 2 * y0, w + 2 * x0, CV_8UC1);
         mask.copyTo(new_canvas(cv::Rect(x0, y0, w, h)));
 
         cv::Mat fill_mask = cv::Mat::zeros(new_canvas.size(), CV_8UC1);
-        for (const auto& poly_original : fill_polys_original) {
-            std::vector<cv::Point> poly;
-            poly.reserve(poly_original.size());
-            for (const auto& p : poly_original) {
-                poly.emplace_back(
-                    static_cast<int>(std::round(p.x + x0)),
-                    static_cast<int>(std::round(p.y + y0))
-                );
+
+        curve1_ = Polynomial{};
+        curve2_ = Polynomial{};
+
+        for (const auto& side_item : defect_edges) {
+            const std::string& side = side_item.first;
+            const std::vector<cv::Point2f>& inter_pts = side_item.second;
+
+            std::function<bool(const cv::Point2f&, const cv::Point2f&)> sort_key;
+            std::array<std::string, 2> dirs;
+            get_side_rule(side, sort_key, dirs);
+
+            std::vector<cv::Point2f> sorted = inter_pts;
+            std::sort(sorted.begin(), sorted.end(), sort_key);
+
+            cv::Point2f p1 = sorted[0];
+            cv::Point2f p2 = sorted[1];
+
+            std::vector<cv::Point2f> pts1 = get_contour_points(cnt_pts, p1, dirs[0], h, w);
+            std::vector<cv::Point2f> pts2 = get_contour_points(cnt_pts, p2, dirs[1], h, w);
+
+            bool s1 = is_straight(pts1);
+            bool s2 = is_straight(pts2);
+
+            line1_ = fit_line(pts1);
+            line2_ = fit_line(pts2);
+
+            if (!s1) {
+                curve1_ = fit_curve(pts1);
             }
+            if (!s2) {
+                curve2_ = fit_curve(pts2);
+            }
+
+            std::optional<cv::Point2f> cross;
+            if (s1 && s2) {
+                cross = get_extend_intersection(line1_, true, line2_, true, w, h, side);
+            }
+            else if (s1 && !s2) {
+                cross = get_extend_intersection(line1_, true, line2_, false, w, h, side);
+            }
+            else if (!s1 && s2) {
+                cross = get_extend_intersection(line1_, false, line2_, true, w, h, side);
+            }
+            else {
+                cross = get_curve_curve_intersection(w, h, side);
+            }
+
+            if (!cross.has_value() && !(s1 && s2)) {
+                cross = get_extend_intersection(line1_, true, line2_, true, w, h, side);
+            }
+
+            if (!cross.has_value()) {
+                continue;
+            }
+
+            std::vector<cv::Point> poly = {
+                cv::Point(static_cast<int>(std::round(p1.x + x0)), static_cast<int>(std::round(p1.y + y0))),
+                cv::Point(static_cast<int>(std::round(p2.x + x0)), static_cast<int>(std::round(p2.y + y0))),
+                cv::Point(static_cast<int>(std::round(cross->x + x0)), static_cast<int>(std::round(cross->y + y0)))
+            };
 
             std::vector<std::vector<cv::Point>> polys = { poly };
             cv::fillPoly(fill_mask, polys, cv::Scalar(255));
@@ -1164,13 +519,13 @@ public:
         return { final_mask, cv::Point(x0, y0), fill_mask };
     }
 
-    ProcessResult process(const cv::Mat& mask, const std::string& filename, const std::string& out_path) {
+    ProcessResult process(const cv::Mat& mask) {
         cv::Mat bin_mask;
         cv::threshold(mask, bin_mask, 127, 255, cv::THRESH_BINARY);
 
         auto incomplete = is_mask_incomplete(bin_mask);
         if (incomplete.first) {
-            return restore_mask(bin_mask, filename, out_path);
+            return restore_mask(bin_mask);
         }
 
         return { bin_mask.clone(), cv::Point(0, 0), cv::Mat::zeros(bin_mask.size(), bin_mask.type()) };
@@ -1361,59 +716,4 @@ private:
         return pts.front();
     }
 
-    static void print_points(const std::vector<cv::Point2f>& pts) {
-        std::cout << "[";
-        for (size_t i = 0; i < pts.size(); ++i) {
-            std::cout << "[" << pts[i].x << " " << pts[i].y << "]";
-            if (i + 1 != pts.size()) std::cout << "\n ";
-        }
-        std::cout << "]" << std::endl;
-    }
 };
-
-#ifdef CORNER_LOST_PROCESS_STANDALONE
-// int main() {
-//     std::string input_img = "E:/VSTest/CornerLostProcess/corner-lost/input/ori-corner-lost4.jpg";
-//     std::string input_mask = "E:/VSTest/CornerLostProcess/corner-lost/input/corner-lost4.png";
-//     std::string out_path = "E:/VSTest/CornerLostProcess/corner-lost/output";
-
-//     std::filesystem::create_directories(out_path);
-
-//     cv::Mat img = cv::imread(input_img, cv::IMREAD_COLOR);
-//     cv::Mat mask = cv::imread(input_mask, cv::IMREAD_GRAYSCALE);
-
-//     if (img.empty()) {
-//         std::cerr << "Failed to read input image: " << input_img << std::endl;
-//         return 1;
-//     }
-//     if (mask.empty()) {
-//         std::cerr << "Failed to read input mask: " << input_mask << std::endl;
-//         return 1;
-//     }
-
-//     std::string filename = std::filesystem::path(input_img).filename().string();
-//     int h_ori = mask.rows;
-//     int w_ori = mask.cols;
-
-//     int expand_margin = static_cast<int>(std::max(h_ori, w_ori) * 0.15);
-
-//     BookMaskRestorer restorer(0.92, expand_margin, cv::Size(15, 15));
-//     ProcessResult res = restorer.process(mask, filename, out_path);
-
-//     int x0 = res.offset.x;
-//     int y0 = res.offset.y;
-
-//     cv::Mat result = cv::Mat::zeros(res.mask.rows, res.mask.cols, CV_8UC3);
-//     img.copyTo(result(cv::Rect(x0, y0, mask.cols, mask.rows)));
-
-//     cv::Mat fill_binary;
-//     cv::compare(res.fill, 255, fill_binary, cv::CMP_EQ);
-//     result.setTo(cv::Scalar(255, 255, 255), fill_binary);
-
-//     cv::imwrite((std::filesystem::path(out_path) / ("final_mask_" + filename)).string(), res.mask);
-//     cv::imwrite((std::filesystem::path(out_path) / ("final_filled_" + filename)).string(), result);
-
-//     std::cout << "修复完成" << std::endl;
-//     return 0;
-// }
-#endif
