@@ -375,15 +375,7 @@ cv::Mat DeeplabV3_NCNN::refine_mask(const cv::Mat& pr)
         cv::compare(labels, largest, mask, cv::CMP_EQ);
     }
 
-    // fill holes via floodFill from border
-    int h = mask.rows, w = mask.cols;
-    cv::Mat flood = mask.clone();
-    cv::Mat tmp = cv::Mat::zeros(h+2, w+2, CV_8U);
-    cv::floodFill(flood, tmp, cv::Point(0,0), 255);
-    cv::Mat flood_inv;
-    cv::bitwise_not(flood, flood_inv);
-    cv::Mat mask_bin;
-    cv::bitwise_or(mask, flood_inv, mask_bin);
+    cv::Mat mask_bin = mask;
 
     // Small output maps use a lighter kernel to avoid eating the book contour.
     int morph_size = min_side >= 1000 ? 7 : 3;

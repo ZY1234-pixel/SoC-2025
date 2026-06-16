@@ -13,9 +13,9 @@ public:
     };
 
     static constexpr const char* kParamPath =
-        "deeplabv3p.fp16.ncnn.param";
+        "deeplabv3p.fp32.ncnn.param";
     static constexpr const char* kBinPath =
-        "deeplabv3p.fp16.ncnn.bin";
+        "deeplabv3p.fp32.ncnn.bin";
     static constexpr const char* kDefaultInputPath = "img/";
     static constexpr const char* kDefaultSavePath = "img_out/";
 

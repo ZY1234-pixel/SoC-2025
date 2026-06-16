@@ -24,13 +24,6 @@ def refine_mask(mask):
     else:
         mask = (mask > 0).astype(np.uint8)
 
-    h, w = mask.shape
-    flood = mask.copy()
-    flood_mask = np.zeros((h + 2, w + 2), np.uint8)
-    cv2.floodFill(flood, flood_mask, (0, 0), 1)
-    holes = cv2.bitwise_not(flood * 255) // 255
-    mask = cv2.bitwise_or(mask, holes)
-
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
