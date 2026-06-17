@@ -1,15 +1,16 @@
 # Document Dewarp Segmentation Delivery
 
-本目录中包含两套分割推理交付代码：`Cloud-side` 和 `Device-side`以及汤、赵维护的相关代码。这两部分分割代码是当前交付和维护的重点，分别对应云端推理和端侧推理。
+本目录中包含三套分割推理交付代码：`Cloud-side`、`Device-side` 和 `instance-seg`，以及汤、赵维护的相关代码。这几部分分割代码是当前交付和维护的重点，分别对应云端推理、端侧推理和 YOLO 实例分割推理。
 
-除这两部分外，`4-dewarp` 下如果还有其他目录或文件夹更新，不属于当前说明和维护范围。
+除这三部分外，`4-dewarp` 下如果还有其他目录或文件夹更新，不属于当前说明和维护范围。
 
 ## 目录说明
 
 ```text
 4-dewarp/
-├── Cloud-side/      # 云端 Python 推理交付
-└── Device-side/     # 端侧 C++/NCNN 推理交付
+├── Cloud-side/      # 云端 Python 语义分割推理交付
+├── Device-side/     # 端侧 C++/NCNN 推理交付
+└── instance-seg/    # YOLO 实例分割推理交付
 ```
 
 ## Cloud-side
@@ -43,6 +44,28 @@ mix     # 原图和 mask 的混合可视化，仅 mask 模式使用
 ├── utils/
 ├── img/
 └── img_out/
+```
+
+## Instance-seg
+
+`instance-seg` 用于 YOLO 实例分割推理，定位是从图像中检测并分割文档类目标实例。和 `Cloud-side` 的二分类语义分割不同，实例分割可以在同一张图里输出多条预测，每条预测对应一个文档实例。
+
+当前默认权重为训练侧导出的 `best.pt`，推理目录只保留交付所需文件：
+
+```text
+4-dewarp/instance-seg/
+├── predict.py
+├── weights/
+│   └── best.pt
+├── img/
+└── img_out/
+```
+
+推理方式：
+
+```bash
+cd 4-dewarp/instance-seg
+python predict.py
 ```
 
 ## Device-side
