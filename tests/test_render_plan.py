@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "Code" / "docflow_src"))
 
 from docflow.model.base import BBox, BlockType
+from docflow.model.blocks.image_block import ImageBlock
 from docflow.model.blocks.text_block import TextBlock, TextLine
 from docflow.model.page import Document, Page
 from docflow.model.zone import Zone
@@ -321,3 +322,98 @@ def test_title_block_preserves_explicit_bold_style():
 
     assert "显式加粗标题" in xml
     assert "<w:b" in xml
+
+
+def test_renderer_merges_adjacent_visual_text_band_for_docx_layout():
+    page = Page(index=0, image_width=1200, image_height=1600)
+    figure = ImageBlock(
+        bbox=BBox(80, 1000, 500, 1300),
+        block_type=BlockType.FIGURE,
+        col_count=2,
+        col_index=0,
+        spanned_cols=[0],
+    )
+    caption = TextBlock(
+        bbox=BBox(180, 940, 1020, 990),
+        block_type=BlockType.TEXT,
+        lines=[TextLine(text="图下说明文字应跟随左侧图片，而不是独立撑开一整行。")],
+        col_count=1,
+        col_index=0,
+        spanned_cols=[0],
+    )
+    side_text = TextBlock(
+        bbox=BBox(570, 1010, 1080, 1320),
+        block_type=BlockType.TEXT,
+        lines=[TextLine(text="右侧正文与图片垂直重叠，应合并到同一个局部双栏图文带。")],
+        col_count=2,
+        col_index=1,
+        spanned_cols=[1],
+    )
+    zones = [
+        Zone(col_count=2, blocks=[figure], has_spanned=False),
+        Zone(col_count=1, blocks=[caption], has_spanned=False),
+        Zone(col_count=2, blocks=[side_text], has_spanned=False),
+    ]
+
+    merged = DocxRenderer()._merge_adjacent_visual_text_zones(zones, page)
+
+    assert len(merged) == 1
+    assert merged[0].col_count == 2
+    assert merged[0].blocks == [figure, caption, side_text]
+    assert figure.spanned_cols == [0]
+    assert caption.spanned_cols == [0]
+    assert side_text.spanned_cols == [1]
+
+
+def test_renderer_narrow_strip_block_does_not_create_spanned_segment():
+    header = TextBlock(
+        bbox=BBox(820, 30, 1080, 70),
+        block_type=BlockType.HEADER,
+        lines=[TextLine(text="The Economist November 11th 2023")],
+        col_count=3,
+        col_index=2,
+        spanned_cols=[0, 1, 2],
+    )
+
+    cols = DocxRenderer._layout_block_cols(header, num_cols=3, page_width_px=1200)
+
+    assert cols == [2]
+
+
+def test_long_narrow_title_uses_body_sized_cap():
+    page = Page(index=0, image_width=1386, image_height=1859)
+    title = TextBlock(
+        bbox=BBox(67, 159, 108, 337),
+        block_type=BlockType.TITLE,
+        lines=[TextLine(text="GUSHIZHONGDEKEXUE 故事中的科学")],
+        estimated_font_size_pt=30.0,
+    )
+
+    resolved = DocxRenderer()._resolve_title_font_size_pt(
+        block=title,
+        page=page,
+        font_size_pt=30.0,
+        alignment="center",
+    )
+
+    assert resolved == 12.075
+
+
+def test_multicolumn_latin_body_escapes_font_floor():
+    page = Page(index=0, image_width=5000, image_height=6567)
+    block = TextBlock(
+        bbox=BBox(300, 3000, 1720, 4260),
+        block_type=BlockType.TEXT,
+        lines=[TextLine(text="A long Latin magazine paragraph should not stay at the tiny fit floor.")],
+        col_count=3,
+        col_index=0,
+        spanned_cols=[0],
+    )
+
+    resolved = DocxRenderer()._resolve_body_font_size_pt(
+        block=block,
+        page=page,
+        font_size_pt=8.5,
+    )
+
+    assert resolved == 9.3
