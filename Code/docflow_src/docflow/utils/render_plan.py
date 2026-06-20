@@ -8,7 +8,7 @@ from docflow.model.base import BlockType
 
 
 def _render_mode(profile: str) -> str:
-    if profile in {"single_column", "table_heavy"}:
+    if profile in {"single_column", "table_heavy", "textbook_mixed"}:
         return "reflow"
     if profile == "academic_two_col":
         return "native_columns"

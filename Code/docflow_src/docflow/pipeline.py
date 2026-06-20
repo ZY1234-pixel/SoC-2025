@@ -360,6 +360,9 @@ class RecoveryPipeline:
         if weak_multicolumn_evidence:
             self._collapse_to_single_column(page, blocks)
 
+        self._annotate_page_profile(page, blocks)
+        render_mode = str((page.attributes or {}).get("render_mode", ""))
+
         # -- 样式推断（字号、对齐、行距、缩进、bold/italic 等）-----------
         # 仅填充 JSON 中未明确提供的字段，已有值不覆盖
         infer_block_styles(
@@ -368,10 +371,10 @@ class RecoveryPipeline:
             justify_min_lines=self.config.align_justify_min_lines,
             page_width_px=page.image_width,
             font_mapper=font_mapper,
+            reflow_title_page_width_px=page.image_width if render_mode == "reflow" else 0.0,
         )
         color_inference_stats = infer_text_colors(page, blocks)
 
-        self._annotate_page_profile(page, blocks)
         if page.attributes is None:
             page.attributes = {}
         strategy_name = str(self.config.reading_order_strategy or "").strip().lower()
@@ -583,10 +586,11 @@ class RecoveryPipeline:
             cluster_thresh=0.10,
         )
         if len(col_bounds) < 2:
+            if band_major:
+                RecoveryPipeline._collapse_repaired_text_flow_columns(blocks)
+                return
             col_bounds = RecoveryPipeline._fallback_two_column_bounds(column_source, page_width)
             if len(col_bounds) < 2:
-                if band_major:
-                    RecoveryPipeline._collapse_repaired_text_flow_columns(blocks)
                 return
 
         col_centers = [(float(x1) + float(x2)) * 0.5 for x1, x2 in col_bounds]
@@ -1514,7 +1518,7 @@ class RecoveryPipeline:
 
     @staticmethod
     def _render_mode_for_profile(profile: str) -> str:
-        if profile in {"single_column", "table_heavy"}:
+        if profile in {"single_column", "table_heavy", "textbook_mixed"}:
             return "reflow"
         if profile == "academic_two_col":
             return "native_columns"

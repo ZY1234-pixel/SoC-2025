@@ -345,6 +345,8 @@ class DocxRenderer(BaseRenderer):
     def _split_embedded_visual_text_bands(self, zones: List[Zone], page: "Page") -> List[Zone]:
         if not zones or getattr(page, "image_width", 0) <= 0:
             return list(zones)
+        if (getattr(page, "attributes", None) or {}).get("layout_profile") == "textbook_mixed":
+            return list(zones)
 
         output: List[Zone] = []
         for zone in zones:

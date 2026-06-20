@@ -157,6 +157,58 @@ def test_weak_multicolumn_collapse_clears_column_metadata():
     assert block.spanned_cols == [0]
 
 
+def test_textbook_mixed_profile_uses_reflow_render_mode():
+    assert RecoveryPipeline._render_mode_for_profile("textbook_mixed") == "reflow"
+
+    block = TextBlock(
+        bbox=BBox(120, 120, 680, 180),
+        block_type=BlockType.TITLE,
+        lines=[TextLine(text="附子")],
+        col_count=2,
+        col_index=1,
+        spanned_cols=[1],
+    )
+    page = Page(index=0, image_width=800, image_height=1132)
+    page.attributes = {"layout_profile": "textbook_mixed", "rule_stats": {}}
+    page.zones = [Zone(col_count=2, blocks=[block], has_spanned=False)]
+    document = Document(pages=[page], metadata={})
+
+    plan = build_render_plan(document, output_format="docx")
+
+    assert plan["pages"][0]["render_mode"] == "reflow"
+    assert plan["pages"][0]["zones"][0]["rendering_strategy"] == "single_col"
+
+
+def test_reflow_title_alignment_uses_page_container_width():
+    title = TextBlock(
+        bbox=BBox(523, 233, 601, 261),
+        block_type=BlockType.TITLE,
+        lines=[TextLine(text="附子", text_region=[[523, 233], [601, 233], [601, 261], [523, 261]])],
+        col_count=2,
+        col_index=1,
+        spanned_cols=[1],
+    )
+    numbered = TextBlock(
+        bbox=BBox(136, 172, 296, 202),
+        block_type=BlockType.TITLE,
+        lines=[TextLine(text="七、温里药", text_region=[[136, 172], [296, 172], [296, 202], [136, 202]])],
+        col_count=2,
+        col_index=0,
+        spanned_cols=[0],
+    )
+    zone = Zone(col_count=2, blocks=[numbered, title], has_spanned=False)
+
+    infer_block_styles(
+        [zone],
+        Page(index=0, image_width=1102, image_height=1631).coord_mapper,
+        page_width_px=1102,
+        reflow_title_page_width_px=1102,
+    )
+
+    assert title.style.alignment == "center"
+    assert numbered.style.alignment == "left"
+
+
 def test_reflow_text_block_merges_visual_ocr_lines():
     lines = [
         TextLine(text="以习近平新时代中国特色社会主义思想为指导，全面贯彻党", text_region=[[90, 100], [690, 100], [690, 124], [90, 124]]),

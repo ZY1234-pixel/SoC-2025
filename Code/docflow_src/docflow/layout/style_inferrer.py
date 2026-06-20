@@ -61,6 +61,7 @@ def infer_block_styles(
     justify_min_lines: int = 3,
     page_width_px: float = 0.0,
     font_mapper: Optional["CoordMapper"] = None,
+    reflow_title_page_width_px: float = 0.0,
 ) -> None:
     """推断并填充所有 TextBlock 的 block.style。
 
@@ -75,6 +76,9 @@ def infer_block_styles(
         坐标映射器，用于 px → pt 转换。
     font_mapper:
         字号/行高换算使用的坐标映射器。未提供时回退为 *mapper*。
+    reflow_title_page_width_px:
+        当页面最终以 reflow 渲染时，标题对齐使用整页正文容器作为参考，
+        避免已弃用的多栏元数据把居中标题误判为局部左对齐。
     """
     all_text_blocks: List[TextBlock] = []
     font_mapper = font_mapper or mapper
@@ -119,6 +123,7 @@ def infer_block_styles(
                     mapper=mapper,
                     font_mapper=font_mapper,
                     justify_min_lines=justify_min_lines,
+                    reflow_title_page_width_px=reflow_title_page_width_px,
                 )
                 all_text_blocks.append(block)
 
@@ -142,6 +147,7 @@ def _infer_text_block(
     mapper: "CoordMapper",
     font_mapper: "CoordMapper",
     justify_min_lines: int,
+    reflow_title_page_width_px: float = 0.0,
 ) -> None:
     """对单个 TextBlock 推断并填充缺失的 style 字段。
 
@@ -173,6 +179,8 @@ def _infer_text_block(
         ci = block.col_index
         fallback = [block.bbox.x1, block.bbox.x2]
         col_left, col_right = col_px_text.get(ci, col_px_all.get(ci, fallback))
+        if is_title and reflow_title_page_width_px > 0:
+            col_left, col_right = 0.0, float(reflow_title_page_width_px)
         bs.alignment = _detect_alignment(
             block=block,
             col_left=float(col_left),
