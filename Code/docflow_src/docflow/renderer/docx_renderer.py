@@ -549,10 +549,7 @@ class DocxRenderer(BaseRenderer):
                 continue
             overlap = min(float(block.bbox.y2), float(visual.bbox.y2)) - max(float(block.bbox.y1), float(visual.bbox.y1))
             close_vertical = float(block.bbox.y1) <= y_bottom and float(block.bbox.y2) >= y_top
-            side_by_side = (
-                float(block.bbox.x2) <= float(visual.bbox.x1) - page_w * 0.02
-                or float(block.bbox.x1) >= float(visual.bbox.x2) + page_w * 0.02
-            )
+            side_by_side = DocxRenderer._is_side_of_visual(block, visual)
             near_vertical = (
                 abs(float(block.bbox.y2) - float(visual.bbox.y1)) <= page_h * 0.04
                 or abs(float(block.bbox.y1) - float(visual.bbox.y2)) <= page_h * 0.04
@@ -572,6 +569,28 @@ class DocxRenderer(BaseRenderer):
         order = {id(block): idx for idx, block in enumerate(zone.blocks)}
         band.sort(key=lambda block: order.get(id(block), 10**9))
         return band
+
+    @staticmethod
+    def _is_side_of_visual(block: Block, visual: Block) -> bool:
+        block_cx = (float(block.bbox.x1) + float(block.bbox.x2)) * 0.5
+        visual_cx = (float(visual.bbox.x1) + float(visual.bbox.x2)) * 0.5
+        x_overlap = max(
+            0.0,
+            min(float(block.bbox.x2), float(visual.bbox.x2)) - max(float(block.bbox.x1), float(visual.bbox.x1)),
+        )
+        max_allowed_x_overlap = min(float(block.bbox.width), float(visual.bbox.width)) * 0.12
+        return (
+            (
+                block_cx < visual_cx
+                and float(block.bbox.x1) < float(visual.bbox.x1)
+                and x_overlap <= max_allowed_x_overlap
+            )
+            or (
+                block_cx > visual_cx
+                and float(block.bbox.x2) > float(visual.bbox.x2)
+                and x_overlap <= max_allowed_x_overlap
+            )
+        )
 
     @classmethod
     def _zone_has_local_visual_text_evidence(cls, zone: Zone, page: "Page") -> bool:
@@ -683,10 +702,7 @@ class DocxRenderer(BaseRenderer):
             side_text = [
                 block for block in blocks
                 if block is not visual
-                and (
-                    float(block.bbox.x1) >= float(visual.bbox.x2) + page_w * 0.02
-                    or float(block.bbox.x2) <= float(visual.bbox.x1) - page_w * 0.02
-                )
+                and DocxRenderer._is_side_of_visual(block, visual)
             ]
             if side_text:
                 text_cx = sum((float(b.bbox.x1) + float(b.bbox.x2)) * 0.5 for b in side_text) / len(side_text)
