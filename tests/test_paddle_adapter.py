@@ -250,6 +250,29 @@ def test_pp_doclayout_v3_content_parent_is_suppressed_by_specific_children() -> 
     )
 
 
+def test_high_confidence_long_text_is_not_suppressed_by_formula_children() -> None:
+    adapter = PaddleAdapter()
+    results = [
+        {
+            "type": "text",
+            "bbox": [100, 100, 620, 260],
+            "score": 0.95,
+            "res": [
+                {
+                    "text": "高5~8cm。表面黑褐色，粗糙，附有盐粒结晶，可见突起的支根及支根痕。",
+                }
+            ],
+        },
+        {"type": "inline_formula", "bbox": [130, 150, 210, 175], "score": 0.54, "res": []},
+        {"type": "inline_formula", "bbox": [420, 200, 510, 225], "score": 0.39, "res": []},
+    ]
+
+    filtered, report = adapter._suppress_nested_duplicates(results)
+
+    assert [item["type"] for item in filtered] == ["text"]
+    assert not any(entry["reason"] == "generic_parent_suppressed" for entry in report)
+
+
 def test_pp_doclayout_v3_table_keeps_parent_and_nests_internal_children() -> None:
     adapter = PaddleAdapter()
     image = np.zeros((500, 700, 3), dtype=np.uint8)

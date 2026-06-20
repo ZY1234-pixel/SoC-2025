@@ -562,11 +562,19 @@ class PaddleAdapter(BaseAdapter):
         if raw_type == "content":
             return True
         if raw_type in {"text", "aside_text", "vertical_text", "algorithm"}:
+            if cls._is_high_value_text_item(item):
+                return False
             return int(item.get("contained_specific_child_count", 0) or 0) >= 2
         return (
             category in cls._GENERIC_PARENT_CATEGORIES
             and int(item.get("contained_specific_child_count", 0) or 0) >= 2
         )
+
+    @staticmethod
+    def _is_high_value_text_item(item: dict) -> bool:
+        text = str(item.get("text", "") or "").strip()
+        score = float(item.get("score", 0.0) or 0.0)
+        return score >= 0.70 and len(text) >= 30
 
     @classmethod
     def _is_specific_child_item(cls, item: dict) -> bool:

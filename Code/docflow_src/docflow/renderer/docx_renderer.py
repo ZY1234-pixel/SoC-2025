@@ -546,6 +546,15 @@ class DocxRenderer(BaseRenderer):
         build_options.pop("expected_pages", None)
         build_options.pop("enforce_single_page", None)
 
+        scale = 1.0
+        self._fit_scale = 1.0
+        self._font_floor = 8.5
+        trial_doc = self._build_docx(document, **build_options)
+        if not self._check_overflow(trial_doc, expected_pages):
+            self._fit_scale = 1.0
+            self._font_floor = 8.5
+            return trial_doc
+
         scale = self._select_builtin_fit_scale(document, expected_pages)
         if scale < 1.0:
             # 计算溢出量，尝试用局部修正减少部分溢出
@@ -583,6 +592,20 @@ class DocxRenderer(BaseRenderer):
                     scale = min(scale, remaining_scale)
                     break  # 单页文档，只需处理第一页
 
+        searched_doc = self._render_largest_fitting_scale(
+            document,
+            expected_pages,
+            build_options,
+            min_scale=max(self._PAGE_FIT_MIN_SCALE, min(scale, 0.99)),
+        )
+        if searched_doc is not None:
+            self._fit_scale = 1.0
+            self._corr_space_after_pt = 0.0
+            self._corr_gap_pt = 0.0
+            self._corr_font_pt = 0.0
+            self._font_floor = 8.5
+            return searched_doc
+
         logger.info("single-page builtin fit selected scale=%.3f expected_pages=%d corr_space=%.1f corr_gap=%.1f corr_font=%.2f",
                     scale, expected_pages,
                     self._corr_space_after_pt, self._corr_gap_pt, self._corr_font_pt)
@@ -609,6 +632,49 @@ class DocxRenderer(BaseRenderer):
             self._corr_gap_pt = 0.0
             self._corr_font_pt = 0.0
             self._font_floor = 8.5
+
+    def _render_largest_fitting_scale(
+        self,
+        document: "Document",
+        expected_pages: int,
+        build_options: dict,
+        *,
+        min_scale: float,
+    ) -> Optional[DocxDocument]:
+        """Find the largest scale that LibreOffice confirms fits in-page."""
+        scales = sorted(
+            {
+                scale for scale in self._PAGE_FIT_SCALES
+                if self._PAGE_FIT_MIN_SCALE <= scale < 1.0 and scale >= min_scale
+            }
+        )
+        if not scales:
+            return None
+
+        best_doc: Optional[DocxDocument] = None
+        best_scale: Optional[float] = None
+        lo = 0
+        hi = len(scales) - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate_scale = scales[mid]
+            self._fit_scale = candidate_scale
+            self._font_floor = 8.5
+            doc = self._build_docx(document, **build_options)
+            if self._check_overflow(doc, expected_pages):
+                hi = mid - 1
+                continue
+            best_doc = doc
+            best_scale = candidate_scale
+            lo = mid + 1
+
+        if best_doc is not None:
+            logger.info(
+                "single-page actual fit selected scale=%.3f expected_pages=%d",
+                best_scale or 1.0,
+                expected_pages,
+            )
+        return best_doc
 
     @classmethod
     def _check_overflow(cls, doc: DocxDocument, expected_pages: int) -> bool:
@@ -1909,7 +1975,7 @@ class DocxRenderer(BaseRenderer):
 
         mapper = page.coord_mapper
         img_w = page.image_width
-        blocks = sorted(zone.blocks, key=lambda b: (float(b.bbox.y1), float(b.bbox.x1)))
+        blocks = self._visual_order_for_spanned_zone(zone)
         num_cols = max(int(zone.col_count or 1), 1)
         if not blocks or num_cols <= 1:
             return
@@ -1979,12 +2045,21 @@ class DocxRenderer(BaseRenderer):
                 if len(set(_block_cols(block)) & segment_cols) <= 1
             ]
             bands: List[List[Block]] = []
+            band_start: Optional[float] = None
             band_bottom: Optional[float] = None
+            band_window = max(220.0, min(800.0, float(page.image_height) * 0.12))
             for block in sorted(singles, key=lambda b: (float(b.bbox.y1), float(b.bbox.x1))):
                 y1 = float(block.bbox.y1)
                 y2 = float(block.bbox.y2)
-                if not bands or band_bottom is None or y1 > band_bottom + 24.0:
+                if (
+                    not bands
+                    or band_bottom is None
+                    or band_start is None
+                    or y1 > band_bottom + 24.0
+                    or y1 > band_start + band_window
+                ):
                     bands.append([block])
+                    band_start = y1
                     band_bottom = y2
                     continue
                 bands[-1].append(block)
@@ -2094,6 +2169,34 @@ class DocxRenderer(BaseRenderer):
             _init_cell(cell, add_gap=False)
             _render_stream(cell, leftovers, list(range(num_cols)), sum(col_widths))
         return
+
+    @staticmethod
+    def _visual_order_for_spanned_zone(zone: Zone) -> List[Block]:
+        blocks = list(getattr(zone, "blocks", []) or [])
+        if not blocks:
+            return []
+        has_flow = any(
+            bool((getattr(block, "attributes", None) or {}).get("flow_id"))
+            for block in blocks
+        )
+        has_cross_media = any(
+            block.block_type in {BlockType.FIGURE, BlockType.TABLE}
+            and len(getattr(block, "spanned_cols", []) or []) > 1
+            for block in blocks
+        )
+        if has_flow or not has_cross_media:
+            return sorted(blocks, key=lambda b: (float(b.bbox.y1), float(b.bbox.x1)))
+
+        def _band_key(block: Block) -> tuple[int, int, float, float]:
+            y1 = float(block.bbox.y1)
+            x1 = float(block.bbox.x1)
+            col = int(getattr(block, "col_index", 0) or 0)
+            band = int(y1 // 900.0)
+            if block.block_type in {BlockType.TITLE, BlockType.FIGURE, BlockType.TABLE}:
+                band = max(0, band - 1)
+            return (band, col, y1, x1)
+
+        return sorted(blocks, key=_band_key)
 
     # ------------------------------------------------------------------
     # 工具方法
