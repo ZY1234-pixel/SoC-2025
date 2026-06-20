@@ -285,6 +285,33 @@ def test_pp_doclayout_v3_table_keeps_parent_and_nests_internal_children() -> Non
     assert cleanup["cleanup_rule_counts"]["table_container_child"] == 2
 
 
+def test_low_confidence_footer_table_noise_is_dropped() -> None:
+    adapter = PaddleAdapter()
+    image = np.zeros((1000, 800, 3), dtype=np.uint8)
+    results = [
+        {
+            "type": "table",
+            "bbox": [0, 850, 790, 990],
+            "score": 0.34,
+            "res": {"html": "<table><tr><td>30</td></tr></table>"},
+        },
+        {
+            "type": "table",
+            "bbox": [80, 500, 720, 760],
+            "score": 0.93,
+            "res": {"html": "<table><tr><td>real table</td></tr></table>"},
+        },
+    ]
+
+    converted = adapter.convert(results, image)
+    blocks = converted["pages"][0]["blocks"]
+
+    assert [block["category"] for block in blocks] == ["table"]
+    assert blocks[0]["bbox"] == [80.0, 500.0, 720.0, 760.0]
+    cleanup = converted["pages"][0]["attributes"]
+    assert cleanup["cleanup_rule_counts"]["footer_table_noise_drop"] == 1
+
+
 def test_pp_doclayout_v3_header_absorbs_page_number_child() -> None:
     adapter = PaddleAdapter()
     image = np.zeros((260, 400, 3), dtype=np.uint8)

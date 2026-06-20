@@ -193,12 +193,14 @@ class PaddleAdapter(BaseAdapter):
         blocks: List[Dict[str, Any]] = []
         results = self._recall_missing_figures_from_captions(results, image)
         filtered_results, cleanup_report = self._suppress_nested_duplicates(results)
+        filtered_results, footer_noise_report = self._drop_footer_table_noise(filtered_results, w, h)
         filtered_results, trim_report = self._trim_carry_over_text_regions(filtered_results)
         filtered_results, line_dedup_report = self._trim_duplicate_ocr_lines(filtered_results)
         filtered_results = [
             self._trim_title_leading_formula_number(region)
             for region in filtered_results
         ]
+        cleanup_report.extend(footer_noise_report)
         cleanup_report.extend(trim_report)
         cleanup_report.extend(line_dedup_report)
         page_attributes = None
@@ -670,6 +672,49 @@ class PaddleAdapter(BaseAdapter):
             if item["region"] is not None
         ]
         return trimmed, report
+
+    @classmethod
+    def _drop_footer_table_noise(
+        cls,
+        results: List[dict],
+        page_w: int,
+        page_h: int,
+    ) -> tuple[List[dict], List[Dict[str, Any]]]:
+        if not results:
+            return list(results or []), []
+
+        kept: List[dict] = []
+        report: List[Dict[str, Any]] = []
+        for index, region in enumerate(results):
+            if not cls._is_footer_table_noise(region, page_w, page_h):
+                kept.append(region)
+                continue
+            report.append(
+                {
+                    "reason": "footer_table_noise_drop",
+                    "removed_index": index,
+                    "removed_category": "table",
+                }
+            )
+        return kept, report
+
+    @classmethod
+    def _is_footer_table_noise(cls, region: dict, page_w: int, page_h: int) -> bool:
+        if str(region.get("type", "")).lower() != "table":
+            return False
+        bbox = cls._safe_bbox(region.get("bbox"))
+        width = max(0.0, bbox[2] - bbox[0])
+        height = max(0.0, bbox[3] - bbox[1])
+        if page_w <= 0 or page_h <= 0 or width <= 0 or height <= 0:
+            return False
+        score = float(region.get("score", 0.0) or 0.0)
+        near_footer = bbox[1] >= page_h * 0.84 and bbox[3] >= page_h * 0.95
+        wide = width >= page_w * 0.72
+        shallow = height <= page_h * 0.16
+        if not (score <= 0.45 and near_footer and wide and shallow):
+            return False
+        text = cls._normalize_text(cls._extract_region_text(region))
+        return len(text) <= 40
 
     @classmethod
     def _trim_duplicate_ocr_lines(

@@ -1230,8 +1230,16 @@ class DocxRenderer(BaseRenderer):
 
         mapper = ctx.coord_mapper
         bbox = block.bbox
-        # 宽度上限：min(bbox宽度, 列宽98%)
+        # In table cells, recover image scale relative to the local column width
+        # instead of the full-page mapper; otherwise side-column figures become
+        # visibly undersized after the layout table narrows the available area.
+        local_col_px = max(float(ctx.col_right_px) - float(ctx.col_left_px), 1.0)
+        local_ratio = max(float(bbox.width), 1.0) / local_col_px
         pw = min(mapper.w(bbox.width), ctx.col_width_pt * 0.98)
+        if getattr(ctx, "in_table_cell", False):
+            pw = min(max(pw, ctx.col_width_pt * min(local_ratio, 0.98)), ctx.col_width_pt * 0.98)
+            if getattr(block, "block_type", None) == BlockType.FIGURE:
+                pw = min(max(pw, ctx.col_width_pt * 0.72), ctx.col_width_pt * 0.98)
         # 高度校正：仅对极宽的图片（宽高比 > 1.8，如横幅/全景图）才用高度约束，
         # 避免报纸/杂志中常见的横图（宽高比 ~1.2~1.6）被不必要地缩小。
         # 对于这类图片，目标列/跨列单元格通常足够高，按宽度渲染不会溢出。
@@ -1283,7 +1291,11 @@ class DocxRenderer(BaseRenderer):
 
     def _render_table_block(self, container, block: TableBlock,
                             ctx: RenderContext, space_before: float) -> None:
-        """渲染表格：先尝试 HTML→docx，失败则退回纯文本摘要。"""
+        """渲染表格：复杂版面优先用裁剪图保真，避免 Word 表格分页撕裂。"""
+        if block.image_data:
+            self._render_image_block(container, block, ctx, space_before)
+            return
+
         if space_before > self._scale(MIN_LINE_SPACING_PT):
             add_spacing_para(container, space_before)
 
@@ -1320,11 +1332,11 @@ class DocxRenderer(BaseRenderer):
                 set_run_font(run, font_size=self._scale(self.config.default_font_size_pt))
                 rendered = True
 
-        if not rendered and block.image_data:
+        if not rendered:
             p = container.add_paragraph()
             reset_paragraph_format(p)
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            run = p.add_run("[表格渲染失败]")
+            run = p.add_run("[表格]")
             set_run_font(run, font_size=self._scale(self.config.default_font_size_pt))
 
     def _render_text_block(self, container, block: TextBlock,
@@ -1884,7 +1896,15 @@ class DocxRenderer(BaseRenderer):
         col_widths: List[float],
         visual_gap: float,
     ) -> None:
-        """Render mixed single-column and spanned blocks without nested tables."""
+        """Render mixed single-column and spanned blocks with parallel segments.
+
+        The previous row-per-block table kept Word XML simple, but it serialized
+        blocks from different columns vertically. That made visually parallel
+        content add up in height and pushed many single-page sources onto a
+        second Word page. This segment table keeps independent columns running
+        side by side while still allowing a spanned segment to occupy multiple
+        source columns.
+        """
         from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 
         mapper = page.coord_mapper
@@ -1894,12 +1914,26 @@ class DocxRenderer(BaseRenderer):
         if not blocks or num_cols <= 1:
             return
 
-        tbl = doc.add_table(rows=0, cols=num_cols)
+        spanned_cols = sorted(
+            {
+                int(ci)
+                for block in blocks
+                for ci in (getattr(block, "spanned_cols", []) or [])
+                if 0 <= int(ci) < num_cols and len(getattr(block, "spanned_cols", []) or []) > 1
+            }
+        )
+        segments = self._column_segments(num_cols, spanned_cols)
+        outer_widths = [
+            sum(col_widths[ci] for ci in cols)
+            for _, cols in segments
+        ]
+
+        tbl = doc.add_table(rows=1, cols=len(segments))
         tbl.autofit = False
         clear_table_borders(tbl)
-        set_table_col_widths(tbl, col_widths)
+        set_table_col_widths(tbl, outer_widths)
 
-        def _init_cell(cell, ci: int) -> None:
+        def _init_cell(cell, add_gap: bool) -> None:
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
             reset_paragraph_format(cell.paragraphs[0])
             set_paragraph_spacing(
@@ -1907,31 +1941,21 @@ class DocxRenderer(BaseRenderer):
                 line_spacing=self._scale(MIN_LINE_SPACING_PT),
                 exact=True,
             )
-            if ci < num_cols - 1:
+            if add_gap:
                 set_cell_right_margin(cell, visual_gap)
 
-        for block in blocks:
-            spans = sorted(
-                {
-                    int(ci) for ci in (getattr(block, "spanned_cols", []) or [getattr(block, "col_index", 0)])
-                    if 0 <= int(ci) < num_cols
-                }
-            )
-            if not spans:
-                spans = [min(max(int(getattr(block, "col_index", 0) or 0), 0), num_cols - 1)]
-            start_col = min(spans)
-            end_col = max(spans)
+        def _block_cols(block) -> List[int]:
+            raw = getattr(block, "spanned_cols", []) or [getattr(block, "col_index", 0)]
+            cols = sorted({int(ci) for ci in raw if 0 <= int(ci) < num_cols})
+            if cols:
+                return cols
+            return [min(max(int(getattr(block, "col_index", 0) or 0), 0), num_cols - 1)]
 
-            row = tbl.add_row()
-            for ci, cell in enumerate(row.cells):
-                _init_cell(cell, ci)
-
-            cell = row.cells[start_col]
-            if end_col > start_col:
-                cell = cell.merge(row.cells[end_col])
-            width_pt = sum(col_widths[start_col:end_col + 1])
-            left_px = min((col_px.get(ci, [0, img_w])[0] for ci in range(start_col, end_col + 1)), default=0)
-            right_px = max((col_px.get(ci, [0, img_w])[1] for ci in range(start_col, end_col + 1)), default=img_w)
+        def _render_stream(cell, stream_blocks: List[Block], cols: List[int], width_pt: float) -> None:
+            if not stream_blocks:
+                return
+            left_px = min((col_px.get(ci, [0, img_w])[0] for ci in cols), default=0)
+            right_px = max((col_px.get(ci, [0, img_w])[1] for ci in cols), default=img_w)
             ctx = RenderContext(
                 coord_mapper=mapper,
                 page=page,
@@ -1940,12 +1964,135 @@ class DocxRenderer(BaseRenderer):
                 col_right_px=right_px,
                 in_table_cell=True,
             )
-            self._render_block(cell, block, ctx, space_before=0)
+            setattr(ctx, "render_mode", "reflow")
+            prev_y = 0
+            for block in sorted(stream_blocks, key=lambda b: (float(b.bbox.y1), float(b.bbox.x1))):
+                gap = max(0, block.bbox.y1 - prev_y)
+                sp = self._scale(max(min(mapper.h(gap), 4) - self._corr_gap_pt, 0)) if (prev_y > 0 and gap > 2) else 0
+                self._render_block(cell, block, ctx, space_before=sp)
+                prev_y = block.bbox.y2
             self._prune_leading_empty_cell_paragraphs(cell)
-            for ci in range(num_cols):
-                if start_col <= ci <= end_col:
+
+        def _single_col_bands(segment_blocks: List[Block], segment_cols: set[int]) -> List[List[Block]]:
+            singles = [
+                block for block in segment_blocks
+                if len(set(_block_cols(block)) & segment_cols) <= 1
+            ]
+            bands: List[List[Block]] = []
+            band_bottom: Optional[float] = None
+            for block in sorted(singles, key=lambda b: (float(b.bbox.y1), float(b.bbox.x1))):
+                y1 = float(block.bbox.y1)
+                y2 = float(block.bbox.y2)
+                if not bands or band_bottom is None or y1 > band_bottom + 24.0:
+                    bands.append([block])
+                    band_bottom = y2
                     continue
-                self._prune_leading_empty_cell_paragraphs(row.cells[ci])
+                bands[-1].append(block)
+                band_bottom = max(band_bottom, y2)
+            return bands
+
+        def _render_segment_subtable(parent_cell, segment_blocks: List[Block], cols: List[int], width_pt: float) -> None:
+            local_cols = list(cols)
+            local_index = {ci: idx for idx, ci in enumerate(local_cols)}
+            segment_col_set = set(local_cols)
+            if len(local_cols) <= 1:
+                _render_stream(parent_cell, segment_blocks, local_cols, width_pt)
+                return
+
+            sub_widths = [col_widths[ci] for ci in local_cols]
+            total_sub = sum(sub_widths)
+            if total_sub > 0 and width_pt > 0:
+                sub_widths = [w * width_pt / total_sub for w in sub_widths]
+
+            sub_tbl = parent_cell.add_table(rows=0, cols=len(local_cols))
+            sub_tbl.autofit = False
+            clear_table_borders(sub_tbl)
+            set_table_col_widths(sub_tbl, sub_widths)
+
+            def _init_sub_cell(cell, local_ci: int) -> None:
+                cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+                reset_paragraph_format(cell.paragraphs[0])
+                set_paragraph_spacing(
+                    cell.paragraphs[0],
+                    line_spacing=self._scale(MIN_LINE_SPACING_PT),
+                    exact=True,
+                )
+                if local_ci < len(local_cols) - 1:
+                    set_cell_right_margin(cell, visual_gap)
+
+            span_blocks = [
+                block for block in segment_blocks
+                if len(set(_block_cols(block)) & segment_col_set) > 1
+            ]
+            units: List[Tuple[float, str, object]] = []
+            for band in _single_col_bands(segment_blocks, segment_col_set):
+                units.append((min(float(b.bbox.y1) for b in band), "band", band))
+            for block in span_blocks:
+                units.append((float(block.bbox.y1), "span", block))
+
+            for _, kind, payload in sorted(units, key=lambda item: item[0]):
+                row = sub_tbl.add_row()
+                for local_ci, cell in enumerate(row.cells):
+                    _init_sub_cell(cell, local_ci)
+
+                if kind == "span":
+                    block = payload
+                    span_cols = [ci for ci in _block_cols(block) if ci in segment_col_set]
+                    start = min(local_index[ci] for ci in span_cols)
+                    end = max(local_index[ci] for ci in span_cols)
+                    cell = row.cells[start]
+                    if end > start:
+                        cell = cell.merge(row.cells[end])
+                    span_width = sum(sub_widths[start:end + 1])
+                    _render_stream(cell, [block], span_cols, span_width)
+                    for local_ci in range(len(local_cols)):
+                        if start <= local_ci <= end:
+                            continue
+                        self._prune_leading_empty_cell_paragraphs(row.cells[local_ci])
+                    continue
+
+                band_blocks = payload
+                for ci in local_cols:
+                    local_ci = local_index[ci]
+                    cell = row.cells[local_ci]
+                    col_blocks = [
+                        block for block in band_blocks
+                        if (_block_cols(block)[0] if _block_cols(block) else ci) == ci
+                    ]
+                    _render_stream(cell, col_blocks, [ci], sub_widths[local_ci])
+
+        row = tbl.rows[0]
+        consumed: set[int] = set()
+        for seg_idx, (seg_type, cols) in enumerate(segments):
+            cell = row.cells[seg_idx]
+            _init_cell(cell, add_gap=(seg_idx < len(segments) - 1))
+            col_set = set(cols)
+            if seg_type == "standalone":
+                stream = [
+                    block for block in blocks
+                    if id(block) not in consumed
+                    and len(_block_cols(block)) == 1
+                    and _block_cols(block)[0] in col_set
+                ]
+            else:
+                stream = [
+                    block for block in blocks
+                    if id(block) not in consumed
+                    and bool(set(_block_cols(block)) & col_set)
+                ]
+            for block in stream:
+                consumed.add(id(block))
+            _render_segment_subtable(cell, stream, cols, outer_widths[seg_idx])
+
+        leftovers = [block for block in blocks if id(block) not in consumed]
+        if leftovers:
+            fallback = doc.add_table(rows=1, cols=1)
+            fallback.autofit = False
+            clear_table_borders(fallback)
+            set_table_col_widths(fallback, [sum(col_widths)])
+            cell = fallback.rows[0].cells[0]
+            _init_cell(cell, add_gap=False)
+            _render_stream(cell, leftovers, list(range(num_cols)), sum(col_widths))
         return
 
     # ------------------------------------------------------------------
