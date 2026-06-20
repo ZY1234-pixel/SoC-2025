@@ -172,6 +172,7 @@ class DocxRenderer(BaseRenderer):
             page_render_mode = page.attributes.get("render_mode", "")
 
         render_zones = self._merge_adjacent_visual_text_zones(page.zones, page)
+        render_zones = self._split_embedded_visual_text_bands(render_zones, page)
 
         for zi, zone in enumerate(render_zones):
             # 预计算每个区域的列像素边界
@@ -283,7 +284,7 @@ class DocxRenderer(BaseRenderer):
         idx = 0
         while idx < len(zones):
             zone = zones[idx]
-            if not self._is_local_visual_zone(zone, page):
+            if not self._zone_has_local_visual_text_evidence(zone, page):
                 merged.append(zone)
                 idx += 1
                 continue
@@ -314,6 +315,11 @@ class DocxRenderer(BaseRenderer):
                     band_bottom = max(band_bottom, float(block.bbox.y2))
                 lookahead += 1
 
+            if len(cluster) == 1 and not self._is_local_visual_zone(zone, page):
+                merged.append(zone)
+                idx += 1
+                continue
+
             if len(cluster) == 1:
                 merged.append(zone)
                 idx += 1
@@ -335,6 +341,150 @@ class DocxRenderer(BaseRenderer):
             idx = lookahead
 
         return merged
+
+    def _split_embedded_visual_text_bands(self, zones: List[Zone], page: "Page") -> List[Zone]:
+        if not zones or getattr(page, "image_width", 0) <= 0:
+            return list(zones)
+
+        output: List[Zone] = []
+        for zone in zones:
+            if zone.rendering_strategy == "strip_row" or len(zone.blocks) < 4:
+                output.append(zone)
+                continue
+            visual = self._embedded_visual_anchor(zone, page)
+            if visual is None:
+                output.append(zone)
+                continue
+
+            band_blocks = self._embedded_visual_band_blocks(zone, visual, page)
+            if len(band_blocks) < 3:
+                output.append(zone)
+                continue
+
+            band_ids = {id(block) for block in band_blocks}
+            before = [block for block in zone.blocks if id(block) not in band_ids and float(block.bbox.y2) <= float(visual.bbox.y1)]
+            after = [block for block in zone.blocks if id(block) not in band_ids and block not in before]
+            if before:
+                output.append(Zone(
+                    col_count=zone.col_count,
+                    blocks=before,
+                    has_spanned=any(len(getattr(b, "spanned_cols", []) or []) > 1 for b in before),
+                    flow_id=zone.flow_id,
+                    flow_kind=zone.flow_kind,
+                    region_id=zone.region_id,
+                    region_kind=zone.region_kind,
+                ))
+            self._assign_render_band_columns(band_blocks, page)
+            output.append(Zone(
+                col_count=2,
+                blocks=band_blocks,
+                has_spanned=False,
+                flow_id=zone.flow_id,
+                flow_kind=zone.flow_kind,
+                region_id=zone.region_id,
+                region_kind=zone.region_kind,
+            ))
+            if after:
+                output.append(Zone(
+                    col_count=zone.col_count,
+                    blocks=after,
+                    has_spanned=any(len(getattr(b, "spanned_cols", []) or []) > 1 for b in after),
+                    flow_id=zone.flow_id,
+                    flow_kind=zone.flow_kind,
+                    region_id=zone.region_id,
+                    region_kind=zone.region_kind,
+                ))
+        return output
+
+    @staticmethod
+    def _embedded_visual_anchor(zone: Zone, page: "Page") -> Optional[Block]:
+        page_w = max(float(getattr(page, "image_width", 0) or 0), 1.0)
+        page_h = max(float(getattr(page, "image_height", 0) or 0), 1.0)
+        candidates = [
+            block for block in zone.blocks
+            if block.block_type in {BlockType.FIGURE, BlockType.TABLE}
+            and float(block.bbox.width) <= page_w * 0.46
+            and float(block.bbox.height) >= max(page_h * 0.10, 120.0)
+        ]
+        if len(candidates) != 1:
+            return None
+        return candidates[0]
+
+    @staticmethod
+    def _embedded_visual_band_blocks(zone: Zone, visual: Block, page: "Page") -> List[Block]:
+        page_w = max(float(getattr(page, "image_width", 0) or 0), 1.0)
+        page_h = max(float(getattr(page, "image_height", 0) or 0), 1.0)
+        y_top = float(visual.bbox.y1) - page_h * 0.04
+        y_bottom = float(visual.bbox.y2) + page_h * 0.06
+        allowed = {
+            BlockType.TEXT,
+            BlockType.TITLE,
+            BlockType.FIGURE_CAPTION,
+            BlockType.TABLE_CAPTION,
+            BlockType.REFERENCE,
+            BlockType.ABSTRACT,
+        }
+        side_text: List[Block] = []
+        captions: List[Block] = []
+        for block in zone.blocks:
+            if block is visual or block.block_type not in allowed:
+                continue
+            overlap = min(float(block.bbox.y2), float(visual.bbox.y2)) - max(float(block.bbox.y1), float(visual.bbox.y1))
+            close_vertical = float(block.bbox.y1) <= y_bottom and float(block.bbox.y2) >= y_top
+            side_by_side = (
+                float(block.bbox.x2) <= float(visual.bbox.x1) - page_w * 0.02
+                or float(block.bbox.x1) >= float(visual.bbox.x2) + page_w * 0.02
+            )
+            if side_by_side and close_vertical and (overlap >= 18.0 or block.block_type == BlockType.TITLE):
+                side_text.append(block)
+                continue
+            caption_like = (
+                block.block_type in {BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION}
+                and abs(float(block.bbox.y1) - float(visual.bbox.y2)) <= page_h * 0.08
+            )
+            if caption_like:
+                captions.append(block)
+        if not side_text:
+            return []
+        band = [visual] + side_text + captions
+        order = {id(block): idx for idx, block in enumerate(zone.blocks)}
+        band.sort(key=lambda block: order.get(id(block), 10**9))
+        return band
+
+    @classmethod
+    def _zone_has_local_visual_text_evidence(cls, zone: Zone, page: "Page") -> bool:
+        if cls._is_local_visual_zone(zone, page):
+            return True
+        if zone.rendering_strategy == "strip_row" or not zone.blocks:
+            return False
+        visuals = [
+            block for block in zone.blocks
+            if block.block_type in {BlockType.FIGURE, BlockType.TABLE}
+        ]
+        if len(visuals) != 1:
+            return False
+        visual = visuals[0]
+        text_blocks = [
+            block for block in zone.blocks
+            if block is not visual
+            and block.block_type in {
+                BlockType.TEXT,
+                BlockType.TITLE,
+                BlockType.FIGURE_CAPTION,
+                BlockType.TABLE_CAPTION,
+                BlockType.REFERENCE,
+                BlockType.ABSTRACT,
+            }
+        ]
+        if not text_blocks:
+            return False
+        return cls._zone_can_join_visual_text_band(
+            Zone(col_count=zone.col_count, blocks=text_blocks, has_spanned=zone.has_spanned),
+            page=page,
+            band_top=float(visual.bbox.y1),
+            band_bottom=float(visual.bbox.y2),
+            visual_blocks=[visual],
+        )
 
     @staticmethod
     def _is_local_visual_zone(zone: Zone, page: "Page") -> bool:
@@ -630,13 +780,23 @@ class DocxRenderer(BaseRenderer):
             return False
         if zone.col_count <= 1:
             return False
-        if any(
-            block.block_type in {BlockType.FIGURE, BlockType.TABLE, BlockType.FORMULA, BlockType.EQUATION}
-            for block in zone.blocks
-        ):
-            return False
         if any(len(getattr(b, "spanned_cols", [])) > 1 for b in zone.blocks):
             return False
+        visual_blocks = [
+            block for block in zone.blocks
+            if block.block_type in {BlockType.FIGURE, BlockType.TABLE, BlockType.FORMULA, BlockType.EQUATION}
+        ]
+        if visual_blocks:
+            repaired_model_order = any(
+                (getattr(block, "attributes", None) or {}).get("reading_order_strategy") == "model_order_geometric_repair"
+                for block in zone.blocks
+            )
+            if (
+                zone.col_count != 2
+                or not repaired_model_order
+                or any(block.block_type != BlockType.FIGURE for block in visual_blocks)
+            ):
+                return False
         if self._has_irregular_column_widths(col_px or {}, page_width_px, zone.col_count):
             return False
         return True

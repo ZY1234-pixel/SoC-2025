@@ -265,7 +265,9 @@ class RecoveryPipeline:
         page.estimate_margins(blocks)
 
         # -- 需要时执行版面分析 ----------------------------------
-        if self._should_use_model_order(raw_blocks):
+        used_model_order = self._should_use_model_order(raw_blocks)
+        model_order_repaired = 0
+        if used_model_order:
             blocks = self._apply_model_order_metadata(blocks)
             self._assign_model_order_columns(
                 blocks,
@@ -320,6 +322,12 @@ class RecoveryPipeline:
 
         blocks = self._merge_short_continuation_fragments(blocks)
         blocks = self._trim_repeated_prefix_within_flows(blocks)
+        if used_model_order:
+            model_order_repaired, blocks = self._repair_anomalous_model_order(
+                blocks,
+                page_width=page.image_width,
+                page_height=page.image_height,
+            )
 
         # -- 检测文本区块中的段落 ------------------------------
         for block in blocks:
@@ -376,6 +384,7 @@ class RecoveryPipeline:
             "decorative_icon_suppressed": decorative_icon_suppressed,
             "spurious_visual_suppressed": spurious_visual_suppressed,
             "figure_text_dedup_suppressed": figure_text_dedup_suppressed,
+            "model_order_geometric_repair": model_order_repaired,
             "zone_count": len(page.zones),
             "weak_multicolumn_collapsed": int(weak_multicolumn_evidence),
         }
@@ -479,6 +488,270 @@ class RecoveryPipeline:
             if block.attributes is None:
                 block.attributes = {}
             block.attributes["column_source"] = "model_order_geometry"
+
+    @classmethod
+    def _repair_anomalous_model_order(
+        cls,
+        blocks: List[Block],
+        *,
+        page_width: int,
+        page_height: int,
+    ) -> tuple[int, List[Block]]:
+        if not cls._model_order_needs_geometry_repair(blocks, page_width=page_width, page_height=page_height):
+            return 0, blocks
+
+        cjk_ratio = cls._text_cjk_ratio(blocks)
+        figure_count = sum(1 for b in blocks if b.block_type in FIGURE_TYPES or b.block_type == BlockType.FIGURE)
+        band_major = cjk_ratio >= 0.35 and figure_count >= 1
+        repaired = sorted(
+            blocks,
+            key=lambda block: cls._model_order_geometry_key(
+                block,
+                page_width=page_width,
+                page_height=page_height,
+                band_major=band_major,
+            ),
+        )
+        cls._reassign_repaired_model_order_columns(
+            repaired,
+            page_width=page_width,
+            band_major=band_major,
+        )
+        repaired = sorted(
+            repaired,
+            key=lambda block: cls._model_order_geometry_key(
+                block,
+                page_width=page_width,
+                page_height=page_height,
+                band_major=band_major,
+            ),
+        )
+        for index, block in enumerate(repaired):
+            if block.attributes is None:
+                block.attributes = {}
+            block.attributes["reading_order_strategy"] = "model_order_geometric_repair"
+            block.attributes["model_order_repair_rank"] = index
+        return 1, repaired
+
+    @staticmethod
+    def _reassign_repaired_model_order_columns(
+        blocks: List[Block],
+        *,
+        page_width: int,
+        band_major: bool,
+    ) -> None:
+        if page_width <= 0 or len(blocks) < 2:
+            return
+
+        page_w = max(float(page_width), 1.0)
+        text_skeleton = [
+            block for block in blocks
+            if isinstance(block, TextBlock)
+            and block.block_type in {
+                BlockType.TEXT,
+                BlockType.TITLE,
+                BlockType.ABSTRACT,
+                BlockType.REFERENCE,
+                BlockType.FIGURE_CAPTION,
+                BlockType.TABLE_CAPTION,
+                BlockType.FOOTNOTE,
+            }
+            and block.block_type not in _ZONE_STRIP_TYPES
+            and 0.12 <= float(block.bbox.width) / page_w <= 0.50
+            and (block.count_lines() >= 2 or len((block.full_text() or "").strip()) >= 24)
+        ]
+        column_source = text_skeleton
+        if len(column_source) < 3:
+            column_source = [
+                block for block in blocks
+                if isinstance(block, TextBlock)
+                and block.block_type in {
+                    BlockType.TEXT,
+                    BlockType.TITLE,
+                    BlockType.ABSTRACT,
+                    BlockType.REFERENCE,
+                    BlockType.FOOTNOTE,
+                }
+                and block.block_type not in _ZONE_STRIP_TYPES
+                and 0.08 <= float(block.bbox.width) / page_w <= 0.58
+            ]
+        if len(column_source) < 3:
+            return
+
+        columns, col_bounds = detect_columns(
+            column_source,
+            page_width,
+            max_cols=2,
+            cluster_thresh=0.10,
+        )
+        if len(col_bounds) < 2:
+            col_bounds = RecoveryPipeline._fallback_two_column_bounds(column_source, page_width)
+            if len(col_bounds) < 2:
+                return
+
+        col_centers = [(float(x1) + float(x2)) * 0.5 for x1, x2 in col_bounds]
+
+        def _nearest_col(block: Block) -> int:
+            cx = (float(block.bbox.x1) + float(block.bbox.x2)) * 0.5
+            return min(range(len(col_centers)), key=lambda idx: abs(cx - col_centers[idx]))
+
+        for block in blocks:
+            if block.block_type in _ZONE_STRIP_TYPES or block.block_type in {BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER}:
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+                continue
+
+            width_ratio = float(block.bbox.width) / page_w
+            if band_major:
+                if block.block_type in {BlockType.TITLE, BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION}:
+                    block.col_count = 1
+                    block.col_index = 0
+                    block.spanned_cols = [0]
+                    continue
+                col = _nearest_col(block)
+                block.col_count = len(col_bounds)
+                block.col_index = col
+                block.spanned_cols = [col]
+                continue
+
+            cross_page = width_ratio >= 0.58
+            if cross_page and block.block_type in {BlockType.TITLE, BlockType.FOOTNOTE, BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION}:
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+                continue
+
+            col = _nearest_col(block)
+            block.col_count = len(col_bounds)
+            block.col_index = col
+            block.spanned_cols = [col]
+
+    @staticmethod
+    def _fallback_two_column_bounds(blocks: List[Block], page_width: int) -> List[tuple[float, float]]:
+        if len(blocks) < 4 or page_width <= 0:
+            return []
+        page_w = max(float(page_width), 1.0)
+        centers = sorted((float(block.bbox.x1) + float(block.bbox.x2)) * 0.5 for block in blocks)
+        gaps = [(centers[idx + 1] - centers[idx], idx) for idx in range(len(centers) - 1)]
+        if not gaps:
+            return []
+        max_gap, split_idx = max(gaps, key=lambda item: item[0])
+        if max_gap < page_w * 0.18:
+            return []
+        divider = (centers[split_idx] + centers[split_idx + 1]) * 0.5
+        left = [block for block in blocks if (float(block.bbox.x1) + float(block.bbox.x2)) * 0.5 < divider]
+        right = [block for block in blocks if block not in left]
+        if len(left) < 2 or len(right) < 2:
+            return []
+        return [
+            (min(float(block.bbox.x1) for block in left), max(float(block.bbox.x2) for block in left)),
+            (min(float(block.bbox.x1) for block in right), max(float(block.bbox.x2) for block in right)),
+        ]
+
+    @classmethod
+    def _model_order_needs_geometry_repair(
+        cls,
+        blocks: List[Block],
+        *,
+        page_width: int,
+        page_height: int,
+    ) -> bool:
+        if page_width <= 0 or page_height <= 0 or len(blocks) < 4:
+            return False
+        max_cols = max((int(getattr(block, "col_count", 1) or 1) for block in blocks), default=1)
+        if max_cols > 2:
+            return False
+
+        core = [
+            block for block in blocks
+            if block.block_type not in _ZONE_STRIP_TYPES
+            and block.block_type not in {BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER}
+        ]
+        if len(core) < 4:
+            return False
+
+        cjk_ratio = cls._text_cjk_ratio(core)
+        figure_count = sum(1 for b in core if b.block_type in FIGURE_TYPES or b.block_type == BlockType.FIGURE)
+        band_major = cjk_ratio >= 0.35 and figure_count >= 1
+        geometric = sorted(
+            core,
+            key=lambda block: cls._model_order_geometry_key(
+                block,
+                page_width=page_width,
+                page_height=page_height,
+                band_major=band_major,
+            ),
+        )
+        rank = {id(block): idx for idx, block in enumerate(geometric)}
+        severe_inversions = 0
+        y_backtracks = 0
+        rank_drop_limit = max(2, int(len(core) * 0.18))
+        y_back_limit = max(float(page_height) * 0.08, 90.0)
+        for prev, curr in zip(core, core[1:]):
+            if rank[id(prev)] - rank[id(curr)] >= rank_drop_limit:
+                severe_inversions += 1
+            same_track = (
+                band_major
+                or int(getattr(prev, "col_index", 0) or 0) == int(getattr(curr, "col_index", 0) or 0)
+                or max(0.0, min(float(prev.bbox.x2), float(curr.bbox.x2)) - max(float(prev.bbox.x1), float(curr.bbox.x1)))
+                >= min(float(prev.bbox.width), float(curr.bbox.width)) * 0.35
+            )
+            if same_track and float(curr.bbox.y1) + y_back_limit < float(prev.bbox.y1):
+                y_backtracks += 1
+
+        top_limit = float(page_height) * 0.22
+        late_top_structural = any(
+            idx >= max(3, int(len(core) * 0.45))
+            and float(block.bbox.y1) <= top_limit
+            and block.block_type in {BlockType.TITLE, BlockType.FIGURE_CAPTION, BlockType.TEXT, BlockType.FOOTNOTE}
+            for idx, block in enumerate(core)
+        )
+
+        return severe_inversions >= 2 or y_backtracks >= 2 or (late_top_structural and severe_inversions >= 1)
+
+    @staticmethod
+    def _model_order_geometry_key(
+        block: Block,
+        *,
+        page_width: int,
+        page_height: int,
+        band_major: bool,
+    ) -> tuple:
+        del page_height
+        strip_group = 1
+        if block.block_type in {BlockType.HEADER, BlockType.PAGE_NUMBER}:
+            strip_group = 0
+        elif block.block_type == BlockType.FOOTER:
+            strip_group = 3
+
+        y1 = float(block.bbox.y1)
+        x1 = float(block.bbox.x1)
+        if strip_group != 1:
+            return (strip_group, y1, x1)
+
+        if band_major:
+            return (strip_group, y1, x1)
+
+        page_w = max(float(page_width), 1.0)
+        spanned = (
+            len(getattr(block, "spanned_cols", []) or []) > 1
+            or float(block.bbox.width) >= page_w * 0.52
+        )
+        col = -1 if spanned else int(getattr(block, "col_index", 0) or 0)
+        return (strip_group, col, y1, x1)
+
+    @staticmethod
+    def _text_cjk_ratio(blocks: List[Block]) -> float:
+        cjk_chars = 0
+        total_chars = 0
+        for block in blocks:
+            if not isinstance(block, TextBlock):
+                continue
+            text = block.full_text()
+            total_chars += len(text)
+            cjk_chars += sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff')
+        return (cjk_chars / total_chars) if total_chars else 0.0
 
     def _get_font_classifier(self) -> Optional[FontClassifier]:
         if not bool(getattr(self.config, "font_classification_enabled", True)):

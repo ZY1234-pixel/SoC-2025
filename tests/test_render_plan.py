@@ -365,6 +365,83 @@ def test_renderer_merges_adjacent_visual_text_band_for_docx_layout():
     assert side_text.spanned_cols == [1]
 
 
+def test_renderer_splits_embedded_visual_text_band_inside_single_zone():
+    page = Page(index=0, image_width=1000, image_height=1500)
+    intro = TextBlock(
+        bbox=BBox(120, 620, 520, 660),
+        block_type=BlockType.TEXT,
+        block_id="intro",
+        lines=[TextLine(text="前一小节收尾文字。")],
+        col_count=1,
+        col_index=0,
+        spanned_cols=[0],
+    )
+    title = TextBlock(
+        bbox=BBox(500, 720, 590, 760),
+        block_type=BlockType.TITLE,
+        block_id="title",
+        lines=[TextLine(text="肉桂")],
+        col_count=1,
+        col_index=0,
+        spanned_cols=[0],
+    )
+    source = TextBlock(
+        bbox=BBox(130, 780, 430, 815),
+        block_type=BlockType.TEXT,
+        block_id="source",
+        lines=[TextLine(text="【来源】樟科植物肉桂的树皮。")],
+        col_count=1,
+        col_index=0,
+        spanned_cols=[0],
+    )
+    figure = ImageBlock(
+        bbox=BBox(650, 780, 930, 1020),
+        block_type=BlockType.FIGURE,
+        block_id="figure",
+        col_count=1,
+        col_index=0,
+        spanned_cols=[0],
+    )
+    harvest = TextBlock(
+        bbox=BBox(130, 830, 430, 865),
+        block_type=BlockType.TEXT,
+        block_id="harvest",
+        lines=[TextLine(text="【采收加工】一般在秋季剥取。")],
+        col_count=1,
+        col_index=0,
+        spanned_cols=[0],
+    )
+    caption = TextBlock(
+        bbox=BBox(700, 1035, 880, 1070),
+        block_type=BlockType.FIGURE_CAPTION,
+        block_id="caption",
+        lines=[TextLine(text="图 2-169 肉桂")],
+        col_count=1,
+        col_index=0,
+        spanned_cols=[0],
+    )
+    tail = TextBlock(
+        bbox=BBox(130, 1120, 520, 1180),
+        block_type=BlockType.TEXT,
+        block_id="tail",
+        lines=[TextLine(text="后续贮藏要求。")],
+        col_count=1,
+        col_index=0,
+        spanned_cols=[0],
+    )
+    zone = Zone(col_count=1, blocks=[intro, title, source, figure, harvest, caption, tail], has_spanned=False)
+
+    split = DocxRenderer()._split_embedded_visual_text_bands([zone], page)
+
+    assert [len(item.blocks) for item in split] == [1, 5, 1]
+    assert split[1].col_count == 2
+    assert [block.block_id for block in split[1].blocks] == [title.block_id, source.block_id, figure.block_id, harvest.block_id, caption.block_id]
+    assert figure.spanned_cols == [1]
+    assert source.spanned_cols == [0]
+    assert harvest.spanned_cols == [0]
+    assert caption.spanned_cols == [1]
+
+
 def test_renderer_narrow_strip_block_does_not_create_spanned_segment():
     header = TextBlock(
         bbox=BBox(820, 30, 1080, 70),

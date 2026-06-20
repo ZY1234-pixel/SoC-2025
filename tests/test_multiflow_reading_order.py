@@ -130,6 +130,48 @@ def test_pipeline_model_order_strategy_preserves_upstream_reading_order():
     assert all((block.attributes or {}).get("reading_order_strategy") == "model_order" for block in blocks)
 
 
+def test_pipeline_repairs_anomalous_model_order_for_two_column_magazine():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1200,
+                "height": 1600,
+                "blocks": [
+                    _model_order_text_block("right_mid", [620, 720, 1120, 920], "right middle body", 0),
+                    _model_order_text_block("left_bottom", [80, 980, 560, 1210], "left bottom body", 1),
+                    _model_order_text_block("right_top", [620, 300, 1120, 520], "right top body", 2),
+                    _model_order_text_block("left_top", [80, 300, 560, 520], "left top body", 3),
+                    _model_order_text_block("title", [80, 90, 560, 150], "Magazine Title", 4, category="title"),
+                    _model_order_text_block("right_bottom", [620, 960, 1120, 1210], "right bottom body", 5),
+                ],
+            }
+        ],
+    }
+
+    pipeline = RecoveryPipeline(
+        config=RecoveryConfig(
+            reading_order_strategy="model_order",
+            font_classification_enabled=False,
+        )
+    )
+    doc = pipeline.build_document(page)
+    blocks = [blk for zone in doc.pages[0].zones for blk in zone.blocks]
+
+    assert [block.block_id for block in blocks] == [
+        "title",
+        "left_top",
+        "left_bottom",
+        "right_top",
+        "right_mid",
+        "right_bottom",
+    ]
+    assert doc.pages[0].attributes["rule_stats"]["model_order_geometric_repair"] == 1
+    assert all((block.attributes or {}).get("reading_order_strategy") == "model_order_geometric_repair" for block in blocks)
+
+
 def test_pipeline_suppresses_visual_boxes_that_duplicate_text_regions():
     page = {
         "version": "2.0",
