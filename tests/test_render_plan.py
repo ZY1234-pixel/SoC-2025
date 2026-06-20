@@ -494,6 +494,36 @@ def test_renderer_splits_embedded_visual_text_band_inside_single_zone():
     assert caption.spanned_cols == [1]
 
 
+def test_local_visual_band_short_title_follows_visual_column():
+    page = Page(index=0, image_width=1102, image_height=1631)
+    title = TextBlock(
+        bbox=BBox(524, 233, 601, 261),
+        block_type=BlockType.TITLE,
+        lines=[TextLine(text="附子")],
+    )
+    section = TextBlock(
+        bbox=BBox(137, 173, 296, 202),
+        block_type=BlockType.TITLE,
+        lines=[TextLine(text="七、温里药")],
+    )
+    figure = ImageBlock(
+        bbox=BBox(713, 312, 911, 523),
+        block_type=BlockType.FIGURE,
+    )
+    source = TextBlock(
+        bbox=BBox(172, 274, 547, 300),
+        block_type=BlockType.TEXT,
+        lines=[TextLine(text="【来源】毛茛科植物乌头的子根的加工品。")],
+    )
+
+    DocxRenderer._assign_render_band_columns([section, title, source, figure], page)
+
+    assert figure.col_index == 1
+    assert title.col_index == figure.col_index
+    assert section.col_index == 0
+    assert source.col_index == 0
+
+
 def test_renderer_narrow_strip_block_does_not_create_spanned_segment():
     header = TextBlock(
         bbox=BBox(820, 30, 1080, 70),

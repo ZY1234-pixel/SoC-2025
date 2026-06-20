@@ -1179,6 +1179,24 @@ class RecoveryPipeline:
             if block.block_type not in {BlockType.FIGURE, BlockType.FORMULA, BlockType.EQUATION}:
                 continue
 
+            attrs = getattr(block, "attributes", None) or {}
+            nested_children = attrs.get("nested_children") if isinstance(attrs, dict) else None
+            if (
+                block.block_type == BlockType.FIGURE
+                and page_height > 0
+                and float(block.bbox.y1) >= float(page_height) * 0.88
+                and float(block.bbox.height) <= max(float(page_height) * 0.08, 120.0)
+                and isinstance(nested_children, list)
+                and nested_children
+                and all(
+                    isinstance(child, dict)
+                    and str(child.get("type") or child.get("category") or "") in {"page_number", "footer"}
+                    for child in nested_children
+                )
+            ):
+                drop_ids.add(id(block))
+                continue
+
             block_area = max(float(block.bbox.area), 1.0)
             covered_text_area = 0.0
             long_text_hits = 0

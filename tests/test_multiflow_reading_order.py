@@ -274,6 +274,43 @@ def test_pipeline_suppresses_visual_boxes_that_duplicate_text_regions():
     assert stats["spurious_visual_suppressed"] == 2
 
 
+def test_pipeline_suppresses_footer_page_number_visual_container():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1102,
+                "height": 1631,
+                "blocks": [
+                    _text_block("body", [130, 1200, 990, 1370], "正文内容应保留。"),
+                    {
+                        **_figure_block("footer_page_number_box", [0, 1483, 250, 1554]),
+                        "attributes": {
+                            "nested_children": [
+                                {
+                                    "type": "page_number",
+                                    "category": "page_number",
+                                    "bbox": [140, 1504, 180, 1528],
+                                }
+                            ]
+                        },
+                    },
+                    _text_block("footer", [387, 1524, 675, 1550], "连锁药店店员中药基础训练手册", category="footer"),
+                ],
+            }
+        ],
+    }
+
+    document = RecoveryPipeline(config=RecoveryConfig(reading_order_strategy="xycutpp_hybrid")).build_document(page)
+    block_ids = {blk.block_id for zone in document.pages[0].zones for blk in zone.blocks}
+
+    assert "footer_page_number_box" not in block_ids
+    assert "body" in block_ids
+    assert "footer" in block_ids
+
+
 def _magazine_like_page() -> dict:
     return {
         "version": "2.0",

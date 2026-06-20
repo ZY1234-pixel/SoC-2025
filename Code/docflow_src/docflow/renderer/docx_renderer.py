@@ -179,8 +179,10 @@ class DocxRenderer(BaseRenderer):
             col_px = self._build_render_col_px(zone)
 
             strategy = zone.rendering_strategy
-            # RenderPlan 模式覆盖
-            if page_render_mode == "reflow":
+            local_visual_band = zone.col_count > 1 and self._is_local_visual_zone(zone, page)
+            # RenderPlan 模式覆盖。reflow 页面仍允许局部图文 sidecar band
+            # 使用布局表格，否则图片会独占一整行并切断正文流。
+            if page_render_mode == "reflow" and not local_visual_band:
                 strategy = "single_col"
 
             use_native_cols = self._should_use_native_columns(
@@ -344,8 +346,6 @@ class DocxRenderer(BaseRenderer):
 
     def _split_embedded_visual_text_bands(self, zones: List[Zone], page: "Page") -> List[Zone]:
         if not zones or getattr(page, "image_width", 0) <= 0:
-            return list(zones)
-        if (getattr(page, "attributes", None) or {}).get("layout_profile") == "textbook_mixed":
             return list(zones)
 
         output: List[Zone] = []
@@ -577,6 +577,7 @@ class DocxRenderer(BaseRenderer):
     @staticmethod
     def _assign_render_band_columns(blocks: List[Block], page: "Page") -> None:
         page_w = max(float(getattr(page, "image_width", 0) or 0), 1.0)
+        page_h = max(float(getattr(page, "image_height", 0) or 0), 1.0)
         visuals = [
             block for block in blocks
             if block.block_type in {BlockType.FIGURE, BlockType.TABLE}
@@ -607,6 +608,17 @@ class DocxRenderer(BaseRenderer):
                 visual is not None
                 and block is not visual
                 and float(block.bbox.x1) < divider < float(block.bbox.x2)
+            ):
+                visual_cx = (float(visual.bbox.x1) + float(visual.bbox.x2)) * 0.5
+                block.col_index = 0 if visual_cx < divider else 1
+            if (
+                visual is not None
+                and isinstance(block, TextBlock)
+                and block.block_type == BlockType.TITLE
+                and not _NUMBERED_TITLE_RE.match((block.full_text() or "").strip())
+                and float(block.bbox.y1) <= float(visual.bbox.y1) + page_h * 0.06
+                and abs(cx - ((float(visual.bbox.x1) + float(visual.bbox.x2)) * 0.5))
+                <= max(page_w * 0.28, float(visual.bbox.width) * 1.4)
             ):
                 visual_cx = (float(visual.bbox.x1) + float(visual.bbox.x2)) * 0.5
                 block.col_index = 0 if visual_cx < divider else 1
