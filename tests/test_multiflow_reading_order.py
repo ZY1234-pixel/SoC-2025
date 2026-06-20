@@ -474,9 +474,9 @@ def test_magazine_like_page_under_unified_xycutpp_does_not_emit_project_flow_ids
     assert "phase_counts" in page.attributes.get("xycutpp_debug", {})
 
 
-def test_xycutpp_alias_strategies_share_the_same_core_order():
+def test_old_reading_order_strategy_names_are_hybrid_aliases():
     expected_ids = None
-    for strategy in ("auto", "xycutpp", "xycutpp_hybrid", "xycutpp_paper", "newspaper_hybrid"):
+    for strategy in ("legacy", "auto", "xycutpp", "xycutpp_hybrid", "xycutpp_paper", "newspaper_hybrid"):
         pipeline = RecoveryPipeline(config=RecoveryConfig(reading_order_strategy=strategy))
         document = pipeline.build_document(_magazine_like_page())
         page = document.pages[0]
@@ -662,7 +662,7 @@ def test_stable_multicol_alias_prefers_column_major_without_fragmenting_into_man
         ],
     }
 
-    pipeline = RecoveryPipeline(config=RecoveryConfig(reading_order_strategy="newspaper_hybrid"))
+    pipeline = RecoveryPipeline(config=RecoveryConfig(reading_order_strategy="xycutpp_hybrid"))
     document = pipeline.build_document(page)
     page_obj = document.pages[0]
     ids = [getattr(block, "block_id", "") for zone in page_obj.zones for block in zone.blocks]

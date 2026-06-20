@@ -11,10 +11,10 @@ class RecoveryConfig:
     column_cluster_thresh: float = 0.13
     column_confidence_min: float = 0.55
     zone_strip_height_ratio: float = 0.12
-    # model_order / legacy / auto / xycutpp / xycutpp_hybrid / xycutpp_paper / newspaper_hybrid
-    # model_order 信任上游版面模型输出顺序（PP-DocLayoutV3 已输出阅读顺序）；
-    # 除显式 legacy 外，其余策略名目前都统一映射到同一个 XY-Cut++ 内核；
-    # xycutpp / xycutpp_hybrid / xycutpp_paper / newspaper_hybrid 仅作为历史兼容别名保留
+    # model_order / xycutpp_hybrid
+    # model_order 信任上游版面模型输出顺序（PP-DocLayoutV3 已输出阅读顺序）。
+    # xycutpp_hybrid 是唯一保留的旧几何兜底；legacy / auto / xycutpp /
+    # xycutpp_paper / newspaper_hybrid 仅作为兼容别名映射到 xycutpp_hybrid。
     reading_order_strategy: str = "model_order"
     xycutpp_beta: float = 1.3
     xycutpp_density_threshold: float = 0.9

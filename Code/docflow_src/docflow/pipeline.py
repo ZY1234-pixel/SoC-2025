@@ -362,7 +362,7 @@ class RecoveryPipeline:
         if page.attributes is None:
             page.attributes = {}
         strategy_name = str(self.config.reading_order_strategy or "").strip().lower()
-        if strategy_name in {"auto", "xycutpp", "xycutpp_paper", "xycutpp_hybrid", "newspaper_hybrid"}:
+        if strategy_name in {"legacy", "auto", "xycutpp", "xycutpp_paper", "xycutpp_hybrid", "newspaper_hybrid"}:
             page.attributes["xycutpp_debug"] = self._collect_xycutpp_proto_debug(blocks)
         page.attributes["rule_stats"] = {
             "category_fix_count": category_fix_count,
@@ -1093,7 +1093,7 @@ class RecoveryPipeline:
             prev_flow_id = _flow_id(prev)
             curr_flow_id = _flow_id(curr)
             # 仅对显式 article-flow 内的相邻块做边界拉直。
-            # legacy 路径下 flow_id 为空，若继续按空串相等处理，
+            # 几何兜底路径下 flow_id 可能为空，若继续按空串相等处理，
             # 会把普通相邻块误判为同一 flow，导致 bbox 被大幅裁坏。
             if not prev_flow_id or not curr_flow_id or prev_flow_id != curr_flow_id:
                 continue
