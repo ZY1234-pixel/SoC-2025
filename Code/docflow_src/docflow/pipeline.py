@@ -322,7 +322,7 @@ class RecoveryPipeline:
 
         blocks = self._merge_short_continuation_fragments(blocks)
         blocks = self._trim_repeated_prefix_within_flows(blocks)
-        if used_model_order:
+        if used_model_order and self.config.model_order_geometric_repair_enabled:
             model_order_repaired, blocks = self._repair_anomalous_model_order(
                 blocks,
                 page_width=page.image_width,

@@ -155,6 +155,10 @@ class LayoutPredictor(object):
         self.ncnn_input_size = resize_size
         self.ncnn_conf_threshold = min(float(args.layout_score_threshold), 0.25)
         self.layout_model_name = os.path.basename(layout_model_path).lower()
+        self.is_pp_doclayout_v3 = (
+            "pp-doclayoutv3" in self.layout_model_name
+            or "pp-doclayout-v3" in self.layout_model_name
+        )
         self.enable_tiled_recall = self._env_flag("DOCFLOW_LAYOUT_TILE_RECALL", True)
         self.tile_overlap_ratio = self._env_float(
             "DOCFLOW_LAYOUT_TILE_OVERLAP", default=0.18, minimum=0.05, maximum=0.45
@@ -446,7 +450,7 @@ class LayoutPredictor(object):
                 "label": mapped_label,
                 "score": score,
                 "raw_label": raw_label,
-                "model_order": idx,
+                "model_order": float(dt[6]) if is_doclayout_v3 else idx,
             }
             if is_doclayout_v3:
                 item["layout_model"] = "pp-doclayout-v3"
@@ -455,7 +459,42 @@ class LayoutPredictor(object):
             results.append(
                 item
             )
+        if is_doclayout_v3:
+            results.sort(key=lambda item: float(item.get("model_order", 0.0)))
+            results = self._merge_same_label_contained(results)
+            results = self._apply_cross_class_nms(results)
         return results
+
+    def _merge_same_label_contained(self, results, iomin_threshold=0.6):
+        suppressed = set()
+        for i in range(len(results)):
+            if i in suppressed:
+                continue
+            for j in range(i + 1, len(results)):
+                if j in suppressed:
+                    continue
+                if results[i].get("raw_label") != results[j].get("raw_label"):
+                    continue
+                if self._bbox_containment(results[i]["bbox"], results[j]["bbox"]) <= iomin_threshold:
+                    continue
+                area_i = self._bbox_area(results[i]["bbox"])
+                area_j = self._bbox_area(results[j]["bbox"])
+                suppressed.add(j if area_i >= area_j else i)
+        return [item for idx, item in enumerate(results) if idx not in suppressed]
+
+    def _apply_cross_class_nms(self, results, iou_threshold=0.8):
+        kept = []
+        suppressed = set()
+        for i in range(len(results)):
+            if i in suppressed:
+                continue
+            kept.append(results[i])
+            for j in range(i + 1, len(results)):
+                if j in suppressed:
+                    continue
+                if self._bbox_iou(results[i]["bbox"], results[j]["bbox"]) > iou_threshold:
+                    suppressed.add(j)
+        return kept
 
     @staticmethod
     def _tile_starts(length, tile_length, overlap_ratio):
@@ -578,6 +617,8 @@ class LayoutPredictor(object):
     def _should_run_tiled_recall(self, img):
         if not self.enable_tiled_recall:
             return False
+        if self.is_pp_doclayout_v3 and os.environ.get("DOCFLOW_LAYOUT_TILE_RECALL") is None:
+            return False
         if self.tile_max_passes <= 1:
             return False
         img_h, img_w = img.shape[:2]
@@ -651,15 +692,21 @@ class LayoutPredictor(object):
             return results, elapse
 
         ori_im = img.copy()
-        data = {"image": img}
-        data = transform(data, self.preprocess_op)
-        img = data[0]
+        if self.is_pp_doclayout_v3:
+            input_h, input_w = self.ncnn_input_size[1], self.ncnn_input_size[0]
+            rgb = cv2.cvtColor(cv2.resize(img, (input_w, input_h)), cv2.COLOR_BGR2RGB)
+            img = rgb.astype("float32") / 255.0
+            img = np.expand_dims(img.transpose((2, 0, 1)), axis=0).copy()
+        else:
+            data = {"image": img}
+            data = transform(data, self.preprocess_op)
+            img = data[0]
 
-        if img is None:
-            return None, 0
+            if img is None:
+                return None, 0
 
-        img = np.expand_dims(img, axis=0)
-        img = img.copy()
+            img = np.expand_dims(img, axis=0)
+            img = img.copy()
 
         preds, elapse = 0, 1
         starttime = time.time()

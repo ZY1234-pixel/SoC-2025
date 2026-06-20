@@ -236,15 +236,63 @@ class PaddleAdapter(BaseAdapter):
 
     @staticmethod
     def _attach_model_order(results: list) -> list:
-        """Persist the upstream layout model list order before cleanup passes."""
+        """Persist upstream model order and interpolate OCR-recall regions."""
         ordered: list = []
         for index, region in enumerate(results or []):
             if not isinstance(region, dict):
                 ordered.append(region)
                 continue
             cloned = dict(region)
-            cloned.setdefault("model_order", index)
+            if not PaddleAdapter._has_numeric_model_order(cloned):
+                cloned.pop("model_order", None)
             ordered.append(cloned)
+
+        dict_regions = [region for region in ordered if isinstance(region, dict)]
+        if not dict_regions:
+            return ordered
+        if not any(PaddleAdapter._has_numeric_model_order(region) for region in dict_regions):
+            for index, region in enumerate(dict_regions):
+                region["model_order"] = float(index)
+            return ordered
+
+        geom_order = sorted(
+            dict_regions,
+            key=lambda region: PaddleAdapter._region_geometry_key(region),
+        )
+        pending: list[dict] = []
+        prev_order: float | None = None
+
+        def flush_missing(next_order: float | None) -> None:
+            nonlocal pending, prev_order
+            if not pending:
+                return
+            count = len(pending)
+            if prev_order is None and next_order is None:
+                start = 0.0
+                step = 1.0
+            elif prev_order is None:
+                step = 1.0
+                start = float(next_order) - count * step
+            elif next_order is None:
+                step = 1.0
+                start = float(prev_order) + step
+            else:
+                step = (float(next_order) - float(prev_order)) / float(count + 1)
+                if step <= 0:
+                    step = 0.01
+                start = float(prev_order) + step
+            for offset, region in enumerate(pending):
+                region["model_order"] = start + step * offset
+            pending = []
+
+        for region in geom_order:
+            if PaddleAdapter._has_numeric_model_order(region):
+                current_order = PaddleAdapter._region_model_order(region, 0.0)
+                flush_missing(current_order)
+                prev_order = current_order
+            else:
+                pending.append(region)
+        flush_missing(None)
         return ordered
 
     @staticmethod
@@ -268,6 +316,24 @@ class PaddleAdapter(BaseAdapter):
             return float(region.get("model_order"))
         except (AttributeError, TypeError, ValueError):
             return float(fallback)
+
+    @staticmethod
+    def _has_numeric_model_order(region: dict) -> bool:
+        try:
+            float(region.get("model_order"))
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return True
+
+    @staticmethod
+    def _region_geometry_key(region: dict) -> tuple[float, float]:
+        bbox = region.get("bbox") if isinstance(region, dict) else None
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            return (float("inf"), float("inf"))
+        try:
+            return (float(bbox[1]), float(bbox[0]))
+        except (TypeError, ValueError):
+            return (float("inf"), float("inf"))
 
     def _suppress_nested_duplicates(self, results: list) -> tuple[list, list[dict]]:
         """抑制大框包小框的重复区域。

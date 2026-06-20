@@ -16,6 +16,7 @@ class RecoveryConfig:
     # xycutpp_hybrid 是唯一保留的旧几何兜底；legacy / auto / xycutpp /
     # xycutpp_paper / newspaper_hybrid 仅作为兼容别名映射到 xycutpp_hybrid。
     reading_order_strategy: str = "model_order"
+    model_order_geometric_repair_enabled: bool = False
     xycutpp_beta: float = 1.3
     xycutpp_density_threshold: float = 0.9
     xycutpp_min_gap_ratio: float = 0.015

@@ -59,7 +59,7 @@ DOCLAYOUT_YOLO_LABELS = [
 ]
 
 DEFAULT_LAYOUT_SCORE_THRESHOLD = 0.50
-DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD = 0.30
+DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD = 0.50
 DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD = 0.18
 RAW_RESULT_PREVIEW_MAX_TEXT = 300
 TITLE_OCR_RECHECK_TYPES = {"title"}
@@ -345,6 +345,10 @@ def summarize_raw_result(result: list) -> dict:
         }
         if "img_idx" in region:
             item["img_idx"] = region.get("img_idx")
+        for key in ("raw_type", "model_order", "layout_model"):
+            value = region.get(key)
+            if value is not None:
+                item[key] = value
         img = region.get("img")
         if hasattr(img, "shape"):
             item["img_shape"] = list(img.shape)
