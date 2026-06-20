@@ -485,42 +485,58 @@ def test_renderer_splits_embedded_visual_text_band_inside_single_zone():
 
     split = DocxRenderer()._split_embedded_visual_text_bands([zone], page)
 
-    assert [len(item.blocks) for item in split] == [1, 5, 1]
-    assert split[1].col_count == 2
-    assert [block.block_id for block in split[1].blocks] == [title.block_id, source.block_id, figure.block_id, harvest.block_id, caption.block_id]
+    assert [len(item.blocks) for item in split] == [1, 1, 4, 1]
+    assert split[1].col_count == 1
+    assert [block.block_id for block in split[1].blocks] == [title.block_id]
+    assert split[2].col_count == 2
+    assert [block.block_id for block in split[2].blocks] == [source.block_id, figure.block_id, harvest.block_id, caption.block_id]
     assert figure.spanned_cols == [1]
     assert source.spanned_cols == [0]
     assert harvest.spanned_cols == [0]
     assert caption.spanned_cols == [1]
 
 
-def test_local_visual_band_short_title_follows_visual_column():
+def test_local_visual_band_short_title_renders_above_sidecar_band():
     page = Page(index=0, image_width=1102, image_height=1631)
     title = TextBlock(
         bbox=BBox(524, 233, 601, 261),
         block_type=BlockType.TITLE,
+        block_id="title",
         lines=[TextLine(text="附子")],
     )
     section = TextBlock(
         bbox=BBox(137, 173, 296, 202),
         block_type=BlockType.TITLE,
+        block_id="section",
         lines=[TextLine(text="七、温里药")],
     )
     figure = ImageBlock(
         bbox=BBox(713, 312, 911, 523),
         block_type=BlockType.FIGURE,
+        block_id="figure",
     )
     source = TextBlock(
         bbox=BBox(172, 274, 547, 300),
         block_type=BlockType.TEXT,
+        block_id="source",
         lines=[TextLine(text="【来源】毛茛科植物乌头的子根的加工品。")],
     )
+    caption = TextBlock(
+        bbox=BBox(730, 539, 893, 564),
+        block_type=BlockType.FIGURE_CAPTION,
+        block_id="caption",
+        lines=[TextLine(text="图 2-168 黑顺片")],
+    )
+    zone = Zone(col_count=1, blocks=[section, title, source, figure, caption], has_spanned=False)
 
-    DocxRenderer._assign_render_band_columns([section, title, source, figure], page)
+    split = DocxRenderer()._split_embedded_visual_text_bands([zone], page)
 
+    assert [block.block_id for block in split[0].blocks] == [section.block_id]
+    assert [block.block_id for block in split[1].blocks] == [title.block_id]
+    assert split[1].col_count == 1
+    assert [block.block_id for block in split[2].blocks] == [source.block_id, figure.block_id, caption.block_id]
     assert figure.col_index == 1
-    assert title.col_index == figure.col_index
-    assert section.col_index == 0
+    assert title.col_index == 0
     assert source.col_index == 0
 
 

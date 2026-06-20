@@ -381,6 +381,30 @@ class DocxRenderer(BaseRenderer):
                     cursor = []
                 for band_block in band:
                     consumed.add(id(band_block))
+                leading_blocks, prefix_titles, band = self._split_local_section_titles_from_band(band, page)
+                if leading_blocks:
+                    output.append(Zone(
+                        col_count=1,
+                        blocks=leading_blocks,
+                        has_spanned=False,
+                        flow_id=zone.flow_id,
+                        flow_kind=zone.flow_kind,
+                        region_id=zone.region_id,
+                        region_kind=zone.region_kind,
+                    ))
+                if prefix_titles:
+                    output.append(Zone(
+                        col_count=1,
+                        blocks=prefix_titles,
+                        has_spanned=False,
+                        flow_id=zone.flow_id,
+                        flow_kind=zone.flow_kind,
+                        region_id=zone.region_id,
+                        region_kind=zone.region_kind,
+                    ))
+                if len(band) < 3:
+                    cursor.extend(band)
+                    continue
                 self._assign_render_band_columns(band, page)
                 output.append(Zone(
                     col_count=2,
@@ -402,6 +426,78 @@ class DocxRenderer(BaseRenderer):
                     region_kind=zone.region_kind,
                 ))
         return output
+
+    @staticmethod
+    def _split_local_section_titles_from_band(
+        band: List[Block],
+        page: "Page",
+    ) -> Tuple[List[Block], List[Block], List[Block]]:
+        """Keep local section headings above a sidecar visual band.
+
+        The sidecar band represents paragraph text flowing beside a visual. A
+        short local heading with following body/visual evidence is section
+        structure, not part of the visual/caption group, so it should render as
+        a single-column heading above the paragraph. Blocks geometrically above
+        that heading remain in the preceding normal flow.
+        """
+        visuals = [block for block in band if block.block_type in {BlockType.FIGURE, BlockType.TABLE}]
+        if not visuals:
+            return [], [], band
+        page_h = max(float(getattr(page, "image_height", 0) or 0), 1.0)
+        visual_top = min(float(block.bbox.y1) for block in visuals)
+        local_titles = [
+            block for block in band
+            if isinstance(block, TextBlock)
+            and block.block_type == BlockType.TITLE
+            and (block.full_text() or "").strip()
+            and not _NUMBERED_TITLE_RE.match((block.full_text() or "").strip())
+            and float(block.bbox.y1) <= visual_top + page_h * 0.08
+        ]
+        if not local_titles:
+            return [], [], band
+
+        def _has_following_body(title: Block) -> bool:
+            return any(
+                isinstance(block, TextBlock)
+                and block.block_type in {BlockType.TEXT, BlockType.REFERENCE, BlockType.ABSTRACT}
+                and float(block.bbox.y1) >= float(title.bbox.y2) - max(float(title.bbox.height), 24.0)
+                for block in band
+            )
+
+        local_titles = [title for title in local_titles if _has_following_body(title)]
+        if not local_titles:
+            return [], [], band
+
+        split_title = min(local_titles, key=lambda block: (float(block.bbox.y1), float(block.bbox.x1)))
+        title_top = float(split_title.bbox.y1)
+        title_bottom = float(split_title.bbox.y2)
+        leading: List[Block] = []
+        prefix_titles: List[Block] = [split_title]
+        remaining: List[Block] = []
+        for block in band:
+            if block is split_title:
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+                continue
+            if float(block.bbox.y2) <= title_top + max(float(split_title.bbox.height), 24.0):
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+                leading.append(block)
+            elif (
+                isinstance(block, TextBlock)
+                and block.block_type == BlockType.TITLE
+                and not _NUMBERED_TITLE_RE.match((block.full_text() or "").strip())
+                and abs(float(block.bbox.y1) - title_top) <= max(float(split_title.bbox.height), 24.0)
+            ):
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+                prefix_titles.append(block)
+            else:
+                remaining.append(block)
+        return leading, prefix_titles, remaining
 
     @staticmethod
     def _embedded_visual_anchors(zone: Zone, page: "Page") -> List[Block]:
@@ -577,7 +673,6 @@ class DocxRenderer(BaseRenderer):
     @staticmethod
     def _assign_render_band_columns(blocks: List[Block], page: "Page") -> None:
         page_w = max(float(getattr(page, "image_width", 0) or 0), 1.0)
-        page_h = max(float(getattr(page, "image_height", 0) or 0), 1.0)
         visuals = [
             block for block in blocks
             if block.block_type in {BlockType.FIGURE, BlockType.TABLE}
@@ -608,17 +703,6 @@ class DocxRenderer(BaseRenderer):
                 visual is not None
                 and block is not visual
                 and float(block.bbox.x1) < divider < float(block.bbox.x2)
-            ):
-                visual_cx = (float(visual.bbox.x1) + float(visual.bbox.x2)) * 0.5
-                block.col_index = 0 if visual_cx < divider else 1
-            if (
-                visual is not None
-                and isinstance(block, TextBlock)
-                and block.block_type == BlockType.TITLE
-                and not _NUMBERED_TITLE_RE.match((block.full_text() or "").strip())
-                and float(block.bbox.y1) <= float(visual.bbox.y1) + page_h * 0.06
-                and abs(cx - ((float(visual.bbox.x1) + float(visual.bbox.x2)) * 0.5))
-                <= max(page_w * 0.28, float(visual.bbox.width) * 1.4)
             ):
                 visual_cx = (float(visual.bbox.x1) + float(visual.bbox.x2)) * 0.5
                 block.col_index = 0 if visual_cx < divider else 1
