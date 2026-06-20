@@ -191,6 +191,9 @@ class StructureSystem(object):
                         "res": res,
                         "img_idx": img_idx,
                         "score": region["score"],
+                        "raw_type": region.get("raw_label"),
+                        "model_order": region.get("model_order"),
+                        "layout_model": region.get("layout_model"),
                     }
                 )
 

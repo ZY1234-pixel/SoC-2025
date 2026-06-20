@@ -90,6 +90,39 @@ def test_text_block_bbox_expands_to_cover_text_line_polys() -> None:
     assert block["bbox"] == [20.0, 58.0, 160.0, 150.0]
 
 
+def test_pp_doclayout_v3_model_order_and_raw_labels_are_preserved() -> None:
+    adapter = PaddleAdapter()
+    image = np.zeros((200, 200, 3), dtype=np.uint8)
+    results = [
+        {
+            "type": "text",
+            "raw_type": "text",
+            "layout_model": "pp-doclayout-v3",
+            "model_order": 2,
+            "bbox": [20, 120, 180, 160],
+            "score": 0.9,
+            "res": [{"text": "second"}],
+        },
+        {
+            "type": "title",
+            "raw_type": "doc_title",
+            "layout_model": "pp-doclayout-v3",
+            "model_order": 1,
+            "bbox": [20, 20, 180, 60],
+            "score": 0.9,
+            "res": [{"text": "first"}],
+        },
+    ]
+
+    converted = adapter.convert(results, image)
+    blocks = converted["pages"][0]["blocks"]
+
+    assert [block["text"] for block in blocks] == ["first", "second"]
+    assert blocks[0]["attributes"]["raw_layout_label"] == "doc_title"
+    assert blocks[0]["attributes"]["model_order"] == 1
+    assert blocks[0]["attributes"]["layout_model"] == "pp-doclayout-v3"
+
+
 def test_sentence_like_title_duplicate_does_not_suppress_adjacent_text() -> None:
     adapter = PaddleAdapter()
     results = [

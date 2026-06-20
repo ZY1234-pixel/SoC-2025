@@ -44,6 +44,20 @@ class PaddleAdapter(BaseAdapter):
         "figure_caption": "figure_caption",
         "table_caption": "table_caption",
         "reference": "reference",
+        "doc_title": "title",
+        "paragraph_title": "title",
+        "figure_title": "figure_caption",
+        "display_formula": "formula",
+        "inline_formula": "formula",
+        "formula_number": "formula",
+        "image": "figure",
+        "chart": "figure",
+        "header_image": "figure",
+        "footer_image": "figure",
+        "reference_content": "reference",
+        "number": "page_number",
+        "vertical_text": "text",
+        "vision_footnote": "footnote",
     }
 
     # 携带 OCR 行结果的文本类区块类型
@@ -123,6 +137,8 @@ class PaddleAdapter(BaseAdapter):
                 "cleanup_rule_counts": dict(Counter(item["reason"] for item in cleanup_report)),
             }
 
+        filtered_results = self._ensure_model_order(filtered_results)
+
         for idx, region in enumerate(filtered_results):
             block = self._convert_region(region, w, h, idx)
             blocks.append(block)
@@ -143,6 +159,22 @@ class PaddleAdapter(BaseAdapter):
                 }
             ],
         }
+
+    @staticmethod
+    def _ensure_model_order(results: list) -> list:
+        """Keep PP-DocLayoutV3 reading order stable after cleanup passes."""
+        ordered = list(results or [])
+        if not ordered:
+            return ordered
+        order_values = []
+        for index, region in enumerate(ordered):
+            value = region.get("model_order") if isinstance(region, dict) else None
+            try:
+                order_values.append((int(value), index, region))
+            except (TypeError, ValueError):
+                return ordered
+        order_values.sort(key=lambda item: (item[0], item[1]))
+        return [item[2] for item in order_values]
 
     def _suppress_nested_duplicates(self, results: list) -> tuple[list, list[dict]]:
         """抑制大框包小框的重复区域。
@@ -802,6 +834,19 @@ class PaddleAdapter(BaseAdapter):
             "confidence": confidence,
             "order": index,
         }
+        attributes: Dict[str, Any] = {}
+        if isinstance(region.get("attributes"), dict):
+            attributes.update(region["attributes"])
+        for source_key, target_key in (
+            ("raw_type", "raw_layout_label"),
+            ("model_order", "model_order"),
+            ("layout_model", "layout_model"),
+        ):
+            value = region.get(source_key)
+            if value is not None:
+                attributes[target_key] = value
+        if attributes:
+            block["attributes"] = attributes
 
         res = region.get("res")
 

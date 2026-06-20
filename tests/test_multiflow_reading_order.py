@@ -40,6 +40,22 @@ def _text_block(block_id: str, bbox: list[float], text: str, category: str = "te
     }
 
 
+def _model_order_text_block(
+    block_id: str,
+    bbox: list[float],
+    text: str,
+    model_order: int,
+    category: str = "text",
+) -> dict:
+    block = _text_block(block_id, bbox, text, category=category)
+    block["attributes"] = {
+        "layout_model": "pp-doclayout-v3",
+        "model_order": model_order,
+        "raw_layout_label": category,
+    }
+    return block
+
+
 def _figure_block(block_id: str, bbox: list[float]) -> dict:
     return {
         "id": block_id,
@@ -81,6 +97,37 @@ def test_pipeline_reclassifies_cjk_figure_caption_and_page_number():
 
     assert by_id["cap_as_title"].block_type == BlockType.FIGURE_CAPTION
     assert by_id["page_no"].block_type == BlockType.PAGE_NUMBER
+
+
+def test_pipeline_model_order_strategy_preserves_upstream_reading_order():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1000,
+                "height": 1000,
+                "blocks": [
+                    _model_order_text_block("left_second", [100, 100, 400, 180], "model says second", 1),
+                    _model_order_text_block("bottom_third", [100, 500, 900, 580], "model says third", 2),
+                    _model_order_text_block("right_first", [600, 100, 900, 180], "model says first", 0),
+                ],
+            }
+        ],
+    }
+
+    pipeline = RecoveryPipeline(
+        config=RecoveryConfig(
+            reading_order_strategy="model_order",
+            font_classification_enabled=False,
+        )
+    )
+    doc = pipeline.build_document(page)
+    blocks = [blk for zone in doc.pages[0].zones for blk in zone.blocks]
+
+    assert [block.block_id for block in blocks] == ["right_first", "left_second", "bottom_third"]
+    assert all((block.attributes or {}).get("reading_order_strategy") == "model_order" for block in blocks)
 
 
 def test_pipeline_suppresses_visual_boxes_that_duplicate_text_regions():

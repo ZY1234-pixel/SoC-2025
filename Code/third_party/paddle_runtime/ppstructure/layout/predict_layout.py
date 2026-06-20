@@ -54,11 +54,11 @@ class LayoutPredictor(object):
         "doc_title": "title",
         "paragraph_title": "title",
         "text": "text",
-        "number": "footer",
-        "abstract": "text",
+        "number": "page_number",
+        "abstract": "abstract",
         "content": "text",
         "reference": "reference",
-        "footnote": "reference",
+        "footnote": "footnote",
         "header": "header",
         "footer": "footer",
         "algorithm": "text",
@@ -73,6 +73,11 @@ class LayoutPredictor(object):
         "header_image": "figure",
         "footer_image": "figure",
         "aside_text": "text",
+        "display_formula": "equation",
+        "inline_formula": "equation",
+        "reference_content": "reference",
+        "vertical_text": "text",
+        "vision_footnote": "footnote",
     }
 
     _NCNN_MAX_DET = 300
@@ -149,6 +154,7 @@ class LayoutPredictor(object):
         self.use_ncnn = self.ncnn_param_path is not None and self.ncnn_model_path is not None
         self.ncnn_input_size = resize_size
         self.ncnn_conf_threshold = min(float(args.layout_score_threshold), 0.25)
+        self.layout_model_name = os.path.basename(layout_model_path).lower()
         self.enable_tiled_recall = self._env_flag("DOCFLOW_LAYOUT_TILE_RECALL", True)
         self.tile_overlap_ratio = self._env_float(
             "DOCFLOW_LAYOUT_TILE_OVERLAP", default=0.18, minimum=0.05, maximum=0.45
@@ -189,6 +195,7 @@ class LayoutPredictor(object):
                 self.config,
             ) = utility.create_predictor(args, "layout", logger)
             self.use_onnx = bool(args.use_onnx) or str(args.layout_model_dir or "").lower().endswith(".onnx")
+            args.use_onnx = bool(args.use_onnx)
             self.input_names = None if self.use_onnx else self.predictor.get_input_names()
 
     @staticmethod
@@ -252,9 +259,16 @@ class LayoutPredictor(object):
                 layout_model_path,
                 providers=["CPUExecutionProvider"],
             )
-            shape = session.get_inputs()[0].shape
-            if len(shape) < 4:
+            image_input = None
+            for input_meta in session.get_inputs():
+                if input_meta.name == "image" and len(input_meta.shape) >= 4:
+                    image_input = input_meta
+                    break
+                if image_input is None and len(input_meta.shape) >= 4:
+                    image_input = input_meta
+            if image_input is None:
                 return None
+            shape = image_input.shape
             height, width = shape[2], shape[3]
             if isinstance(height, int) and isinstance(width, int) and height > 0 and width > 0:
                 return [int(width), int(height)]
@@ -389,12 +403,13 @@ class LayoutPredictor(object):
         return np.array(out), (ratio, pad)
 
     def _parse_predecoded_outputs(self, outputs, ori_shape):
-        """兼容 PP-DocLayout-S 等直接输出 NMS 后 boxes 的模型。"""
+        """兼容 PP-DocLayout 系列直接输出 NMS 后 boxes 的模型。"""
         if not isinstance(outputs, list) or len(outputs) < 2:
             return None
 
         boxes_arr = None
         nums_arr = None
+        masks_arr = None
         for out in outputs:
             if not isinstance(out, np.ndarray):
                 continue
@@ -402,6 +417,8 @@ class LayoutPredictor(object):
                 boxes_arr = out
             elif out.ndim == 1 and out.size > 0:
                 nums_arr = out
+            elif out.ndim == 3:
+                masks_arr = out
 
         if boxes_arr is None or nums_arr is None:
             return None
@@ -411,7 +428,8 @@ class LayoutPredictor(object):
         keep_n = max(0, min(keep_n, boxes_arr.shape[0]))
         labels = self.postprocess_op.labels
         results = []
-        for dt in boxes_arr[:keep_n]:
+        is_doclayout_v3 = boxes_arr.shape[1] >= 7
+        for idx, dt in enumerate(boxes_arr[:keep_n]):
             clsid = int(dt[0])
             score = float(dt[1])
             if score < self.postprocess_op.score_threshold:
@@ -420,8 +438,22 @@ class LayoutPredictor(object):
             bbox[0::2] = np.clip(bbox[0::2], 0, w)
             bbox[1::2] = np.clip(bbox[1::2], 0, h)
             raw_label = labels[clsid] if 0 <= clsid < len(labels) else str(clsid)
+            mapped_label = self._map_label(raw_label)
+            if mapped_label is None:
+                continue
+            item = {
+                "bbox": bbox,
+                "label": mapped_label,
+                "score": score,
+                "raw_label": raw_label,
+                "model_order": idx,
+            }
+            if is_doclayout_v3:
+                item["layout_model"] = "pp-doclayout-v3"
+            if masks_arr is not None and idx < masks_arr.shape[0]:
+                item["mask"] = masks_arr[idx]
             results.append(
-                {"bbox": bbox, "label": self._map_label(raw_label), "score": score}
+                item
             )
         return results
 
@@ -636,6 +668,7 @@ class LayoutPredictor(object):
         scale_factor = np.array(
             [[in_h / float(ori_h), in_w / float(ori_w)]], dtype=np.float32
         )
+        im_shape = np.array([[in_h, in_w]], dtype=np.float32)
 
         np_score_list, np_boxes_list = [], []
         if self.use_onnx:
@@ -646,6 +679,8 @@ class LayoutPredictor(object):
             for name in input_names:
                 if name == "image":
                     input_dict[name] = img
+                elif name == "im_shape":
+                    input_dict[name] = im_shape
                 elif name == "scale_factor":
                     input_dict[name] = scale_factor
                 else:
@@ -665,6 +700,8 @@ class LayoutPredictor(object):
                     handle = self.predictor.get_input_handle(name)
                     if name == "image":
                         handle.copy_from_cpu(img)
+                    elif name == "im_shape":
+                        handle.copy_from_cpu(im_shape)
                     elif name == "scale_factor":
                         handle.copy_from_cpu(scale_factor)
                     else:

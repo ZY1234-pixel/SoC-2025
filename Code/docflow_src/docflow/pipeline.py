@@ -264,7 +264,9 @@ class RecoveryPipeline:
         page.estimate_margins(blocks)
 
         # -- 需要时执行版面分析 ----------------------------------
-        if self._needs_layout_analysis(raw_blocks) and len(blocks) > 1:
+        if self._should_use_model_order(raw_blocks):
+            blocks = self._apply_model_order_metadata(blocks)
+        elif self._needs_layout_analysis(raw_blocks) and len(blocks) > 1:
             blocks = sort_layout(
                 blocks,
                 page.image_width,
@@ -383,6 +385,41 @@ class RecoveryPipeline:
     # ------------------------------------------------------------------
     # 辅助方法
     # ------------------------------------------------------------------
+
+    def _should_use_model_order(self, raw_blocks: List[dict]) -> bool:
+        strategy_name = str(self.config.reading_order_strategy or "").strip().lower()
+        if strategy_name != "model_order":
+            return False
+        return bool(raw_blocks) and all(
+            isinstance(block.get("attributes"), dict)
+            and "model_order" in block["attributes"]
+            for block in raw_blocks
+        )
+
+    @staticmethod
+    def _apply_model_order_metadata(blocks: List[Block]) -> List[Block]:
+        def _model_order(block: Block, fallback: int) -> tuple[int, int]:
+            attrs = getattr(block, "attributes", None) or {}
+            try:
+                return int(attrs.get("model_order")), fallback
+            except (TypeError, ValueError):
+                return fallback, fallback
+
+        ordered_blocks = [
+            block for _, block in sorted(
+                enumerate(blocks),
+                key=lambda item: _model_order(item[1], item[0]),
+            )
+        ]
+        for index, block in enumerate(ordered_blocks):
+            block.col_count = int(getattr(block, "col_count", 1) or 1)
+            block.col_index = int(getattr(block, "col_index", 0) or 0)
+            block.spanned_cols = list(getattr(block, "spanned_cols", None) or [block.col_index])
+            if block.attributes is None:
+                block.attributes = {}
+            block.attributes["reading_order_strategy"] = "model_order"
+            block.attributes.setdefault("model_order", index)
+        return ordered_blocks
 
     def _get_font_classifier(self) -> Optional[FontClassifier]:
         if not bool(getattr(self.config, "font_classification_enabled", True)):

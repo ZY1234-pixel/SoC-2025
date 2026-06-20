@@ -198,11 +198,7 @@ def create_predictor(args, mode, logger):
         logger.info("not find {} model file path {}".format(mode, model_dir))
         sys.exit(0)
     use_onnx = bool(args.use_onnx)
-    if (
-        mode == "layout"
-        and isinstance(model_dir, str)
-        and model_dir.lower().endswith(".onnx")
-    ):
+    if isinstance(model_dir, str) and model_dir.lower().endswith(".onnx"):
         use_onnx = True
 
     if use_onnx:

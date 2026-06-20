@@ -60,6 +60,7 @@ DOCLAYOUT_YOLO_LABELS = [
 ]
 
 DEFAULT_LAYOUT_SCORE_THRESHOLD = 0.50
+DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD = 0.30
 DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD = 0.18
 RAW_RESULT_PREVIEW_MAX_TEXT = 300
 TITLE_OCR_RECHECK_TYPES = {"title"}
@@ -107,6 +108,33 @@ PP_DOCLAYOUT_M_LABELS = [
     "footer_image",
     "aside_text",
 ]
+PP_DOCLAYOUT_V3_LABELS = [
+    "abstract",
+    "algorithm",
+    "aside_text",
+    "chart",
+    "content",
+    "display_formula",
+    "doc_title",
+    "figure_title",
+    "footer",
+    "footer_image",
+    "footnote",
+    "formula_number",
+    "header",
+    "header_image",
+    "image",
+    "inline_formula",
+    "number",
+    "paragraph_title",
+    "reference",
+    "reference_content",
+    "seal",
+    "table",
+    "text",
+    "vertical_text",
+    "vision_footnote",
+]
 
 
 def bootstrap_import_paths(paths: RuntimePaths) -> None:
@@ -147,7 +175,10 @@ def resolve_layout_score_threshold(layout_spec: LayoutModelSpec) -> str:
             value = min(1.0, max(0.01, value))
         return f"{value:.2f}"
 
-    if "doclayout_yolo" in layout_spec.name.lower():
+    spec_name = layout_spec.name.lower()
+    if "pp-doclayout-v3" in spec_name:
+        return f"{DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD:.2f}"
+    if "doclayout_yolo" in spec_name:
         return f"{DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD:.2f}"
     return f"{DEFAULT_LAYOUT_SCORE_THRESHOLD:.2f}"
 
@@ -160,6 +191,7 @@ def build_layout_dict_from_inference(layout_spec: LayoutModelSpec, fallback_dict
         explicit_labels = {
             "picodet-l_layout_17cls": PICODET_LAYOUT_17CLS_LABELS,
             "pp-doclayout-m": PP_DOCLAYOUT_M_LABELS,
+            "pp-doclayout-v3": PP_DOCLAYOUT_V3_LABELS,
         }.get(layout_spec.name)
         if explicit_labels:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -226,7 +258,13 @@ def make_engine(paths: RuntimePaths, layout_dict_dir: Path):
 
     ppstructure_dir = paths.paddle_root / "ppstructure"
     fallback_layout_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "layout_dict" / "layout_cdla_dict.txt"
-    rec_char_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "ppocrv5_dict.txt"
+    rec_char_dict = (
+        paths.models_root
+        / "rec"
+        / "ch"
+        / "PP-OCRv6_small_rec"
+        / "ppocrv6_dict.txt"
+    )
     table_char_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "table_structure_dict_ch.txt"
     layout_dict = build_layout_dict_from_inference(paths.layout_model_spec, fallback_layout_dict, layout_dict_dir)
     layout_score_threshold = resolve_layout_score_threshold(paths.layout_model_spec)
@@ -753,8 +791,8 @@ def main() -> int:
     parser.add_argument("--no-debug-vis", action="store_true", help="关闭 debug 可视化图导出")
     parser.add_argument(
         "--layout-model",
-        default="doclayout_yolo",
-        choices=["doclayout_yolo", "picodet-l_layout_17cls", "pp-doclayout-m"],
+        default="pp-doclayout-v3",
+        choices=["pp-doclayout-v3", "PP-DocLayoutV3", "doclayout_yolo", "picodet-l_layout_17cls", "pp-doclayout-m"],
         help="选择版面分析模型。",
     )
     args = parser.parse_args()
