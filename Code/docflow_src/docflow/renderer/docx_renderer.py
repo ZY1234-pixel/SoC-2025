@@ -185,9 +185,9 @@ class DocxRenderer(BaseRenderer):
                 col_px=col_px,
                 page_width_px=img_w,
             )
-            # RenderPlan 信任 native_columns 模式
-            if page_render_mode == "native_columns" and zone.col_count > 1:
-                use_native_cols = True
+            # RenderPlan 的 native_columns 只是页面级偏好，实际仍由 zone
+            # 安全检查决定；复杂图文混排若强制 Word 原生分栏，容易把后续
+            # 块流入不可见/错误栏位。
             # RenderPlan 强制 grid 模式（禁用 native columns，走布局表格）
             if page_render_mode == "grid":
                 use_native_cols = False
@@ -437,6 +437,11 @@ class DocxRenderer(BaseRenderer):
         if not bool(getattr(self.config, "docx_prefer_native_columns", True)):
             return False
         if zone.col_count <= 1:
+            return False
+        if any(
+            block.block_type in {BlockType.FIGURE, BlockType.TABLE, BlockType.FORMULA, BlockType.EQUATION}
+            for block in zone.blocks
+        ):
             return False
         if any(len(getattr(b, "spanned_cols", [])) > 1 for b in zone.blocks):
             return False
@@ -1817,13 +1822,13 @@ class DocxRenderer(BaseRenderer):
             if len(b.spanned_cols) > 1:
                 spanned_set.update(b.spanned_cols)
 
+        visual_gap = min(12.0, usable_w_pt * 0.015)
+        col_widths = self._column_widths_pt(num_cols, col_px, img_w, usable_w_pt)
+
         if not spanned_set:
             # 无跨列区块：在简单的 N 列布局表格中渲染
             # gutter 仅作为视觉分隔（cell右边距），不从列宽中扣除，
             # 保证内容区宽度接近原始列宽，避免文字过度换行导致列高膨胀。
-            visual_gap = min(12.0, usable_w_pt * 0.015)
-            col_widths = self._column_widths_pt(num_cols, col_px, img_w, usable_w_pt)
-
             tbl = doc.add_table(rows=1, cols=num_cols)
             tbl.autofit = False
             clear_table_borders(tbl)
@@ -1859,149 +1864,89 @@ class DocxRenderer(BaseRenderer):
                 self._prune_leading_empty_cell_paragraphs(cell)
             return
 
-        standalone_cols = [ci for ci in range(num_cols) if ci not in spanned_set]
-        spanned_cols = sorted(spanned_set)
+        self._render_spanned_layout_table_zone(
+            doc,
+            zone,
+            page,
+            col_px,
+            col_widths=col_widths,
+            visual_gap=visual_gap,
+        )
+        return
 
-        # 列宽：gutter 仅作视觉分隔（cell右边距），不从列宽中扣除
-        visual_gap = min(12.0, usable_w_pt * 0.015)
-        col_widths = self._column_widths_pt(num_cols, col_px, img_w, usable_w_pt)
-        segments = self._column_segments(num_cols, spanned_cols)
+    def _render_spanned_layout_table_zone(
+        self,
+        doc,
+        zone: Zone,
+        page: "Page",
+        col_px: dict,
+        *,
+        col_widths: List[float],
+        visual_gap: float,
+    ) -> None:
+        """Render mixed single-column and spanned blocks without nested tables."""
+        from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 
-        # 外层表格
-        outer_widths = []
-        for seg_type, cols in segments:
-            if seg_type == "spanned":
-                outer_widths.append(sum(col_widths[ci] for ci in cols))
-            else:
-                outer_widths.append(col_widths[cols[0]])
-
-        tbl = doc.add_table(rows=1, cols=len(segments))
-        tbl.autofit = False
-        clear_table_borders(tbl)
-        set_table_col_widths(tbl, outer_widths)
-
-        row = tbl.rows[0]
-        for cell in row.cells:
-            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
-            reset_paragraph_format(cell.paragraphs[0])
-            set_paragraph_spacing(cell.paragraphs[0],
-                                  line_spacing=self._scale(MIN_LINE_SPACING_PT), exact=True)
-
-        # 通过独立单元格的右边距实现列间视觉间距
-        mcell = None
-        mwidth = 0.0
-        for seg_idx, (seg_type, cols) in enumerate(segments):
-            cell = row.cells[seg_idx]
-            if seg_idx < len(segments) - 1:
-                set_cell_right_margin(cell, visual_gap)
-            if seg_type == "standalone":
-                ci = cols[0]
-                col_blks = sorted(
-                    [b for b in blocks if b.col_index == ci and len(b.spanned_cols) == 1],
-                    key=lambda b: b.bbox.y1)
-                cl = min((b.bbox.x1 for b in col_blks), default=0)
-                cr = max((b.bbox.x2 for b in col_blks), default=img_w)
-                ctx = RenderContext(coord_mapper=mapper, page=page,
-                                    col_width_pt=col_widths[ci], col_left_px=cl,
-                                    col_right_px=cr, in_table_cell=True)
-                prev_y = 0
-                for block in col_blks:
-                    gap = max(0, block.bbox.y1 - prev_y)
-                    sp = self._scale(max(min(mapper.h(gap), 12) - self._corr_gap_pt, 0)) if (prev_y > 0 and gap > 2) else 0
-                    self._render_block(cell, block, ctx, space_before=sp)
-                    prev_y = block.bbox.y2
-                self._prune_leading_empty_cell_paragraphs(cell)
-            else:
-                mcell = cell
-                mwidth = outer_widths[seg_idx]
-
-        if mcell is None:
+        mapper = page.coord_mapper
+        img_w = page.image_width
+        blocks = sorted(zone.blocks, key=lambda b: (float(b.bbox.y1), float(b.bbox.x1)))
+        num_cols = max(int(zone.col_count or 1), 1)
+        if not blocks or num_cols <= 1:
             return
 
-        span_blks = sorted(
-            [b for b in blocks if len(b.spanned_cols) > 1],
-            key=lambda b: b.bbox.y1)
-        sl = min((b.bbox.x1 for b in span_blks), default=0)
-        sr = max((b.bbox.x2 for b in span_blks), default=img_w)
-        ctx = RenderContext(coord_mapper=mapper, page=page,
-                            col_width_pt=mwidth, col_left_px=sl,
-                            col_right_px=sr, in_table_cell=True)
+        tbl = doc.add_table(rows=0, cols=num_cols)
+        tbl.autofit = False
+        clear_table_borders(tbl)
+        set_table_col_widths(tbl, col_widths)
 
-        span_top = min((b.bbox.y1 for b in span_blks), default=float("inf"))
-        span_bottom = max((b.bbox.y2 for b in span_blks), default=float("-inf"))
-        above = {ci: [] for ci in spanned_cols}
-        below = {ci: [] for ci in spanned_cols}
-        for ci in spanned_cols:
-            col_singletons = sorted(
-                [b for b in blocks if b.col_index == ci and len(b.spanned_cols) == 1],
-                key=lambda b: b.bbox.y1,
+        def _init_cell(cell, ci: int) -> None:
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            reset_paragraph_format(cell.paragraphs[0])
+            set_paragraph_spacing(
+                cell.paragraphs[0],
+                line_spacing=self._scale(MIN_LINE_SPACING_PT),
+                exact=True,
             )
-            for block in col_singletons:
-                if not span_blks:
-                    above[ci].append(block)
+            if ci < num_cols - 1:
+                set_cell_right_margin(cell, visual_gap)
+
+        for block in blocks:
+            spans = sorted(
+                {
+                    int(ci) for ci in (getattr(block, "spanned_cols", []) or [getattr(block, "col_index", 0)])
+                    if 0 <= int(ci) < num_cols
+                }
+            )
+            if not spans:
+                spans = [min(max(int(getattr(block, "col_index", 0) or 0), 0), num_cols - 1)]
+            start_col = min(spans)
+            end_col = max(spans)
+
+            row = tbl.add_row()
+            for ci, cell in enumerate(row.cells):
+                _init_cell(cell, ci)
+
+            cell = row.cells[start_col]
+            if end_col > start_col:
+                cell = cell.merge(row.cells[end_col])
+            width_pt = sum(col_widths[start_col:end_col + 1])
+            left_px = min((col_px.get(ci, [0, img_w])[0] for ci in range(start_col, end_col + 1)), default=0)
+            right_px = max((col_px.get(ci, [0, img_w])[1] for ci in range(start_col, end_col + 1)), default=img_w)
+            ctx = RenderContext(
+                coord_mapper=mapper,
+                page=page,
+                col_width_pt=width_pt,
+                col_left_px=left_px,
+                col_right_px=right_px,
+                in_table_cell=True,
+            )
+            self._render_block(cell, block, ctx, space_before=0)
+            self._prune_leading_empty_cell_paragraphs(cell)
+            for ci in range(num_cols):
+                if start_col <= ci <= end_col:
                     continue
-                if float(block.bbox.y2) <= float(span_top) + 8.0:
-                    above[ci].append(block)
-                elif float(block.bbox.y1) >= float(span_bottom) - 8.0:
-                    below[ci].append(block)
-                elif ((float(block.bbox.y1) + float(block.bbox.y2)) * 0.5) <= ((float(span_top) + float(span_bottom)) * 0.5):
-                    above[ci].append(block)
-                else:
-                    below[ci].append(block)
-
-        def _render_spanned_singletons(grouped_blocks: dict) -> None:
-            if not any(len(v) > 0 for v in grouped_blocks.values()):
-                return
-            n_sub = len(spanned_cols)
-            sub_widths = [col_widths[ci] for ci in spanned_cols]
-            try:
-                sub_tbl = mcell.add_table(rows=1, cols=n_sub)
-                sub_tbl.autofit = False
-                clear_table_borders(sub_tbl)
-                set_table_col_widths(sub_tbl, sub_widths)
-                sub_row = sub_tbl.rows[0]
-                for si, ci in enumerate(spanned_cols):
-                    sc = sub_row.cells[si]
-                    sc.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
-                    reset_paragraph_format(sc.paragraphs[0])
-                    set_paragraph_spacing(sc.paragraphs[0],
-                                          line_spacing=self._scale(MIN_LINE_SPACING_PT), exact=True)
-                    if si < n_sub - 1:
-                        set_cell_right_margin(sc, visual_gap)
-                    sub_ctx = RenderContext(
-                        coord_mapper=mapper, page=page,
-                        col_width_pt=sub_widths[si],
-                        col_left_px=min((b.bbox.x1 for b in grouped_blocks[ci]), default=0),
-                        col_right_px=max((b.bbox.x2 for b in grouped_blocks[ci]), default=img_w),
-                        in_table_cell=True)
-                    prev_y = 0
-                    for block in grouped_blocks[ci]:
-                        gap = max(0, block.bbox.y1 - prev_y)
-                        sp = self._scale(max(min(mapper.h(gap), 12) - self._corr_gap_pt, 0)) if (prev_y > 0 and gap > 2) else 0
-                        self._render_block(sc, block, sub_ctx, space_before=sp)
-                        prev_y = block.bbox.y2
-                    self._prune_leading_empty_cell_paragraphs(sc)
-            except Exception as e:
-                logger.warning("Nested table failed (%s), rendering sequentially", e)
-                ctx_fallback = RenderContext(
-                    coord_mapper=mapper, page=page,
-                    col_width_pt=mwidth, col_left_px=0,
-                    col_right_px=img_w, in_table_cell=True)
-                for ci in spanned_cols:
-                    for block in grouped_blocks[ci]:
-                        self._render_block(mcell, block, ctx_fallback, space_before=0)
-
-        _render_spanned_singletons(above)
-
-        prev_y = 0
-        for block in span_blks:
-            gap = max(0, block.bbox.y1 - prev_y)
-            sp = self._scale(min(mapper.h(gap), 12)) if (prev_y > 0 and gap > 2) else 0
-            self._render_block(mcell, block, ctx, space_before=sp)
-            prev_y = block.bbox.y2
-
-        _render_spanned_singletons(below)
-        self._prune_leading_empty_cell_paragraphs(mcell)
+                self._prune_leading_empty_cell_paragraphs(row.cells[ci])
+        return
 
     # ------------------------------------------------------------------
     # 工具方法

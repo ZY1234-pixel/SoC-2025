@@ -311,6 +311,44 @@ def test_pp_doclayout_v3_header_absorbs_page_number_child() -> None:
     assert converted["pages"][0]["attributes"]["cleanup_rule_counts"]["page_strip_container_child"] == 1
 
 
+def test_duplicate_ocr_line_trim_drops_low_confidence_carryover_fragment() -> None:
+    adapter = PaddleAdapter()
+    results = [
+        {
+            "type": "text",
+            "bbox": [100, 100, 600, 180],
+            "score": 0.9,
+            "res": [
+                {
+                    "text": "灯塔指引开始被用来增加光的强度。",
+                    "text_region": [[100, 140], [600, 140], [600, 164], [100, 164]],
+                }
+            ],
+        },
+        {
+            "type": "text",
+            "bbox": [90, 140, 610, 235],
+            "score": 0.52,
+            "res": [
+                {
+                    "text": "灯塔指引开始被用来增加光的强度。",
+                    "text_region": [[100, 140], [600, 140], [600, 164], [100, 164]],
+                },
+                {
+                    "text": "的方向",
+                    "text_region": [[90, 200], [155, 200], [155, 225], [90, 225]],
+                },
+            ],
+        },
+    ]
+
+    filtered, report = adapter._trim_duplicate_ocr_lines(results)
+
+    assert len(filtered) == 1
+    assert filtered[0]["bbox"] == [100, 100, 600, 180]
+    assert any(item["reason"] == "text_fragment_carryover_drop" for item in report)
+
+
 def test_low_score_formula_duplicate_does_not_suppress_section_title() -> None:
     adapter = PaddleAdapter()
     results = [

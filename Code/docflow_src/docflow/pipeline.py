@@ -20,6 +20,7 @@ from docflow.model.blocks.factory import BlockFactory
 from docflow.model.page import Document, Page
 from docflow.model.zone import Zone
 from docflow.layout.sorter import sort_layout
+from docflow.layout.column_detector import detect_columns, detect_spanned_blocks
 from docflow.layout.paragraph_detector import split_into_paragraphs
 from docflow.layout.style_inferrer import infer_block_styles
 from docflow.layout.color_inferrer import infer_text_colors
@@ -266,6 +267,10 @@ class RecoveryPipeline:
         # -- 需要时执行版面分析 ----------------------------------
         if self._should_use_model_order(raw_blocks):
             blocks = self._apply_model_order_metadata(blocks)
+            self._assign_model_order_columns(
+                blocks,
+                page_width=page.image_width,
+            )
         elif self._needs_layout_analysis(raw_blocks) and len(blocks) > 1:
             blocks = sort_layout(
                 blocks,
@@ -420,6 +425,60 @@ class RecoveryPipeline:
             block.attributes["reading_order_strategy"] = "model_order"
             block.attributes.setdefault("model_order", index)
         return ordered_blocks
+
+    def _assign_model_order_columns(self, blocks: List[Block], page_width: int) -> None:
+        if page_width <= 0 or len(blocks) < 2:
+            return
+
+        skeleton = [
+            block for block in blocks
+            if isinstance(block, TextBlock)
+            and block.block_type in {
+                BlockType.TEXT,
+                BlockType.TITLE,
+                BlockType.ABSTRACT,
+                BlockType.REFERENCE,
+                BlockType.FIGURE_CAPTION,
+                BlockType.TABLE_CAPTION,
+                BlockType.FOOTNOTE,
+            }
+            and block.block_type not in _ZONE_STRIP_TYPES
+            and float(block.bbox.width) <= float(page_width) * 0.42
+            and (
+                block.count_lines() >= 2
+                or len((block.full_text() or "").strip()) >= 18
+            )
+        ]
+        if len(skeleton) < 2:
+            for block in blocks:
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+            return
+
+        _columns, col_bounds = detect_columns(
+            skeleton,
+            page_width,
+            max_cols=self.config.max_cols,
+            cluster_thresh=self.config.column_cluster_thresh,
+        )
+        col_count = len(col_bounds)
+        if col_count <= 1:
+            for block in blocks:
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+            return
+
+        detect_spanned_blocks(blocks, col_bounds)
+        for block in blocks:
+            block.col_count = col_count
+            if block.block_type in _ZONE_STRIP_TYPES:
+                block.spanned_cols = list(range(col_count))
+                block.col_index = 0
+            if block.attributes is None:
+                block.attributes = {}
+            block.attributes["column_source"] = "model_order_geometry"
 
     def _get_font_classifier(self) -> Optional[FontClassifier]:
         if not bool(getattr(self.config, "font_classification_enabled", True)):

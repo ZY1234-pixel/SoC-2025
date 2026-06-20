@@ -194,11 +194,13 @@ class PaddleAdapter(BaseAdapter):
         results = self._recall_missing_figures_from_captions(results, image)
         filtered_results, cleanup_report = self._suppress_nested_duplicates(results)
         filtered_results, trim_report = self._trim_carry_over_text_regions(filtered_results)
+        filtered_results, line_dedup_report = self._trim_duplicate_ocr_lines(filtered_results)
         filtered_results = [
             self._trim_title_leading_formula_number(region)
             for region in filtered_results
         ]
         cleanup_report.extend(trim_report)
+        cleanup_report.extend(line_dedup_report)
         page_attributes = None
         if cleanup_report:
             page_attributes = {
@@ -661,6 +663,88 @@ class PaddleAdapter(BaseAdapter):
                 )
                 if current is None:
                     continue
+
+        trimmed = [
+            item["region"]
+            for item in sorted(entries, key=lambda item: item["order"])
+            if item["region"] is not None
+        ]
+        return trimmed, report
+
+    @classmethod
+    def _trim_duplicate_ocr_lines(
+        cls,
+        results: List[dict],
+    ) -> tuple[List[dict], List[Dict[str, Any]]]:
+        if len(results) < 2:
+            return results, []
+
+        entries = [{"order": index, "region": cls._clone_region(region)} for index, region in enumerate(results)]
+        report: List[Dict[str, Any]] = []
+        page_w = max(
+            (cls._safe_bbox(item["region"].get("bbox"))[2] for item in entries if item.get("region")),
+            default=1.0,
+        )
+
+        seen_lines: List[tuple[str, List[float], int]] = []
+        for entry in entries:
+            region = entry["region"]
+            if region is None:
+                continue
+            rtype = str(region.get("type", "")).lower()
+            if rtype not in cls._TEXT_TYPES:
+                continue
+            res = region.get("res")
+            if not isinstance(res, list) or len(res) < 2:
+                for item in res or []:
+                    text = cls._normalize_text(cls._extract_item_text(item))
+                    bbox = cls._bbox_from_single_region_res(item)
+                    if text and bbox is not None:
+                        seen_lines.append((text, bbox, entry["order"]))
+                continue
+
+            kept = []
+            removed = 0
+            for item in res:
+                text = cls._normalize_text(cls._extract_item_text(item))
+                bbox = cls._bbox_from_single_region_res(item)
+                duplicate = False
+                if text and bbox is not None and len(text) >= 8:
+                    for prev_text, prev_bbox, _prev_order in reversed(seen_lines[-80:]):
+                        if prev_text != text:
+                            continue
+                        if cls._overlap_ratio(bbox, prev_bbox) >= 0.90:
+                            duplicate = True
+                            break
+                if duplicate:
+                    removed += 1
+                    continue
+                kept.append(item)
+
+            if removed:
+                if kept:
+                    region["res"] = kept
+                    bbox = cls._bbox_from_region_res(kept)
+                    if bbox is not None:
+                        region["bbox"] = bbox
+                    text_len = sum(len(cls._normalize_text(cls._extract_item_text(item))) for item in kept)
+                    width = max(0.0, cls._safe_bbox(region.get("bbox"))[2] - cls._safe_bbox(region.get("bbox"))[0])
+                    score = float(region.get("score", 0.0) or 0.0)
+                    if text_len <= 12 and width <= page_w * 0.18 and score <= 0.65:
+                        entry["region"] = None
+                        report.append({"reason": "text_fragment_carryover_drop", "removed_lines": removed})
+                        continue
+                    report.append({"reason": "duplicate_ocr_line_trim", "removed_lines": removed})
+                else:
+                    entry["region"] = None
+                    report.append({"reason": "duplicate_ocr_line_drop", "removed_lines": removed})
+                    continue
+
+            for item in (region.get("res") or []):
+                text = cls._normalize_text(cls._extract_item_text(item))
+                bbox = cls._bbox_from_single_region_res(item)
+                if text and bbox is not None:
+                    seen_lines.append((text, bbox, entry["order"]))
 
         trimmed = [
             item["region"]
