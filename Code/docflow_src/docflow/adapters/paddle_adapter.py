@@ -34,6 +34,26 @@ class PaddleAdapter(BaseAdapter):
 
     # PaddleOCR 类型 → v2.0 类别映射
     _CATEGORY_MAP: Dict[str, str] = {
+        "abstract": "abstract",
+        "algorithm": "code",
+        "aside_text": "text",
+        "chart": "figure",
+        "content": "text",
+        "display_formula": "formula",
+        "doc_title": "title",
+        "figure_title": "figure_caption",
+        "footer_image": "figure",
+        "footnote": "footnote",
+        "formula_number": "formula",
+        "header_image": "figure",
+        "image": "figure",
+        "inline_formula": "formula",
+        "number": "page_number",
+        "paragraph_title": "title",
+        "reference_content": "reference",
+        "seal": "figure",
+        "vertical_text": "text",
+        "vision_footnote": "footnote",
         "text": "text",
         "title": "title",
         "table": "table",
@@ -44,20 +64,6 @@ class PaddleAdapter(BaseAdapter):
         "figure_caption": "figure_caption",
         "table_caption": "table_caption",
         "reference": "reference",
-        "doc_title": "title",
-        "paragraph_title": "title",
-        "figure_title": "figure_caption",
-        "display_formula": "formula",
-        "inline_formula": "formula",
-        "formula_number": "formula",
-        "image": "figure",
-        "chart": "figure",
-        "header_image": "figure",
-        "footer_image": "figure",
-        "reference_content": "reference",
-        "number": "page_number",
-        "vertical_text": "text",
-        "vision_footnote": "footnote",
     }
 
     # 携带 OCR 行结果的文本类区块类型
@@ -65,6 +71,9 @@ class PaddleAdapter(BaseAdapter):
         "text", "title", "reference", "header", "footer",
         "figure_caption", "table_caption", "abstract",
         "table_footnote", "formula_caption", "footnote",
+        "algorithm", "aside_text", "content", "doc_title",
+        "paragraph_title", "figure_title", "reference_content",
+        "vertical_text", "vision_footnote",
     })
     _DEDUP_CATEGORIES = frozenset({
         "text",
@@ -77,6 +86,10 @@ class PaddleAdapter(BaseAdapter):
         "table_caption",
         "table_footnote",
         "formula_caption",
+        "abstract",
+        "code",
+        "footnote",
+        "page_number",
     })
     _CAPTION_FAMILY = frozenset({
         "figure_caption",
@@ -92,6 +105,62 @@ class PaddleAdapter(BaseAdapter):
         "table_caption",
         "table_footnote",
         "formula_caption",
+        "abstract",
+        "code",
+        "footnote",
+        "page_number",
+    })
+    _GENERIC_PARENT_RAW_TYPES = frozenset({
+        "content",
+        "text",
+        "aside_text",
+        "vertical_text",
+        "algorithm",
+    })
+    _GENERIC_PARENT_CATEGORIES = frozenset({
+        "text",
+        "code",
+    })
+    _SEMANTIC_CONTAINER_CATEGORIES = frozenset({
+        "table",
+        "figure",
+        "header",
+        "footer",
+        "reference",
+        "abstract",
+    })
+    _SEMANTIC_CONTAINER_RAW_TYPES = frozenset({
+        "table",
+        "image",
+        "chart",
+        "header",
+        "header_image",
+        "footer",
+        "footer_image",
+        "reference",
+        "abstract",
+        "seal",
+    })
+    _TITLE_LIKE_RAW_TYPES = frozenset({
+        "doc_title",
+        "paragraph_title",
+        "figure_title",
+        "table_caption",
+        "figure_caption",
+    })
+    _FORMULA_RAW_TYPES = frozenset({
+        "display_formula",
+        "inline_formula",
+        "formula_number",
+        "equation",
+        "formula",
+    })
+    _TOP_LEVEL_PRESERVE_RAW_TYPES = frozenset({
+        "doc_title",
+        "paragraph_title",
+        "figure_title",
+        "table_caption",
+        "figure_caption",
     })
     _FIGURE_CAPTION_RE = re.compile(
         r"^\s*(?:图|fig(?:ure)?\.?)\s*[\d一二三四五六七八九十]+(?:[-－—]\d+)?\s*\S*",
@@ -200,6 +269,7 @@ class PaddleAdapter(BaseAdapter):
                 {
                     "index": index,
                     "region": region,
+                    "raw_type": type_name,
                     "category": mapped,
                     "bbox": bbox,
                     "text": text,
@@ -207,6 +277,7 @@ class PaddleAdapter(BaseAdapter):
                     "area": area,
                 }
             )
+        self._annotate_contained_child_counts(enriched)
 
         # 同类中优先保留信息量更大、得分更高的块
         ranked = sorted(enriched, key=self._dedup_sort_key, reverse=True)
@@ -219,19 +290,33 @@ class PaddleAdapter(BaseAdapter):
                 continue
             duplicate = False
             duplicate_reason = None
+            duplicate_existing = None
             for existing in kept:
                 duplicate_reason = self._is_nested_duplicate(candidate, existing)
                 if duplicate_reason is not None:
                     duplicate = True
+                    duplicate_existing = existing
                     break
             if not duplicate:
                 kept.append(candidate)
             else:
+                if duplicate_existing is not None and duplicate_reason in {
+                    "semantic_container_child",
+                    "table_container_child",
+                    "page_strip_container_child",
+                }:
+                    self._attach_nested_child(
+                        duplicate_existing["region"],
+                        candidate["region"],
+                        reason=duplicate_reason,
+                    )
                 report.append(
                     {
                         "reason": duplicate_reason,
                         "removed_index": candidate["index"],
                         "removed_category": candidate["category"],
+                        "parent_index": duplicate_existing["index"] if duplicate_existing is not None else None,
+                        "parent_category": duplicate_existing["category"] if duplicate_existing is not None else None,
                     }
                 )
 
@@ -391,7 +476,7 @@ class PaddleAdapter(BaseAdapter):
         return candidates[0][2]
 
     @classmethod
-    def _dedup_sort_key(cls, item: dict) -> tuple[float, float, float, float]:
+    def _dedup_sort_key(cls, item: dict) -> tuple[float, ...]:
         """Category-aware preference for nested-duplicate resolution.
 
         For text-like regions, detection confidence should dominate over raw
@@ -405,14 +490,127 @@ class PaddleAdapter(BaseAdapter):
         area = float(item.get("area", 0.0) or 0.0)
         index_bias = -float(item.get("index", 0))
         category = str(item.get("category", ""))
+        raw_type = str(item.get("raw_type", ""))
+        if cls._is_semantic_container_item(item):
+            return (3.0, score, area, text_len, index_bias)
+        if cls._is_generic_parent_item(item):
+            # Coarse V3 parent regions are useful only when no finer children
+            # exist, so let specific child boxes win containment decisions.
+            return (0.25, score, text_len, area, index_bias)
         if category in cls._TEXTLIKE_DEDUP_CATEGORIES:
             text = str(item.get("text", "") or "").strip()
+            if raw_type in cls._TITLE_LIKE_RAW_TYPES:
+                return (2.4, score, text_len, area, index_bias)
             if category == "title" and text.endswith(("。", "！", "？", ".", "!", "?")):
                 return (1.95, score, text_len, area, index_bias)
             return (2.0, score, text_len, area, index_bias)
         if category == "formula":
             return (1.0, score, area, text_len, index_bias)
         return (1.0, area, score, text_len, index_bias)
+
+    @classmethod
+    def _annotate_contained_child_counts(cls, items: List[dict]) -> None:
+        for parent in items:
+            count = 0
+            specific_count = 0
+            for child in items:
+                if child is parent:
+                    continue
+                if cls._is_containment_pair(parent, child):
+                    count += 1
+                    if cls._is_specific_child_item(child):
+                        specific_count += 1
+            parent["contained_child_count"] = count
+            parent["contained_specific_child_count"] = specific_count
+
+    @classmethod
+    def _is_containment_pair(
+        cls,
+        parent: dict,
+        child: dict,
+        *,
+        child_cover_threshold: float = 0.85,
+        area_ratio_threshold: float = 1.5,
+    ) -> bool:
+        parent_area = max(1.0, float(parent.get("area", 0.0) or 0.0))
+        child_area = max(1.0, float(child.get("area", 0.0) or 0.0))
+        if parent_area <= child_area * area_ratio_threshold:
+            return False
+        return cls._contain_ratio(child["bbox"], parent["bbox"]) >= child_cover_threshold
+
+    @classmethod
+    def _is_semantic_container_item(cls, item: dict) -> bool:
+        raw_type = str(item.get("raw_type", ""))
+        category = str(item.get("category", ""))
+        if raw_type in cls._TOP_LEVEL_PRESERVE_RAW_TYPES:
+            return False
+        return (
+            raw_type in cls._SEMANTIC_CONTAINER_RAW_TYPES
+            or category in cls._SEMANTIC_CONTAINER_CATEGORIES
+        )
+
+    @classmethod
+    def _is_generic_parent_item(cls, item: dict) -> bool:
+        raw_type = str(item.get("raw_type", ""))
+        category = str(item.get("category", ""))
+        if raw_type in cls._TOP_LEVEL_PRESERVE_RAW_TYPES:
+            return False
+        if raw_type == "content":
+            return True
+        if raw_type in {"text", "aside_text", "vertical_text", "algorithm"}:
+            return int(item.get("contained_specific_child_count", 0) or 0) >= 2
+        return (
+            category in cls._GENERIC_PARENT_CATEGORIES
+            and int(item.get("contained_specific_child_count", 0) or 0) >= 2
+        )
+
+    @classmethod
+    def _is_specific_child_item(cls, item: dict) -> bool:
+        raw_type = str(item.get("raw_type", ""))
+        category = str(item.get("category", ""))
+        if raw_type in cls._TOP_LEVEL_PRESERVE_RAW_TYPES or raw_type in cls._FORMULA_RAW_TYPES:
+            return True
+        return category in {
+            "text",
+            "title",
+            "code",
+            "formula",
+            "figure_caption",
+            "table_caption",
+            "table_footnote",
+            "footnote",
+            "page_number",
+            "reference",
+            "table",
+            "figure",
+        }
+
+    @classmethod
+    def _attach_nested_child(cls, parent_region: dict, child_region: dict, *, reason: str) -> None:
+        attributes = parent_region.setdefault("attributes", {})
+        if not isinstance(attributes, dict):
+            attributes = {}
+            parent_region["attributes"] = attributes
+        children = attributes.setdefault("nested_children", [])
+        if not isinstance(children, list):
+            children = []
+            attributes["nested_children"] = children
+        child_type = str(child_region.get("type", ""))
+        child_summary: Dict[str, Any] = {
+            "type": child_type,
+            "category": cls._CATEGORY_MAP.get(child_type.lower(), child_type.lower()),
+            "bbox": [float(v) for v in cls._safe_bbox(child_region.get("bbox"))],
+            "score": float(child_region.get("score", 0.0) or 0.0),
+            "reason": reason,
+        }
+        text = cls._normalize_text(cls._extract_region_text(child_region))
+        if text:
+            child_summary["text"] = text[:240]
+        for key in ("model_order", "raw_type", "layout_model"):
+            if child_region.get(key) is not None:
+                child_summary[key] = child_region.get(key)
+        children.append(child_summary)
+        attributes["nested_child_count"] = len(children)
 
     @classmethod
     def _trim_carry_over_text_regions(
@@ -472,6 +670,24 @@ class PaddleAdapter(BaseAdapter):
         return trimmed, report
 
     def _is_nested_duplicate(self, candidate: dict, existing: dict) -> Optional[str]:
+        if self._is_containment_pair(existing, candidate):
+            if (
+                self._is_semantic_container_item(existing)
+                and not self._is_generic_parent_item(existing)
+                and candidate["raw_type"] not in self._TOP_LEVEL_PRESERVE_RAW_TYPES
+            ):
+                if existing["category"] == "table":
+                    return "table_container_child"
+                if existing["category"] in {"header", "footer"} or existing["raw_type"] in {"header", "footer"}:
+                    return "page_strip_container_child"
+                return "semantic_container_child"
+            if self._is_generic_parent_item(existing):
+                return None
+
+        if self._is_containment_pair(candidate, existing):
+            if self._is_generic_parent_item(candidate):
+                return "generic_parent_suppressed"
+
         same_category = candidate["category"] == existing["category"]
         same_caption_family = (
             candidate["category"] in self._CAPTION_FAMILY
@@ -499,6 +715,11 @@ class PaddleAdapter(BaseAdapter):
             # 典型场景：低分 title 检测出 "瓦的北红海省博物馆。"，但高分 text
             # 已包含完整段落 "瓦的北红海省博物馆。博物馆二层陈列着..."
             if candidate["text"] and existing["text"]:
+                if (
+                    existing["category"] in {"figure", "table"}
+                    and candidate["category"] in self._TEXTLIKE_DEDUP_CATEGORIES
+                ):
+                    return None
                 short_text, long_text = sorted(
                     (candidate["text"], existing["text"]), key=len,
                 )
@@ -867,7 +1088,7 @@ class PaddleAdapter(BaseAdapter):
                 block["html"] = res["html"]
 
         # -- 公式：提取 LaTeX ----------------------------------------
-        elif type_name == "equation":
+        elif category == "formula":
             if isinstance(res, dict) and "latex" in res:
                 block["latex"] = res["latex"]
 

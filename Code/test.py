@@ -372,6 +372,40 @@ def summarize_raw_result(result: list) -> dict:
     return {"regions": regions}
 
 
+def _converted_blocks_to_debug_regions(page_document: dict) -> list[dict]:
+    pages = page_document.get("pages") if isinstance(page_document, dict) else None
+    if not pages:
+        return []
+    page = pages[0] or {}
+    regions: list[dict] = []
+    for block in page.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        region: dict = {
+            "type": block.get("category", block.get("type", "?")),
+            "bbox": block.get("bbox", [0, 0, 0, 0]),
+            "score": float(block.get("confidence", block.get("score", 0.0)) or 0.0),
+            "res": [],
+        }
+        if block.get("text_lines"):
+            converted_lines = []
+            for line in block.get("text_lines") or []:
+                if not isinstance(line, dict):
+                    continue
+                converted_lines.append(
+                    {
+                        "text": line.get("text", ""),
+                        "confidence": line.get("confidence", 1.0),
+                        "text_region": line.get("poly"),
+                    }
+                )
+            region["res"] = converted_lines
+        elif block.get("text"):
+            region["res"] = [{"text": block.get("text", "")}]
+        regions.append(region)
+    return regions
+
+
 def _line_texts(region: dict) -> list[str]:
     texts: list[str] = []
     for item in region.get("res") or []:
@@ -646,7 +680,13 @@ def save_debug_images(
     sample_layout.debug_dir.mkdir(parents=True, exist_ok=True)
     layout_path = sample_layout.debug_image_path(page_index, "layout_ocr")
     order_columns_path = sample_layout.debug_image_path(page_index, "reading_order_columns")
-    vis_layout = draw_layout_ocr(image, result, font_path=None, show_text_preview=True)
+    clean_regions = _converted_blocks_to_debug_regions(page_document)
+    vis_layout = draw_layout_ocr(
+        image,
+        clean_regions or result,
+        font_path=None,
+        show_text_preview=True,
+    )
     cv2.imwrite(str(layout_path), vis_layout)
 
     actual_document = pipeline.build_document(deepcopy(page_document))

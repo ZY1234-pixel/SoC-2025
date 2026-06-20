@@ -211,6 +211,106 @@ def test_low_score_merged_text_does_not_suppress_higher_score_split_text_blocks(
     assert any(entry["removed_index"] == 2 for entry in report)
 
 
+def test_pp_doclayout_v3_content_parent_is_suppressed_by_specific_children() -> None:
+    adapter = PaddleAdapter()
+    results = [
+        {
+            "type": "content",
+            "bbox": [90, 90, 510, 330],
+            "score": 0.96,
+            "res": [{"text": "paragraph formula paragraph"}],
+        },
+        {
+            "type": "text",
+            "bbox": [100, 105, 500, 170],
+            "score": 0.82,
+            "res": [{"text": "paragraph"}],
+        },
+        {
+            "type": "display_formula",
+            "bbox": [120, 190, 360, 235],
+            "score": 0.79,
+            "res": [],
+        },
+        {
+            "type": "paragraph_title",
+            "bbox": [100, 255, 470, 290],
+            "score": 0.88,
+            "res": [{"text": "4 Numerical Solution"}],
+        },
+    ]
+
+    filtered, report = adapter._suppress_nested_duplicates(results)
+
+    assert [item["type"] for item in filtered] == ["text", "display_formula", "paragraph_title"]
+    assert any(
+        entry["reason"] == "generic_parent_suppressed"
+        and entry["removed_index"] == 0
+        for entry in report
+    )
+
+
+def test_pp_doclayout_v3_table_keeps_parent_and_nests_internal_children() -> None:
+    adapter = PaddleAdapter()
+    image = np.zeros((500, 700, 3), dtype=np.uint8)
+    results = [
+        {
+            "type": "table",
+            "bbox": [80, 120, 620, 430],
+            "score": 0.91,
+            "res": {"html": "<table><tr><td>x</td></tr></table>"},
+        },
+        {
+            "type": "display_formula",
+            "bbox": [100, 160, 210, 190],
+            "score": 0.83,
+            "res": [],
+        },
+        {
+            "type": "text",
+            "bbox": [260, 160, 560, 190],
+            "score": 0.85,
+            "res": [{"text": "internal table text"}],
+        },
+    ]
+
+    converted = adapter.convert(results, image)
+    blocks = converted["pages"][0]["blocks"]
+
+    assert [block["category"] for block in blocks] == ["table"]
+    attrs = blocks[0]["attributes"]
+    assert attrs["nested_child_count"] == 2
+    assert {child["type"] for child in attrs["nested_children"]} == {"display_formula", "text"}
+    cleanup = converted["pages"][0]["attributes"]
+    assert cleanup["cleanup_rule_counts"]["table_container_child"] == 2
+
+
+def test_pp_doclayout_v3_header_absorbs_page_number_child() -> None:
+    adapter = PaddleAdapter()
+    image = np.zeros((260, 400, 3), dtype=np.uint8)
+    results = [
+        {
+            "type": "header",
+            "bbox": [280, 20, 370, 70],
+            "score": 0.87,
+            "res": [{"text": "Full Paper"}],
+        },
+        {
+            "type": "number",
+            "bbox": [320, 28, 350, 52],
+            "score": 0.81,
+            "res": [{"text": "1181"}],
+        },
+    ]
+
+    converted = adapter.convert(results, image)
+    blocks = converted["pages"][0]["blocks"]
+
+    assert [block["category"] for block in blocks] == ["header"]
+    assert blocks[0]["attributes"]["nested_children"][0]["type"] == "number"
+    assert converted["pages"][0]["attributes"]["cleanup_rule_counts"]["page_strip_container_child"] == 1
+
+
 def test_low_score_formula_duplicate_does_not_suppress_section_title() -> None:
     adapter = PaddleAdapter()
     results = [

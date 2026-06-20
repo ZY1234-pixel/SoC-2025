@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT / "Code"))
 import numpy as np
 
 from docflow.adapters.paddle_adapter import PaddleAdapter
-from test import summarize_raw_result
+from test import _converted_blocks_to_debug_regions, summarize_raw_result
 
 
 def test_caption_family_dedup_keeps_longer_caption():
@@ -104,3 +104,43 @@ def test_raw_result_summary_does_not_serialize_image_arrays():
     assert payload["regions"][0]["img_shape"] == [8, 9, 3]
     assert "img" not in payload["regions"][0]
     assert len(encoded) < 1000
+
+
+def test_converted_blocks_to_debug_regions_uses_clean_top_level_blocks():
+    page_document = {
+        "pages": [
+            {
+                "blocks": [
+                    {
+                        "category": "text",
+                        "bbox": [1, 2, 30, 40],
+                        "confidence": 0.9,
+                        "text_lines": [
+                            {
+                                "text": "clean text",
+                                "confidence": 0.88,
+                                "poly": [[1, 2], [30, 2], [30, 12], [1, 12]],
+                            }
+                        ],
+                    }
+                ]
+            }
+        ]
+    }
+
+    regions = _converted_blocks_to_debug_regions(page_document)
+
+    assert regions == [
+        {
+            "type": "text",
+            "bbox": [1, 2, 30, 40],
+            "score": 0.9,
+            "res": [
+                {
+                    "text": "clean text",
+                    "confidence": 0.88,
+                    "text_region": [[1, 2], [30, 2], [30, 12], [1, 12]],
+                }
+            ],
+        }
+    ]
