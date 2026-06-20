@@ -403,12 +403,12 @@ class RecoveryPipeline:
 
     @staticmethod
     def _apply_model_order_metadata(blocks: List[Block]) -> List[Block]:
-        def _model_order(block: Block, fallback: int) -> tuple[int, int]:
+        def _model_order(block: Block, fallback: int) -> tuple[float, int]:
             attrs = getattr(block, "attributes", None) or {}
             try:
-                return int(attrs.get("model_order")), fallback
+                return float(attrs.get("model_order")), fallback
             except (TypeError, ValueError):
-                return fallback, fallback
+                return float(fallback), fallback
 
         ordered_blocks = [
             block for _, block in sorted(

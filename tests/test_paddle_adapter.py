@@ -123,6 +123,31 @@ def test_pp_doclayout_v3_model_order_and_raw_labels_are_preserved() -> None:
     assert blocks[0]["attributes"]["layout_model"] == "pp-doclayout-v3"
 
 
+def test_model_order_defaults_to_upstream_list_index() -> None:
+    adapter = PaddleAdapter()
+    image = np.zeros((200, 200, 3), dtype=np.uint8)
+    results = [
+        {
+            "type": "text",
+            "bbox": [20, 120, 180, 160],
+            "score": 0.9,
+            "res": [{"text": "first upstream item"}],
+        },
+        {
+            "type": "title",
+            "bbox": [20, 20, 180, 60],
+            "score": 0.9,
+            "res": [{"text": "second upstream item"}],
+        },
+    ]
+
+    converted = adapter.convert(results, image)
+    blocks = converted["pages"][0]["blocks"]
+
+    assert [block["text"] for block in blocks] == ["first upstream item", "second upstream item"]
+    assert [block["attributes"]["model_order"] for block in blocks] == [0, 1]
+
+
 def test_sentence_like_title_duplicate_does_not_suppress_adjacent_text() -> None:
     adapter = PaddleAdapter()
     results = [

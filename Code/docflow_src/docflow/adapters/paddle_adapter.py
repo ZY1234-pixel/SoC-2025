@@ -191,6 +191,7 @@ class PaddleAdapter(BaseAdapter):
         """
         h, w = image.shape[:2]
         blocks: List[Dict[str, Any]] = []
+        results = self._attach_model_order(results)
         results = self._recall_missing_figures_from_captions(results, image)
         filtered_results, cleanup_report = self._suppress_nested_duplicates(results)
         filtered_results, footer_noise_report = self._drop_footer_table_noise(filtered_results, w, h)
@@ -234,6 +235,19 @@ class PaddleAdapter(BaseAdapter):
         }
 
     @staticmethod
+    def _attach_model_order(results: list) -> list:
+        """Persist the upstream layout model list order before cleanup passes."""
+        ordered: list = []
+        for index, region in enumerate(results or []):
+            if not isinstance(region, dict):
+                ordered.append(region)
+                continue
+            cloned = dict(region)
+            cloned.setdefault("model_order", index)
+            ordered.append(cloned)
+        return ordered
+
+    @staticmethod
     def _ensure_model_order(results: list) -> list:
         """Keep PP-DocLayoutV3 reading order stable after cleanup passes."""
         ordered = list(results or [])
@@ -241,13 +255,19 @@ class PaddleAdapter(BaseAdapter):
             return ordered
         order_values = []
         for index, region in enumerate(ordered):
-            value = region.get("model_order") if isinstance(region, dict) else None
             try:
-                order_values.append((int(value), index, region))
+                order_values.append((PaddleAdapter._region_model_order(region, index), index, region))
             except (TypeError, ValueError):
                 return ordered
         order_values.sort(key=lambda item: (item[0], item[1]))
         return [item[2] for item in order_values]
+
+    @staticmethod
+    def _region_model_order(region: dict, fallback: float) -> float:
+        try:
+            return float(region.get("model_order"))
+        except (AttributeError, TypeError, ValueError):
+            return float(fallback)
 
     def _suppress_nested_duplicates(self, results: list) -> tuple[list, list[dict]]:
         """抑制大框包小框的重复区域。
@@ -385,6 +405,7 @@ class PaddleAdapter(BaseAdapter):
                 "score": 0.42,
                 "res": [],
                 "img": image[y1:y2, x1:x2].copy(),
+                "model_order": cls._region_model_order(region, 0.0) + 0.25,
             }
             recalled.append(recalled_region)
             existing_figures.append(recalled_region["bbox"])
