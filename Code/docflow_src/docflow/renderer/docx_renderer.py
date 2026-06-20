@@ -353,6 +353,9 @@ class DocxRenderer(BaseRenderer):
             if zone.rendering_strategy == "strip_row" or len(zone.blocks) < 4:
                 output.append(zone)
                 continue
+            if zone.col_count > 1 and not zone.has_spanned:
+                output.append(zone)
+                continue
             visual_bands = self._embedded_visual_bands(zone, page)
             if not visual_bands:
                 output.append(zone)
@@ -919,12 +922,6 @@ class DocxRenderer(BaseRenderer):
         if zone.col_count <= 1:
             return False
         if any(len(getattr(b, "spanned_cols", [])) > 1 for b in zone.blocks):
-            return False
-        visual_blocks = [
-            block for block in zone.blocks
-            if block.block_type in {BlockType.FIGURE, BlockType.TABLE, BlockType.FORMULA, BlockType.EQUATION}
-        ]
-        if visual_blocks:
             return False
         if self._has_irregular_column_widths(col_px or {}, page_width_px, zone.col_count):
             return False
@@ -2350,7 +2347,8 @@ class DocxRenderer(BaseRenderer):
                 self._render_block(doc, block, ctx, space_before=sp)
                 prev_y = block.bbox.y2
 
-            # 显式列断，避免后续列内容继续填充上一列剩余空间
+            # 显式列断，避免后续列内容继续填充上一列剩余空间。这里仍是
+            # Word 原生分栏，图片在所在栏内直接内联插入，没有使用布局表格。
             if ci < num_cols - 1:
                 p = doc.add_paragraph()
                 reset_paragraph_format(p)

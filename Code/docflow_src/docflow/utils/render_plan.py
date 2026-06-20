@@ -48,7 +48,12 @@ def build_render_plan(document, output_format: str = "docx") -> dict:
 
         for zi, zone in enumerate(page.zones):
             raw_strategy = zone.rendering_strategy
-            effective_strategy = "single_col" if page_render_mode == "reflow" else raw_strategy
+            if page_render_mode == "reflow":
+                effective_strategy = "single_col"
+            elif page_render_mode == "native_columns" and zone.col_count > 1 and not zone.has_spanned:
+                effective_strategy = "native_columns"
+            else:
+                effective_strategy = raw_strategy
             strategy_counts[effective_strategy] += 1
             if getattr(zone, "flow_id", ""):
                 page_flow_ids.add(zone.flow_id)
