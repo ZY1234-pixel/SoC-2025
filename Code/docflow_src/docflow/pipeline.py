@@ -1837,6 +1837,63 @@ class RecoveryPipeline:
         def _preserve_order(items: List[Block]) -> None:
             items.sort(key=lambda b: order_index.get(id(b), 10**9))
 
+        def _nearest_zone_col(block: Block, target: Zone) -> int:
+            col_count = max(int(target.col_count or 1), 1)
+            if image_width <= 0 or col_count <= 1:
+                return 0
+            fallback_w = float(image_width) / float(col_count)
+            centers: List[float] = []
+            for ci in range(col_count):
+                members = [
+                    b for b in target.blocks
+                    if int(getattr(b, "col_index", 0) or 0) == ci
+                    and len(getattr(b, "spanned_cols", []) or []) <= 1
+                ]
+                if members:
+                    centers.append(sum((float(b.bbox.x1) + float(b.bbox.x2)) * 0.5 for b in members) / len(members))
+                else:
+                    centers.append((ci + 0.5) * fallback_w)
+            cx = (float(block.bbox.x1) + float(block.bbox.x2)) * 0.5
+            return min(range(col_count), key=lambda ci: abs(cx - centers[ci]))
+
+        def _continuation_column_for_zone(zone: Zone, target: Zone) -> Optional[int]:
+            if image_width <= 0 or target.col_count <= 1 or not zone.blocks:
+                return None
+            col_count = max(int(target.col_count or 1), 1)
+            col_w = float(image_width) / float(col_count)
+            assigned_cols: List[int] = []
+            for b in zone.blocks:
+                if (
+                    b.block_type not in _MULTICOL_TAIL_ABSORB_TYPES
+                    or b.block_type in _ZONE_STRIP_TYPES
+                    or bool(getattr(b, "attributes", {}) and b.attributes.get("is_byline_row"))
+                    or float(b.bbox.width) > col_w * 0.95
+                ):
+                    return None
+                assigned_cols.append(_nearest_zone_col(b, target))
+            if not assigned_cols or len(set(assigned_cols)) != 1:
+                return None
+
+            col = assigned_cols[0]
+            prior_col_blocks = [
+                b for b in target.blocks
+                if int(getattr(b, "col_index", 0) or 0) == col
+                and len(getattr(b, "spanned_cols", []) or []) <= 1
+            ]
+            if not prior_col_blocks:
+                return None
+
+            first_top = min(float(b.bbox.y1) for b in zone.blocks)
+            target_bottom = max((float(b.bbox.y2) for b in target.blocks), default=0.0)
+            same_col_bottom = max(float(b.bbox.y2) for b in prior_col_blocks)
+            same_col_gap_limit = max(96.0, float(image_height) * 0.025 if image_height > 0 else 0.0)
+            target_gap_limit = max(64.0, float(image_height) * 0.015 if image_height > 0 else 0.0)
+            if first_top - same_col_bottom > same_col_gap_limit:
+                return None
+            if first_top - target_bottom > target_gap_limit:
+                return None
+            return col
+
         zones: List[Zone] = []
         current_blocks: List[Block] = [blocks[0]]
         current_col_count: int = blocks[0].col_count
@@ -1904,6 +1961,20 @@ class RecoveryPipeline:
                 zone = zones[idx]
                 if zone.col_count == 1 and merged and merged[-1].col_count > 1 and zone.flow_id == merged[-1].flow_id:
                     target = merged[-1]
+                    continuation_col = _continuation_column_for_zone(zone, target)
+                    if continuation_col is not None:
+                        for b in zone.blocks:
+                            b.col_count = target.col_count
+                            b.col_index = continuation_col
+                            b.spanned_cols = [continuation_col]
+                        target.blocks.extend(zone.blocks)
+                        target.has_spanned = target.has_spanned or any(
+                            len(getattr(b, "spanned_cols", [])) > 1 for b in zone.blocks
+                        )
+                        _preserve_order(target.blocks)
+                        idx += 1
+                        continue
+
                     movable: List[Block] = []
                     remain: List[Block] = []
                     target_bottom = max((b.bbox.y2 for b in target.blocks), default=0.0)
