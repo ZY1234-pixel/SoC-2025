@@ -444,7 +444,6 @@ class RecoveryPipeline:
             if isinstance(block, TextBlock)
             and block.block_type in {
                 BlockType.TEXT,
-                BlockType.TITLE,
                 BlockType.ABSTRACT,
                 BlockType.REFERENCE,
                 BlockType.FIGURE_CAPTION,
@@ -567,7 +566,6 @@ class RecoveryPipeline:
                 if isinstance(block, TextBlock)
                 and block.block_type in {
                     BlockType.TEXT,
-                    BlockType.TITLE,
                     BlockType.ABSTRACT,
                     BlockType.REFERENCE,
                     BlockType.FOOTNOTE,
@@ -587,6 +585,8 @@ class RecoveryPipeline:
         if len(col_bounds) < 2:
             col_bounds = RecoveryPipeline._fallback_two_column_bounds(column_source, page_width)
             if len(col_bounds) < 2:
+                if band_major:
+                    RecoveryPipeline._collapse_repaired_text_flow_columns(blocks)
                 return
 
         col_centers = [(float(x1) + float(x2)) * 0.5 for x1, x2 in col_bounds]
@@ -604,10 +604,21 @@ class RecoveryPipeline:
 
             width_ratio = float(block.bbox.width) / page_w
             if band_major:
-                if block.block_type in {BlockType.TITLE, BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION}:
+                if block.block_type in {BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION}:
                     block.col_count = 1
                     block.col_index = 0
                     block.spanned_cols = [0]
+                    continue
+                if block.block_type == BlockType.TITLE:
+                    anchored_col = RecoveryPipeline._anchored_title_column(block, blocks, col_centers, page_width)
+                    if anchored_col is None:
+                        block.col_count = 1
+                        block.col_index = 0
+                        block.spanned_cols = [0]
+                        continue
+                    block.col_count = len(col_bounds)
+                    block.col_index = anchored_col
+                    block.spanned_cols = [anchored_col]
                     continue
                 col = _nearest_col(block)
                 block.col_count = len(col_bounds)
@@ -626,6 +637,57 @@ class RecoveryPipeline:
             block.col_count = len(col_bounds)
             block.col_index = col
             block.spanned_cols = [col]
+
+    @staticmethod
+    def _collapse_repaired_text_flow_columns(blocks: List[Block]) -> None:
+        for block in blocks:
+            if block.block_type in {BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER}:
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+                continue
+            if isinstance(block, TextBlock):
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+                continue
+            if block.block_type not in {BlockType.FIGURE, BlockType.TABLE, BlockType.FORMULA, BlockType.EQUATION}:
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+
+    @staticmethod
+    def _anchored_title_column(
+        title: Block,
+        blocks: List[Block],
+        col_centers: List[float],
+        page_width: int,
+    ) -> Optional[int]:
+        if not isinstance(title, TextBlock) or not col_centers or page_width <= 0:
+            return None
+        page_w = max(float(page_width), 1.0)
+        if float(title.bbox.width) > page_w * 0.22:
+            return None
+        title_center = (float(title.bbox.x1) + float(title.bbox.x2)) * 0.5
+        body_candidates = [
+            block for block in blocks
+            if isinstance(block, TextBlock)
+            and block is not title
+            and block.block_type in {BlockType.TEXT, BlockType.ABSTRACT, BlockType.REFERENCE}
+            and float(block.bbox.y1) >= float(title.bbox.y2) - max(8.0, float(title.bbox.height) * 0.5)
+            and float(block.bbox.y1) <= float(title.bbox.y2) + max(160.0, float(title.bbox.height) * 5.0)
+        ]
+        if not body_candidates:
+            return None
+        nearest_body = min(
+            body_candidates,
+            key=lambda block: (
+                max(0.0, float(block.bbox.y1) - float(title.bbox.y2)),
+                abs(((float(block.bbox.x1) + float(block.bbox.x2)) * 0.5) - title_center),
+            ),
+        )
+        body_center = (float(nearest_body.bbox.x1) + float(nearest_body.bbox.x2)) * 0.5
+        return min(range(len(col_centers)), key=lambda idx: abs(body_center - col_centers[idx]))
 
     @staticmethod
     def _fallback_two_column_bounds(blocks: List[Block], page_width: int) -> List[tuple[float, float]]:

@@ -494,3 +494,31 @@ def test_multicolumn_latin_body_escapes_font_floor():
     )
 
     assert resolved == 9.3
+
+
+def test_single_page_fit_search_retries_with_lower_font_floor(monkeypatch):
+    renderer = DocxRenderer()
+    seen: list[tuple[float, float]] = []
+
+    def fake_build(document, **_options):
+        seen.append((renderer._fit_scale, renderer._font_floor))
+        return object()
+
+    def fake_overflow(_doc, _expected_pages):
+        return renderer._font_floor > 7.0 or renderer._fit_scale > 0.82
+
+    monkeypatch.setattr(renderer, "_build_docx", fake_build)
+    monkeypatch.setattr(renderer, "_check_overflow", fake_overflow)
+
+    doc = renderer._render_largest_fitting_scale(
+        Document(pages=[], metadata={}),
+        expected_pages=1,
+        build_options={},
+        min_scale=0.70,
+        font_floors=(8.5, 7.0),
+    )
+
+    assert doc is not None
+    assert any(floor == 8.5 for _scale, floor in seen)
+    assert any(floor == 7.0 for _scale, floor in seen)
+    assert renderer._font_floor == 7.0

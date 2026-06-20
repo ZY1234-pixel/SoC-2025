@@ -72,6 +72,16 @@ def _formula_block(block_id: str, bbox: list[float]) -> dict:
     }
 
 
+def _model_order_figure_block(block_id: str, bbox: list[float], model_order: int) -> dict:
+    block = _figure_block(block_id, bbox)
+    block["attributes"] = {
+        "layout_model": "pp-doclayout-v3",
+        "model_order": model_order,
+        "raw_layout_label": "figure",
+    }
+    return block
+
+
 def test_pipeline_reclassifies_cjk_figure_caption_and_page_number():
     page = {
         "version": "2.0",
@@ -170,6 +180,41 @@ def test_pipeline_repairs_anomalous_model_order_for_two_column_magazine():
     ]
     assert doc.pages[0].attributes["rule_stats"]["model_order_geometric_repair"] == 1
     assert all((block.attributes or {}).get("reading_order_strategy") == "model_order_geometric_repair" for block in blocks)
+
+
+def test_repaired_model_order_short_titles_anchor_to_following_text_column():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1000,
+                "height": 1500,
+                "blocks": [
+                    _model_order_figure_block("right_image_placeholder", [650, 260, 900, 520], 0),
+                    _model_order_text_block("left_body", [120, 300, 480, 430], "left body paragraph\nleft body more", 1),
+                    _model_order_text_block("short_title", [485, 230, 570, 260], "Section", 2, category="title"),
+                    _model_order_text_block("left_tail", [120, 455, 480, 560], "left tail paragraph", 3),
+                    _model_order_text_block("right_body", [620, 620, 900, 760], "right body paragraph", 4),
+                    _model_order_text_block("top_heading", [120, 80, 260, 120], "Top", 5, category="title"),
+                ],
+            }
+        ],
+    }
+
+    pipeline = RecoveryPipeline(
+        config=RecoveryConfig(
+            reading_order_strategy="model_order",
+            font_classification_enabled=False,
+        )
+    )
+    doc = pipeline.build_document(page)
+    blocks = {blk.block_id: blk for zone in doc.pages[0].zones for blk in zone.blocks}
+
+    assert doc.pages[0].attributes["rule_stats"]["model_order_geometric_repair"] == 1
+    assert blocks["short_title"].col_count == 2
+    assert blocks["short_title"].col_index == blocks["left_body"].col_index
 
 
 def test_pipeline_suppresses_visual_boxes_that_duplicate_text_regions():

@@ -351,44 +351,49 @@ class DocxRenderer(BaseRenderer):
             if zone.rendering_strategy == "strip_row" or len(zone.blocks) < 4:
                 output.append(zone)
                 continue
-            visual = self._embedded_visual_anchor(zone, page)
-            if visual is None:
+            visual_bands = self._embedded_visual_bands(zone, page)
+            if not visual_bands:
                 output.append(zone)
                 continue
 
-            band_blocks = self._embedded_visual_band_blocks(zone, visual, page)
-            if len(band_blocks) < 3:
-                output.append(zone)
-                continue
-
-            band_ids = {id(block) for block in band_blocks}
-            before = [block for block in zone.blocks if id(block) not in band_ids and float(block.bbox.y2) <= float(visual.bbox.y1)]
-            after = [block for block in zone.blocks if id(block) not in band_ids and block not in before]
-            if before:
+            consumed: set[int] = set()
+            cursor: List[Block] = []
+            band_by_first_id = {id(band[0]): band for band in visual_bands}
+            for block in zone.blocks:
+                if id(block) in consumed:
+                    continue
+                band = band_by_first_id.get(id(block))
+                if band is None:
+                    cursor.append(block)
+                    continue
+                if cursor:
+                    output.append(Zone(
+                        col_count=zone.col_count,
+                        blocks=cursor,
+                        has_spanned=any(len(getattr(b, "spanned_cols", []) or []) > 1 for b in cursor),
+                        flow_id=zone.flow_id,
+                        flow_kind=zone.flow_kind,
+                        region_id=zone.region_id,
+                        region_kind=zone.region_kind,
+                    ))
+                    cursor = []
+                for band_block in band:
+                    consumed.add(id(band_block))
+                self._assign_render_band_columns(band, page)
                 output.append(Zone(
-                    col_count=zone.col_count,
-                    blocks=before,
-                    has_spanned=any(len(getattr(b, "spanned_cols", []) or []) > 1 for b in before),
+                    col_count=2,
+                    blocks=band,
+                    has_spanned=False,
                     flow_id=zone.flow_id,
                     flow_kind=zone.flow_kind,
                     region_id=zone.region_id,
                     region_kind=zone.region_kind,
                 ))
-            self._assign_render_band_columns(band_blocks, page)
-            output.append(Zone(
-                col_count=2,
-                blocks=band_blocks,
-                has_spanned=False,
-                flow_id=zone.flow_id,
-                flow_kind=zone.flow_kind,
-                region_id=zone.region_id,
-                region_kind=zone.region_kind,
-            ))
-            if after:
+            if cursor:
                 output.append(Zone(
                     col_count=zone.col_count,
-                    blocks=after,
-                    has_spanned=any(len(getattr(b, "spanned_cols", []) or []) > 1 for b in after),
+                    blocks=cursor,
+                    has_spanned=any(len(getattr(b, "spanned_cols", []) or []) > 1 for b in cursor),
                     flow_id=zone.flow_id,
                     flow_kind=zone.flow_kind,
                     region_id=zone.region_id,
@@ -397,18 +402,33 @@ class DocxRenderer(BaseRenderer):
         return output
 
     @staticmethod
-    def _embedded_visual_anchor(zone: Zone, page: "Page") -> Optional[Block]:
+    def _embedded_visual_anchors(zone: Zone, page: "Page") -> List[Block]:
         page_w = max(float(getattr(page, "image_width", 0) or 0), 1.0)
         page_h = max(float(getattr(page, "image_height", 0) or 0), 1.0)
-        candidates = [
+        return [
             block for block in zone.blocks
             if block.block_type in {BlockType.FIGURE, BlockType.TABLE}
             and float(block.bbox.width) <= page_w * 0.46
             and float(block.bbox.height) >= max(page_h * 0.10, 120.0)
         ]
-        if len(candidates) != 1:
-            return None
-        return candidates[0]
+
+    def _embedded_visual_bands(self, zone: Zone, page: "Page") -> List[List[Block]]:
+        bands: List[List[Block]] = []
+        used: set[int] = set()
+        order = {id(block): idx for idx, block in enumerate(zone.blocks)}
+        for visual in self._embedded_visual_anchors(zone, page):
+            if id(visual) in used:
+                continue
+            band = self._embedded_visual_band_blocks(zone, visual, page)
+            if len(band) < 3:
+                continue
+            if any(id(block) in used for block in band):
+                continue
+            for block in band:
+                used.add(id(block))
+            bands.append(band)
+        bands.sort(key=lambda band: min(order.get(id(block), 10**9) for block in band))
+        return bands
 
     @staticmethod
     def _embedded_visual_band_blocks(zone: Zone, visual: Block, page: "Page") -> List[Block]:
@@ -435,7 +455,11 @@ class DocxRenderer(BaseRenderer):
                 float(block.bbox.x2) <= float(visual.bbox.x1) - page_w * 0.02
                 or float(block.bbox.x1) >= float(visual.bbox.x2) + page_w * 0.02
             )
-            if side_by_side and close_vertical and (overlap >= 18.0 or block.block_type == BlockType.TITLE):
+            near_vertical = (
+                abs(float(block.bbox.y2) - float(visual.bbox.y1)) <= page_h * 0.04
+                or abs(float(block.bbox.y1) - float(visual.bbox.y2)) <= page_h * 0.04
+            )
+            if side_by_side and close_vertical and (overlap >= 18.0 or near_vertical or block.block_type == BlockType.TITLE):
                 side_text.append(block)
                 continue
             caption_like = (
@@ -787,16 +811,7 @@ class DocxRenderer(BaseRenderer):
             if block.block_type in {BlockType.FIGURE, BlockType.TABLE, BlockType.FORMULA, BlockType.EQUATION}
         ]
         if visual_blocks:
-            repaired_model_order = any(
-                (getattr(block, "attributes", None) or {}).get("reading_order_strategy") == "model_order_geometric_repair"
-                for block in zone.blocks
-            )
-            if (
-                zone.col_count != 2
-                or not repaired_model_order
-                or any(block.block_type != BlockType.FIGURE for block in visual_blocks)
-            ):
-                return False
+            return False
         if self._has_irregular_column_widths(col_px or {}, page_width_px, zone.col_count):
             return False
         return True
@@ -948,7 +963,8 @@ class DocxRenderer(BaseRenderer):
             document,
             expected_pages,
             build_options,
-            min_scale=max(self._PAGE_FIT_MIN_SCALE, min(scale, 0.99)),
+            min_scale=self._PAGE_FIT_MIN_SCALE,
+            font_floors=(8.5, 7.0, 6.5),
         )
         if searched_doc is not None:
             self._fit_scale = 1.0
@@ -992,8 +1008,9 @@ class DocxRenderer(BaseRenderer):
         build_options: dict,
         *,
         min_scale: float,
+        font_floors: tuple[float, ...] = (8.5,),
     ) -> Optional[DocxDocument]:
-        """Find the largest scale that LibreOffice confirms fits in-page."""
+        """Find the largest readable scale that LibreOffice confirms fits in-page."""
         scales = sorted(
             {
                 scale for scale in self._PAGE_FIT_SCALES
@@ -1003,30 +1020,33 @@ class DocxRenderer(BaseRenderer):
         if not scales:
             return None
 
-        best_doc: Optional[DocxDocument] = None
-        best_scale: Optional[float] = None
-        lo = 0
-        hi = len(scales) - 1
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            candidate_scale = scales[mid]
-            self._fit_scale = candidate_scale
-            self._font_floor = 8.5
-            doc = self._build_docx(document, **build_options)
-            if self._check_overflow(doc, expected_pages):
-                hi = mid - 1
-                continue
-            best_doc = doc
-            best_scale = candidate_scale
-            lo = mid + 1
+        for floor in font_floors:
+            best_doc: Optional[DocxDocument] = None
+            best_scale: Optional[float] = None
+            lo = 0
+            hi = len(scales) - 1
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                candidate_scale = scales[mid]
+                self._fit_scale = candidate_scale
+                self._font_floor = floor
+                doc = self._build_docx(document, **build_options)
+                if self._check_overflow(doc, expected_pages):
+                    hi = mid - 1
+                    continue
+                best_doc = doc
+                best_scale = candidate_scale
+                lo = mid + 1
 
-        if best_doc is not None:
-            logger.info(
-                "single-page actual fit selected scale=%.3f expected_pages=%d",
-                best_scale or 1.0,
-                expected_pages,
-            )
-        return best_doc
+            if best_doc is not None:
+                logger.info(
+                    "single-page actual fit selected scale=%.3f font_floor=%.1f expected_pages=%d",
+                    best_scale or 1.0,
+                    floor,
+                    expected_pages,
+                )
+                return best_doc
+        return None
 
     @classmethod
     def _check_overflow(cls, doc: DocxDocument, expected_pages: int) -> bool:
