@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
-from dataclasses import replace
 from difflib import SequenceMatcher
 import json
 import os
@@ -595,8 +594,6 @@ def save_debug_images(
 ) -> None:
     from docflow.utils.visualization import (
         draw_layout_ocr,
-        draw_reading_order_comparison,
-        draw_reading_order_map,
         draw_sorted_layout,
         extract_sorted_blocks,
     )
@@ -648,49 +645,16 @@ def save_debug_images(
 
     sample_layout.debug_dir.mkdir(parents=True, exist_ok=True)
     layout_path = sample_layout.debug_image_path(page_index, "layout_ocr")
-    sorted_path = sample_layout.debug_image_path(page_index, "sorted_layout")
-    legacy_order_path = sample_layout.debug_image_path(page_index, "reading_order_legacy")
-    xycutpp_order_path = sample_layout.debug_image_path(page_index, "reading_order_xycutpp")
-    compare_path = sample_layout.debug_image_path(page_index, "reading_order_compare")
+    order_columns_path = sample_layout.debug_image_path(page_index, "reading_order_columns")
     vis_layout = draw_layout_ocr(image, result, font_path=None, show_text_preview=True)
     cv2.imwrite(str(layout_path), vis_layout)
 
-    legacy_pipeline = RecoveryPipeline(
-        config=replace(pipeline.config, reading_order_strategy="legacy")
-    )
-    xycutpp_pipeline = RecoveryPipeline(
-        config=replace(pipeline.config, reading_order_strategy="xycutpp_hybrid")
-    )
     actual_document = pipeline.build_document(deepcopy(page_document))
-    legacy_document = legacy_pipeline.build_document(deepcopy(page_document))
-    xycutpp_document = xycutpp_pipeline.build_document(deepcopy(page_document))
     source_page = (page_document.get("pages") or [{}])[0]
 
-    sorted_blocks = extract_sorted_blocks(actual_document, page_index=0)
-    legacy_blocks = _remap_to_source_bboxes(extract_sorted_blocks(legacy_document, page_index=0), source_page)
-    xycutpp_blocks = _remap_to_source_bboxes(extract_sorted_blocks(xycutpp_document, page_index=0), source_page)
-
-    vis_sorted = draw_sorted_layout(image, sorted_blocks)
-    legacy_map = draw_reading_order_map(
-        image,
-        legacy_blocks,
-        title="Legacy Reading Order",
-    )
-    xycutpp_map = draw_reading_order_map(
-        image,
-        xycutpp_blocks,
-        title="XY-Cut++ Hybrid Reading Order",
-    )
-    compare_map = draw_reading_order_comparison(
-        image,
-        legacy_blocks,
-        xycutpp_blocks,
-    )
-
-    cv2.imwrite(str(sorted_path), vis_sorted)
-    cv2.imwrite(str(legacy_order_path), legacy_map)
-    cv2.imwrite(str(xycutpp_order_path), xycutpp_map)
-    cv2.imwrite(str(compare_path), compare_map)
+    ordered_blocks = _remap_to_source_bboxes(extract_sorted_blocks(actual_document, page_index=0), source_page)
+    vis_order_columns = draw_sorted_layout(image, ordered_blocks)
+    cv2.imwrite(str(order_columns_path), vis_order_columns)
 
 
 def _sample_cleanup_removed_count(merged_document: dict) -> int:
