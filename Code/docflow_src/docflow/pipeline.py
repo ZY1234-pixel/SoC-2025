@@ -67,6 +67,7 @@ _ACADEMIC_FOOTER_NOTE_RE = re.compile(
     r"\b(?:correspondence\s+to|received\s+\d{1,2}\s+\w+\s+\d{4}|accepted\s+\d{1,2}\s+\w+\s+\d{4})\b",
     re.IGNORECASE,
 )
+_FORMULA_NUMBER_TEXT_RE = re.compile(r"^\s*\(?\s*\d{1,3}[a-zA-Z]?\s*\)?\s*$")
 
 
 def _infer_title_heading_level(text: str) -> Optional[int]:
@@ -273,6 +274,11 @@ class RecoveryPipeline:
                 blocks,
                 page_width=page.image_width,
             )
+            model_order_repaired, blocks = self._repair_anomalous_model_order(
+                blocks,
+                page_width=page.image_width,
+                page_height=page.image_height,
+            )
         elif self._needs_layout_analysis(raw_blocks) and len(blocks) > 1:
             blocks = sort_layout(
                 blocks,
@@ -319,15 +325,14 @@ class RecoveryPipeline:
             page_width=page.image_width,
             page_height=page.image_height,
         )
+        formula_number_merges, blocks = self._merge_formula_numbers_into_equations(
+            blocks,
+            page_width=page.image_width,
+            page_height=page.image_height,
+        )
 
         blocks = self._merge_short_continuation_fragments(blocks)
         blocks = self._trim_repeated_prefix_within_flows(blocks)
-        if used_model_order and self.config.model_order_geometric_repair_enabled:
-            model_order_repaired, blocks = self._repair_anomalous_model_order(
-                blocks,
-                page_width=page.image_width,
-                page_height=page.image_height,
-            )
 
         # -- 检测文本区块中的段落 ------------------------------
         for block in blocks:
@@ -387,6 +392,7 @@ class RecoveryPipeline:
             "decorative_icon_suppressed": decorative_icon_suppressed,
             "spurious_visual_suppressed": spurious_visual_suppressed,
             "figure_text_dedup_suppressed": figure_text_dedup_suppressed,
+            "formula_number_merges": formula_number_merges,
             "model_order_geometric_repair": model_order_repaired,
             "zone_count": len(page.zones),
             "weak_multicolumn_collapsed": int(weak_multicolumn_evidence),
@@ -499,6 +505,11 @@ class RecoveryPipeline:
         page_width: int,
         page_height: int,
     ) -> tuple[int, List[Block]]:
+        if any(
+            int(getattr(block, "col_count", 1) or 1) > 2
+            for block in blocks
+        ):
+            return 0, blocks
         if not cls._model_order_needs_geometry_repair(blocks, page_width=page_width, page_height=page_height):
             return 0, blocks
 
@@ -920,6 +931,17 @@ class RecoveryPipeline:
                         block.block_type = BlockType.TITLE
                         changes += 1
             elif block.block_type == BlockType.FOOTER:
+                attrs = getattr(block, "attributes", None) or {}
+                raw_label = str(attrs.get("raw_layout_label", "") or "")
+                if (
+                    raw_label == "vision_footnote"
+                    and not near_bottom
+                    and len(text) >= 24
+                    and float(block.bbox.width) >= max(float(page_width) * 0.58, 1.0)
+                ):
+                    block.block_type = BlockType.TEXT
+                    changes += 1
+                    continue
                 footer_like = bool(_FOOTER_LIKE_RE.search(text))
                 title_like = (
                     near_top
@@ -931,6 +953,17 @@ class RecoveryPipeline:
                 )
                 if title_like:
                     block.block_type = BlockType.TITLE
+                    changes += 1
+            elif block.block_type == BlockType.FOOTNOTE:
+                attrs = getattr(block, "attributes", None) or {}
+                raw_label = str(attrs.get("raw_layout_label", "") or "")
+                if (
+                    raw_label == "vision_footnote"
+                    and not near_bottom
+                    and len(text) >= 24
+                    and float(block.bbox.width) >= max(float(page_width) * 0.58, 1.0)
+                ):
+                    block.block_type = BlockType.TEXT
                     changes += 1
             elif block.block_type == BlockType.TEXT:
                 footer_like = bool(_FOOTER_LIKE_RE.search(text))
@@ -1303,6 +1336,102 @@ class RecoveryPipeline:
             return 0, blocks
         kept = [blk for blk in blocks if id(blk) not in drop_ids]
         return len(drop_ids), kept
+
+    @staticmethod
+    def _merge_formula_numbers_into_equations(
+        blocks: List[Block],
+        page_width: int = 0,
+        page_height: int = 0,
+    ) -> tuple[int, List[Block]]:
+        """Attach PP-DocLayoutV3 formula_number boxes to the matching formula.
+
+        Formula numbers are semantic text, but the detector also gives us a crop.
+        If left as an independent EquationBlock, the DOCX renderer treats that
+        crop like a formula image and scales "(17)" into a huge object.  Merging
+        preserves the model's reading-order item while making the renderer emit
+        the number as right-aligned text in the formula paragraph.
+        """
+        if len(blocks) < 2:
+            return 0, blocks
+
+        def _attrs(block: Block) -> dict:
+            return getattr(block, "attributes", None) or {}
+
+        def _formula_number_text(block: Block) -> str:
+            value = str(_attrs(block).get("formula_number_text", "") or "").strip()
+            if value and _FORMULA_NUMBER_TEXT_RE.match(value):
+                return value
+            return ""
+
+        def _is_number_block(block: Block) -> bool:
+            attrs = _attrs(block)
+            raw_label = str(attrs.get("raw_layout_label", "") or "")
+            if raw_label != "formula_number":
+                return False
+            if not isinstance(block, EquationBlock):
+                return False
+            text = _formula_number_text(block)
+            if not text:
+                return False
+            if page_width > 0 and float(block.bbox.width) > max(float(page_width) * 0.12, 120.0):
+                return False
+            if page_height > 0 and float(block.bbox.height) > max(float(page_height) * 0.08, 120.0):
+                return False
+            return True
+
+        def _vertical_score(body: Block, num: Block) -> Optional[float]:
+            overlap = min(float(body.bbox.y2), float(num.bbox.y2)) - max(float(body.bbox.y1), float(num.bbox.y1))
+            body_h = max(float(body.bbox.height), 1.0)
+            num_h = max(float(num.bbox.height), 1.0)
+            center_delta = abs((float(body.bbox.y1) + float(body.bbox.y2)) * 0.5 - (float(num.bbox.y1) + float(num.bbox.y2)) * 0.5)
+            if overlap >= min(body_h, num_h) * 0.18:
+                return center_delta
+            if center_delta <= max(body_h, num_h) * 0.75:
+                return center_delta + max(0.0, -overlap)
+            return None
+
+        drop_ids: set[int] = set()
+        merges = 0
+        formula_blocks = [
+            block for block in blocks
+            if isinstance(block, EquationBlock)
+            and block.block_type in {BlockType.FORMULA, BlockType.EQUATION}
+            and not _is_number_block(block)
+        ]
+        for number_block in blocks:
+            if not _is_number_block(number_block):
+                continue
+            number_text = _formula_number_text(number_block)
+            candidates: List[tuple[float, Block]] = []
+            for formula in formula_blocks:
+                score_y = _vertical_score(formula, number_block)
+                if score_y is None:
+                    continue
+                if float(formula.bbox.x1) >= float(number_block.bbox.x2):
+                    continue
+                horizontal_gap = max(0.0, float(number_block.bbox.x1) - float(formula.bbox.x2))
+                if page_width > 0 and horizontal_gap > max(float(page_width) * 0.28, 240.0):
+                    continue
+                same_col_bonus = 0.0 if int(getattr(formula, "col_index", -1) or 0) == int(getattr(number_block, "col_index", -2) or 0) else 20.0
+                candidates.append((score_y + horizontal_gap * 0.08 + same_col_bonus, formula))
+            if not candidates:
+                continue
+            _, target = min(candidates, key=lambda item: item[0])
+            if target.attributes is None:
+                target.attributes = {}
+            target.attributes["formula_number_text"] = number_text
+            target.attributes["formula_number_bbox"] = [
+                float(number_block.bbox.x1),
+                float(number_block.bbox.y1),
+                float(number_block.bbox.x2),
+                float(number_block.bbox.y2),
+            ]
+            drop_ids.add(id(number_block))
+            merges += 1
+
+        if not drop_ids:
+            return 0, blocks
+        return merges, [block for block in blocks if id(block) not in drop_ids]
 
     @staticmethod
     def _merge_short_continuation_fragments(blocks: List[Block]) -> List[Block]:
@@ -2152,7 +2281,6 @@ class RecoveryPipeline:
             ))
 
         return zones
-
     def _get_renderer(self, format: str) -> BaseRenderer:
         """返回指定 *format* 的缓存渲染器实例。"""
         fmt = format.lower()

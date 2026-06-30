@@ -155,6 +155,7 @@ class PaddleAdapter(BaseAdapter):
         "equation",
         "formula",
     })
+    _FORMULA_NUMBER_RE = re.compile(r"^\s*\(?\s*\d{1,3}[a-zA-Z]?\s*\)?\s*$")
     _TOP_LEVEL_PRESERVE_RAW_TYPES = frozenset({
         "doc_title",
         "paragraph_title",
@@ -1298,6 +1299,10 @@ class PaddleAdapter(BaseAdapter):
         # -- 文本类型：将 OCR 结果转换为 text_lines ------------------
         if type_name in self._TEXT_TYPES:
             text_lines = self._convert_text_lines(res)
+            if category == "formula" and len(text_lines) == 1:
+                only_text = self._normalize_text(text_lines[0].get("text", ""))
+                if self._FORMULA_NUMBER_RE.match(only_text or ""):
+                    block["category"] = "formula_number"
             block["text_lines"] = text_lines
             block["text"] = "\n".join(
                 tl["text"] for tl in text_lines if tl.get("text")
@@ -1310,11 +1315,18 @@ class PaddleAdapter(BaseAdapter):
         elif type_name == "table":
             if isinstance(res, dict) and "html" in res:
                 block["html"] = res["html"]
+            if isinstance(res, dict) and "cells" in res and "html" not in block:
+                block["html"] = self._table_cells_to_html(res)
 
         # -- 公式：提取 LaTeX ----------------------------------------
         elif category == "formula":
             if isinstance(res, dict) and "latex" in res:
                 block["latex"] = res["latex"]
+            elif isinstance(res, list) and res:
+                formula_number = self._extract_formula_number_text(res)
+                if formula_number:
+                    block["latex"] = ""
+                    attributes["formula_number_text"] = formula_number
 
         # -- 将 ROI 图像编码为 base64 PNG ---------------------------------
         roi_img = region.get("img")
@@ -1324,6 +1336,44 @@ class PaddleAdapter(BaseAdapter):
                 block["image_base64"] = encoded
 
         return block
+
+    @classmethod
+    def _extract_formula_number_text(cls, res: Any) -> str:
+        if not isinstance(res, list):
+            return ""
+        for item in res:
+            text = cls._normalize_text(cls._extract_item_text(item))
+            if cls._FORMULA_NUMBER_RE.match(text or ""):
+                return text
+        return ""
+
+    @staticmethod
+    def _table_cells_to_html(res: dict) -> str:
+        cells = res.get("cells")
+        if not isinstance(cells, list) or not cells:
+            return ""
+        rows: dict[int, list[str]] = {}
+        max_col = 0
+        for cell in cells:
+            if not isinstance(cell, dict):
+                continue
+            row_idx = int(cell.get("row", cell.get("row_idx", 0)) or 0)
+            col_idx = int(cell.get("col", cell.get("col_idx", 0)) or 0)
+            text = str(cell.get("text", "") or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            rows.setdefault(row_idx, [])
+            while len(rows[row_idx]) <= col_idx:
+                rows[row_idx].append("")
+            rows[row_idx][col_idx] = f"<td>{text}</td>"
+            max_col = max(max_col, col_idx)
+        if not rows:
+            return ""
+        html_rows = []
+        for row_idx in sorted(rows):
+            cols = rows[row_idx]
+            while len(cols) <= max_col:
+                cols.append("<td></td>")
+            html_rows.append(f"<tr>{''.join(cols)}</tr>")
+        return f"<table>{''.join(html_rows)}</table>"
 
     # ------------------------------------------------------------------
     # 辅助方法

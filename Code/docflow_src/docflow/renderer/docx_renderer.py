@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 from docx import Document as DocxDocument
 from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
+from docx.enum.text import WD_TAB_ALIGNMENT, WD_TAB_LEADER
 from docx.enum.section import WD_SECTION, WD_ORIENT
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ROW_HEIGHT_RULE
 from docx.oxml import OxmlElement
@@ -71,6 +72,7 @@ _NUMBERED_TITLE_RE = re.compile(
 _NUMBERED_TITLE_LEVEL_RE = re.compile(
     r"^\s*(?:(\d+(?:\.\d+)*)(?:[\.、])?|[（(]?([一二三四五六七八九十百]+)[)）\.、])\s*\S"
 )
+_FORMULA_NUMBER_TEXT_RE = re.compile(r"^\s*\(?\s*\d{1,3}[a-zA-Z]?\s*\)?\s*$")
 
 
 class DocxRenderer(BaseRenderer):
@@ -193,8 +195,9 @@ class DocxRenderer(BaseRenderer):
             # RenderPlan 的 native_columns 只是页面级偏好，实际仍由 zone
             # 安全检查决定；复杂图文混排若强制 Word 原生分栏，容易把后续
             # 块流入不可见/错误栏位。
-            # RenderPlan 强制 grid 模式（禁用 native columns，走布局表格）
-            if page_render_mode == "grid":
+            # RenderPlan 的 grid 模式只对跨栏 zone 强制表格；普通多栏正文
+            # 继续使用 Word 原生分栏，和旧版 newspaper/magazine 输出一致。
+            if page_render_mode == "grid" and zone.has_spanned:
                 use_native_cols = False
 
             desired_cols = zone.col_count if use_native_cols else 1
@@ -351,6 +354,9 @@ class DocxRenderer(BaseRenderer):
         output: List[Zone] = []
         for zone in zones:
             if zone.rendering_strategy == "strip_row" or len(zone.blocks) < 4:
+                output.append(zone)
+                continue
+            if zone.col_count >= 3:
                 output.append(zone)
                 continue
             if zone.col_count > 1 and not zone.has_spanned:
@@ -644,8 +650,8 @@ class DocxRenderer(BaseRenderer):
             return False
         visual = visuals[0]
         return (
-            float(visual.bbox.width) <= page_w * 0.56
-            and float(visual.bbox.height) >= max(page_h * 0.10, 120.0)
+            float(visual.bbox.width) <= page_w * 0.50
+            and float(visual.bbox.height) >= max(page_h * 0.14, 160.0)
         )
 
     @staticmethod
@@ -661,6 +667,8 @@ class DocxRenderer(BaseRenderer):
             return False
         page_w = max(float(getattr(page, "image_width", 0) or 0), 1.0)
         page_h = max(float(getattr(page, "image_height", 0) or 0), 1.0)
+        if page_w >= 900 and zone.col_count >= 4:
+            return False
         allowed = {
             BlockType.TEXT,
             BlockType.TITLE,
@@ -687,7 +695,7 @@ class DocxRenderer(BaseRenderer):
                 zone_bottom <= float(visual.bbox.y1) + page_h * 0.04
                 or zone_top <= float(visual.bbox.y1) + page_h * 0.04
             )
-            wide_band_text = max(float(block.bbox.width) for block in zone.blocks) >= page_w * 0.45
+            wide_band_text = max(float(block.bbox.width) for block in zone.blocks) >= page_w * 0.52
             if side_by_side or (caption_like and wide_band_text):
                 return True
         return False
@@ -767,7 +775,10 @@ class DocxRenderer(BaseRenderer):
         """将页眉/页脚条带按单行布局渲染，避免混入正文分栏。"""
         from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 
-        blocks = sorted(zone.blocks, key=lambda b: b.bbox.x1)
+        blocks = [
+            block for block in sorted(zone.blocks, key=lambda b: b.bbox.x1)
+            if self._has_renderable_content(block)
+        ]
         if not blocks:
             return
 
@@ -791,6 +802,7 @@ class DocxRenderer(BaseRenderer):
         tbl.autofit = False
         clear_table_borders(tbl)
         set_table_col_widths(tbl, widths_pt)
+        fit_table_to_width(tbl, usable_w_pt)
         row = tbl.rows[0]
         for cell in row.cells:
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
@@ -813,6 +825,14 @@ class DocxRenderer(BaseRenderer):
             )
             self._render_block(cell, block, ctx, space_before=0)
             self._prune_leading_empty_cell_paragraphs(cell)
+
+    @staticmethod
+    def _has_renderable_content(block: Block) -> bool:
+        if isinstance(block, TextBlock):
+            return bool((block.full_text() or "").strip())
+        if isinstance(block, (ImageBlock, EquationBlock, TableBlock)):
+            return bool(getattr(block, "image_data", None) or getattr(block, "html", None))
+        return True
 
     @staticmethod
     def _column_widths_pt(
@@ -923,6 +943,10 @@ class DocxRenderer(BaseRenderer):
             return False
         if any(len(getattr(b, "spanned_cols", [])) > 1 for b in zone.blocks):
             return False
+        if zone.col_count >= 4:
+            return True
+        if zone.col_count == 2 and page_width_px >= 1200:
+            return True
         if self._has_irregular_column_widths(col_px or {}, page_width_px, zone.col_count):
             return False
         return True
@@ -1298,9 +1322,9 @@ class DocxRenderer(BaseRenderer):
                     for block in getattr(zone, "blocks", [])
                 )
                 if col_count >= 4 and has_spanned:
-                    return 0.06
+                    return 0.03
                 if col_count >= 3 and has_spanned:
-                    margin = max(margin, 0.04)
+                    margin = max(margin, 0.025)
                     continue
                 if col_count >= 3:
                     margin = max(margin, 0.02)
@@ -1732,28 +1756,31 @@ class DocxRenderer(BaseRenderer):
         page: "Page",
         font_size_pt: float,
     ) -> float:
-        """对宽幅中文正文做轻微字号校准，避免版心显得过空。"""
-        if block.block_type != BlockType.TEXT:
-            return font_size_pt
-        if (
-            block.col_count >= 3
-            and self._cjk_ratio(block.full_text()) < 0.20
-            and 8.0 <= font_size_pt <= 8.7
-        ):
-            return 9.3
-        if block.count_lines() < 5:
-            return font_size_pt
-        if self._cjk_ratio(block.full_text()) < 0.55:
-            return font_size_pt
-        cfg = self.config
-        if block.col_count >= 3 and 8.0 <= font_size_pt <= 11.5:
-            return min(font_size_pt * cfg.body_wide_cjk_scale, font_size_pt + cfg.body_wide_cjk_add)
-        width_ratio = float(block.bbox.width) / max(float(page.image_width), 1.0)
-        if width_ratio < 0.62:
-            return font_size_pt
-        if not (8.0 <= font_size_pt <= 11.5):
-            return font_size_pt
-        return min(font_size_pt * cfg.body_wide_cjk_scale, font_size_pt + cfg.body_wide_cjk_add)
+        """正文字号直接使用 style_inferrer 基于原图几何推断的结果。"""
+        return font_size_pt
+
+    @staticmethod
+    def _page_body_font_size_pt(page: "Page") -> Optional[float]:
+        values: List[float] = []
+        for zone in getattr(page, "zones", []) or []:
+            for block in getattr(zone, "blocks", []) or []:
+                if not isinstance(block, TextBlock) or block.block_type != BlockType.TEXT:
+                    continue
+                style = getattr(block, "style", None)
+                size = getattr(style, "font_size_pt", None) if style is not None else None
+                if size is None:
+                    continue
+                text_len = len((block.full_text() or "").strip())
+                if text_len < 24 and block.count_lines() <= 2:
+                    continue
+                width_ratio = float(block.bbox.width) / max(float(getattr(page, "image_width", 0) or 0), 1.0)
+                if width_ratio <= 0.06:
+                    continue
+                values.extend([float(size)] * max(1, min(5, text_len // 80 + 1)))
+        if not values:
+            return None
+        values.sort()
+        return values[len(values) // 2]
 
     def _text_wrap_risk(self, text: str) -> float:
         if not text:
@@ -1830,8 +1857,54 @@ class DocxRenderer(BaseRenderer):
 
     def _render_equation_block(self, container, block: EquationBlock,
                                ctx: RenderContext, space_before: float) -> Optional[object]:
-        """渲染公式：优先使用图片回退。"""
+        """渲染公式：优先使用图片；若携带编号，则同段右对齐显示。"""
         image_data = block.image_data
+        formula_number = str((getattr(block, "attributes", None) or {}).get("formula_number_text", "") or "").strip()
+        raw_label = str((getattr(block, "attributes", None) or {}).get("raw_layout_label", "") or "")
+        if raw_label == "formula_number" and formula_number and _FORMULA_NUMBER_TEXT_RE.match(formula_number):
+            if space_before > self._scale(3):
+                add_spacing_para(container, min(space_before, self._scale(8)))
+            p = container.add_paragraph()
+            reset_paragraph_format(p)
+            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            p.paragraph_format.line_spacing = 1.0
+            run = p.add_run(formula_number)
+            set_run_font(
+                run,
+                font_size=self._scale_font(self.config.default_font_size_pt),
+                east_asia=self.config.default_cjk_font,
+                font_name=self.config.default_font,
+            )
+            set_paragraph_spacing(p, space_after=self._scale(2))
+            return p
+        if image_data and formula_number:
+            if space_before > self._scale(3):
+                add_spacing_para(container, min(space_before, self._scale(12)))
+            p = container.add_paragraph()
+            reset_paragraph_format(p)
+            p.paragraph_format.line_spacing = 1.0
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            tab_stop = p.paragraph_format.tab_stops.add_tab_stop(
+                Pt(max(ctx.col_width_pt - self._scale(6), 24.0)),
+                alignment=WD_TAB_ALIGNMENT.RIGHT,
+                leader=WD_TAB_LEADER.SPACES,
+            )
+            del tab_stop
+            run = p.add_run()
+            try:
+                run.add_picture(io.BytesIO(image_data), width=Pt(min(self._scale(max(ctx.col_width_pt * 0.72, 20.0)), ctx.col_width_pt * 0.78)))
+            except Exception:
+                pass
+            p.add_run("\t")
+            num_run = p.add_run(formula_number)
+            set_run_font(
+                num_run,
+                font_size=self._scale_font(self.config.default_font_size_pt),
+                east_asia=self.config.default_cjk_font,
+                font_name=self.config.default_font,
+            )
+            set_paragraph_spacing(p, space_after=self._scale(3))
+            return p
         if image_data:
             return self._render_image_block(container, block, ctx, space_before)
         # 若有 LaTeX 但无图片，则以文本方式渲染
@@ -1854,11 +1927,7 @@ class DocxRenderer(BaseRenderer):
 
     def _render_table_block(self, container, block: TableBlock,
                             ctx: RenderContext, space_before: float) -> None:
-        """渲染表格：复杂版面优先用裁剪图保真，避免 Word 表格分页撕裂。"""
-        if block.image_data:
-            self._render_image_block(container, block, ctx, space_before)
-            return
-
+        """渲染表格：优先使用 HTML 结构，其次回退到图片。"""
         if space_before > self._scale(MIN_LINE_SPACING_PT):
             add_spacing_para(container, space_before)
 
@@ -1883,6 +1952,10 @@ class DocxRenderer(BaseRenderer):
                 rendered = True
             except Exception as e:
                 logger.warning("Table HTML rendering failed, falling back to plain text: %s", e)
+
+        if not rendered and block.image_data:
+            self._render_image_block(container, block, ctx, 0.0)
+            rendered = True
 
         if not rendered and block.html:
             plain = re.sub(r"<[^>]+>", " ", block.html)
@@ -1949,6 +2022,12 @@ class DocxRenderer(BaseRenderer):
             alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
             and self._is_ambiguous_justify(block, ctx.col_left_px, ctx.col_right_px)
         )
+        if (
+            alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
+            and self._should_downgrade_justify_to_left(block, ctx)
+        ):
+            alignment = WD_ALIGN_PARAGRAPH.LEFT
+            ambiguous_justify = True
         bbox_h_pt = mapper.h(max(block.bbox.height, 0.0))
         content_h_pt = self._estimate_text_content_height_pt(
             block=block,
@@ -1964,7 +2043,14 @@ class DocxRenderer(BaseRenderer):
             and float(block.bbox.width) / max(float(ctx.page.image_width), 1.0) >= 0.62
         ):
             reserve_bbox_after_pt = min(max(0.0, bbox_h_pt * 0.95 - content_h_pt), 28.0)
-
+        if (
+            rtype == BlockType.TEXT
+            and float(block.bbox.width) <= max(float(ctx.page.image_width) * 0.12, 140.0)
+            and block.count_lines() <= 3
+            and len(text) <= 24
+        ):
+            alignment = WD_ALIGN_PARAGRAPH.CENTER if float(block.bbox.width) <= max(float(ctx.page.image_width) * 0.08, 110.0) else WD_ALIGN_PARAGRAPH.LEFT
+            line_spacing = max(1.0, float(line_spacing or 1.0))
         # ── 段落渲染内部函数 ─────────────────────────────────────────
         def _line_effective_style(line) -> dict:
             return resolve_textline_style(
@@ -2018,6 +2104,12 @@ class DocxRenderer(BaseRenderer):
                 font_size = max(font_size - 0.5, 6.0)
             elif rtype in (BlockType.HEADER, BlockType.FOOTER, BlockType.REFERENCE):
                 font_size = max(font_size - 1.0, 6.0)
+            elif (
+                rtype == BlockType.TEXT
+                and float(block.bbox.width) <= max(float(ctx.page.image_width) * 0.12, 140.0)
+                and len(text) <= 24
+            ):
+                font_size = min(font_size, self._scale_font(self.config.default_font_size_pt * 1.12))
             else:
                 body_font_size = self._resolve_body_font_size_pt(
                     block=block,
@@ -2025,9 +2117,6 @@ class DocxRenderer(BaseRenderer):
                     font_size_pt=float(run_style.get("font_size_pt") or self.config.default_font_size_pt),
                 )
                 font_size = self._scale_font(body_font_size)
-
-            if rtype in (BlockType.HEADER, BlockType.FOOTER) and color is None:
-                color = RGBColor(128, 128, 128)
 
             set_run_font(
                 run,
@@ -2057,17 +2146,28 @@ class DocxRenderer(BaseRenderer):
                     ambiguous_justify=ambiguous_justify,
                     visual_rows=visual_rows,
                     render_mode=str(getattr(ctx, "render_mode", "") or ""),
+                    in_table_cell=bool(getattr(ctx, "in_table_cell", False)),
+                    force_table_breaks=bool(getattr(ctx, "preserve_visual_breaks_in_table", False)),
                 )
+                prev_row_text = ""
                 for ri, row in enumerate(visual_rows):
                     prev_text = ""
                     for ln in row:
                         curr_text = ln.text.strip()
                         if not curr_text:
                             continue
+                        if (
+                            not keep_visual_breaks
+                            and not prev_text
+                            and prev_row_text
+                            and should_insert_space(prev_row_text, curr_text)
+                        ):
+                            p.add_run(" ")
                         if prev_text and should_insert_space(prev_text, curr_text):
                             p.add_run(" ")
                         _write_one_run(p, curr_text, _line_effective_style(ln))
                         prev_text = curr_text
+                        prev_row_text = curr_text
                     if ri < len(visual_rows) - 1 and keep_visual_breaks:
                         p.add_run().add_break()
                 return
@@ -2099,8 +2199,10 @@ class DocxRenderer(BaseRenderer):
                 para_text = para.text.strip()
                 if not para_text.strip():
                     continue
-                indent_pt = (round(mapper.w(para.first_line_indent_px) * 2) / 2.0
-                             if para.first_line_indent_px > 0 else 0.0)
+                indent_pt = 0.0 if is_title else (
+                    round(mapper.w(para.first_line_indent_px) * 2) / 2.0
+                    if para.first_line_indent_px > 0 else 0.0
+                )
                 indent_pt = self._scale(indent_pt)
                 last_p = _make_para(
                     para_text,
@@ -2109,7 +2211,7 @@ class DocxRenderer(BaseRenderer):
                     para_lines=para.lines,
                 )
         else:
-            indent_pt = self._scale((bs.first_line_indent_pt or 0.0) if bs else 0.0)
+            indent_pt = 0.0 if is_title else self._scale((bs.first_line_indent_pt or 0.0) if bs else 0.0)
             para_lines = block.lines if block.lines else None
             last_p = _make_para(text, indent_pt, is_first=True, para_lines=para_lines)
 
@@ -2217,6 +2319,20 @@ class DocxRenderer(BaseRenderer):
             return not (left_hit >= 0.85 and right_hit >= 0.85 and ragged <= 0.25)
         return left_hit < 0.70 or right_hit < 0.70 or ragged > 0.40
 
+    def _should_downgrade_justify_to_left(self, block: TextBlock, ctx: RenderContext) -> bool:
+        if block.block_type != BlockType.TEXT:
+            return False
+        text = block.full_text().strip()
+        if not text or self._cjk_ratio(text) >= 0.20:
+            return False
+        page_w = max(float(getattr(ctx.page, "image_width", 0) or 0), 1.0)
+        width_ratio = float(block.bbox.width) / page_w
+        if width_ratio > 0.38:
+            return False
+        if any(self._is_listish_line(getattr(line, "text", "")) for line in getattr(block, "lines", []) or []):
+            return False
+        return block.count_lines() >= 3 or len(text) >= 80
+
     @staticmethod
     def _is_listish_line(text: str) -> bool:
         return bool(_LISTISH_RE.match((text or "").strip()))
@@ -2230,11 +2346,20 @@ class DocxRenderer(BaseRenderer):
         ambiguous_justify: bool,
         visual_rows: List[List[object]],
         render_mode: str = "",
+        in_table_cell: bool = False,
+        force_table_breaks: bool = False,
     ) -> bool:
         if block.block_type in _CAPTION_TYPES:
             return True
         if not preserve_line_breaks:
             return False
+        if (
+            force_table_breaks
+            and in_table_cell
+            and block.block_type == BlockType.TEXT
+            and self._cjk_ratio(block.full_text()) < 0.20
+        ):
+            return True
         if render_mode == "reflow" and block.block_type == BlockType.TEXT:
             return False
 
@@ -2479,25 +2604,6 @@ class DocxRenderer(BaseRenderer):
         if not blocks or num_cols <= 1:
             return
 
-        spanned_cols = sorted(
-            {
-                int(ci)
-                for block in blocks
-                for ci in (getattr(block, "spanned_cols", []) or [])
-                if 0 <= int(ci) < num_cols and len(getattr(block, "spanned_cols", []) or []) > 1
-            }
-        )
-        segments = self._column_segments(num_cols, spanned_cols)
-        outer_widths = [
-            sum(col_widths[ci] for ci in cols)
-            for _, cols in segments
-        ]
-
-        tbl = doc.add_table(rows=1, cols=len(segments))
-        tbl.autofit = False
-        clear_table_borders(tbl)
-        set_table_col_widths(tbl, outer_widths)
-
         def _init_cell(cell, add_gap: bool) -> None:
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
             reset_paragraph_format(cell.paragraphs[0])
@@ -2512,7 +2618,15 @@ class DocxRenderer(BaseRenderer):
         def _block_cols(block) -> List[int]:
             return self._layout_block_cols(block, num_cols, img_w)
 
-        def _render_stream(cell, stream_blocks: List[Block], cols: List[int], width_pt: float) -> None:
+        def _render_stream(
+            cell,
+            stream_blocks: List[Block],
+            cols: List[int],
+            width_pt: float,
+            *,
+            base_y: Optional[float] = None,
+            gap_cap_pt: float = 4.0,
+        ) -> None:
             if not stream_blocks:
                 return
             left_px = min((col_px.get(ci, [0, img_w])[0] for ci in cols), default=0)
@@ -2526,10 +2640,10 @@ class DocxRenderer(BaseRenderer):
                 in_table_cell=True,
             )
             setattr(ctx, "render_mode", "reflow")
-            prev_y = 0
+            prev_y = float(base_y or 0.0)
             for block in sorted(stream_blocks, key=lambda b: (float(b.bbox.y1), float(b.bbox.x1))):
                 gap = max(0, block.bbox.y1 - prev_y)
-                sp = self._scale(max(min(mapper.h(gap), 4) - self._corr_gap_pt, 0)) if (prev_y > 0 and gap > 2) else 0
+                sp = self._scale(max(min(mapper.h(gap), gap_cap_pt) - self._corr_gap_pt, 0)) if (prev_y > 0 and gap > 2) else 0
                 self._render_block(cell, block, ctx, space_before=sp)
                 prev_y = block.bbox.y2
             self._prune_leading_empty_cell_paragraphs(cell)
@@ -2561,108 +2675,190 @@ class DocxRenderer(BaseRenderer):
                 band_bottom = max(band_bottom, y2)
             return bands
 
-        def _render_segment_subtable(parent_cell, segment_blocks: List[Block], cols: List[int], width_pt: float) -> None:
-            local_cols = list(cols)
-            local_index = {ci: idx for idx, ci in enumerate(local_cols)}
-            segment_col_set = set(local_cols)
-            if len(local_cols) <= 1:
-                _render_stream(parent_cell, segment_blocks, local_cols, width_pt)
+        def _overlap_y(a: Block, b: Block) -> float:
+            return max(0.0, min(float(a.bbox.y2), float(b.bbox.y2)) - max(float(a.bbox.y1), float(b.bbox.y1)))
+
+        def _is_side_block(block: Block, span: Block, span_cols: set[int]) -> bool:
+            cols = _block_cols(block)
+            if not cols or cols[0] in span_cols:
+                return False
+            overlap = _overlap_y(block, span)
+            if overlap <= 0:
+                return False
+            ref_h = max(1.0, min(float(block.bbox.height), float(span.bbox.height)))
+            return overlap >= max(18.0, ref_h * 0.12)
+
+        layout_span_types = {
+            BlockType.FIGURE,
+            BlockType.TABLE,
+            BlockType.EQUATION,
+        }
+        all_spans = [block for block in blocks if len(_block_cols(block)) > 1]
+        non_layout_spans = [block for block in all_spans if block.block_type not in layout_span_types]
+        span_blocks = [block for block in all_spans]
+        single_blocks = [block for block in blocks if len(_block_cols(block)) <= 1]
+        consumed: set[int] = set()
+
+        first_single_top = min((float(block.bbox.y1) for block in single_blocks), default=float("inf"))
+        leading_spans = [
+            block for block in sorted(non_layout_spans, key=lambda b: (float(b.bbox.y1), float(b.bbox.x1)))
+            if float(block.bbox.y1) <= first_single_top + 8.0
+        ]
+
+        def _render_standalone_span(block: Block) -> None:
+            cols = _block_cols(block)
+            if not cols:
+                return
+            tbl = doc.add_table(rows=1, cols=num_cols)
+            tbl.autofit = False
+            clear_table_borders(tbl)
+            set_table_col_widths(tbl, col_widths)
+            row = tbl.rows[0]
+            for ci, cell in enumerate(row.cells):
+                _init_cell(cell, add_gap=(ci < num_cols - 1))
+            start = min(cols)
+            end = max(cols)
+            cell = row.cells[start]
+            if end > start:
+                cell = cell.merge(row.cells[end])
+            _render_stream(
+                cell,
+                [block],
+                cols,
+                sum(col_widths[start:end + 1]),
+                base_y=float(block.bbox.y1),
+                gap_cap_pt=10.0,
+            )
+            fit_table_to_width(tbl, sum(col_widths))
+
+        for block in leading_spans:
+            _render_standalone_span(block)
+            consumed.add(id(block))
+
+        layout_spans = [
+            block for block in span_blocks
+            if id(block) not in consumed and block.block_type in layout_span_types
+        ]
+        spanned_col_set = sorted({
+            ci
+            for block in layout_spans
+            for ci in _block_cols(block)
+        })
+        segments = self._column_segments(num_cols, spanned_col_set)
+        outer_widths = [sum(col_widths[ci] for ci in cols) for _, cols in segments]
+
+        tbl = doc.add_table(rows=1, cols=len(segments))
+        tbl.autofit = False
+        clear_table_borders(tbl)
+        set_table_col_widths(tbl, outer_widths)
+        row = tbl.rows[0]
+
+        remaining = [block for block in blocks if id(block) not in consumed]
+        segment_sets = [set(cols) for _, cols in segments]
+        assigned: set[int] = set()
+
+        def _render_segment_cell(cell, seg_cols: List[int], seg_blocks: List[Block], width_pt: float) -> None:
+            if not seg_blocks:
+                return
+            if len(seg_cols) <= 1:
+                _render_stream(cell, seg_blocks, seg_cols, width_pt, gap_cap_pt=10.0)
                 return
 
-            sub_widths = [col_widths[ci] for ci in local_cols]
-            total_sub = sum(sub_widths)
-            if total_sub > 0 and width_pt > 0:
-                sub_widths = [w * width_pt / total_sub for w in sub_widths]
-
-            sub_tbl = parent_cell.add_table(rows=0, cols=len(local_cols))
+            local_widths = [col_widths[ci] for ci in seg_cols]
+            sub_tbl = cell.add_table(rows=0, cols=len(seg_cols))
             sub_tbl.autofit = False
             clear_table_borders(sub_tbl)
-            set_table_col_widths(sub_tbl, sub_widths)
 
-            def _init_sub_cell(cell, local_ci: int) -> None:
-                cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
-                reset_paragraph_format(cell.paragraphs[0])
-                set_paragraph_spacing(
-                    cell.paragraphs[0],
-                    line_spacing=self._scale(MIN_LINE_SPACING_PT),
-                    exact=True,
-                )
-                if local_ci < len(local_cols) - 1:
-                    set_cell_right_margin(cell, visual_gap)
-
-            span_blocks = [
-                block for block in segment_blocks
-                if len(set(_block_cols(block)) & segment_col_set) > 1
+            local_index = {ci: idx for idx, ci in enumerate(seg_cols)}
+            span_items = [
+                block for block in seg_blocks
+                if len(set(_block_cols(block)) & set(seg_cols)) > 1
             ]
-            units: List[Tuple[float, str, object]] = []
-            for band in _single_col_bands(segment_blocks, segment_col_set):
-                units.append((min(float(b.bbox.y1) for b in band), "band", band))
-            for block in span_blocks:
-                units.append((float(block.bbox.y1), "span", block))
+            single_items = [
+                block for block in seg_blocks
+                if len(set(_block_cols(block)) & set(seg_cols)) <= 1
+            ]
+            sub_units: List[Tuple[float, str, object]] = []
+            assigned_single_ids: set[int] = set()
+            for span in sorted(span_items, key=lambda b: (float(b.bbox.y1), float(b.bbox.x1))):
+                before = [
+                    block for block in single_items
+                    if id(block) not in assigned_single_ids
+                    and float(block.bbox.y2) <= float(span.bbox.y1) + 8.0
+                ]
+                if before:
+                    sub_units.append((min(float(b.bbox.y1) for b in before), "band", before))
+                    assigned_single_ids.update(id(block) for block in before)
+                sub_units.append((float(span.bbox.y1), "span", span))
+            after = [block for block in single_items if id(block) not in assigned_single_ids]
+            if after:
+                sub_units.append((min(float(b.bbox.y1) for b in after), "band", after))
 
-            for _, kind, payload in sorted(units, key=lambda item: item[0]):
-                row = sub_tbl.add_row()
-                for local_ci, cell in enumerate(row.cells):
-                    _init_sub_cell(cell, local_ci)
-
+            for row_top, kind, payload in sorted(sub_units, key=lambda item: item[0]):
+                sub_row = sub_tbl.add_row()
+                for local_ci, sub_cell in enumerate(sub_row.cells):
+                    _init_cell(sub_cell, add_gap=(local_ci < len(seg_cols) - 1))
                 if kind == "span":
                     block = payload
-                    span_cols = [ci for ci in _block_cols(block) if ci in segment_col_set]
-                    start = min(local_index[ci] for ci in span_cols)
-                    end = max(local_index[ci] for ci in span_cols)
-                    cell = row.cells[start]
+                    cols = [ci for ci in _block_cols(block) if ci in local_index]
+                    start = min(local_index[ci] for ci in cols)
+                    end = max(local_index[ci] for ci in cols)
+                    sub_cell = sub_row.cells[start]
                     if end > start:
-                        cell = cell.merge(row.cells[end])
-                    span_width = sum(sub_widths[start:end + 1])
-                    _render_stream(cell, [block], span_cols, span_width)
-                    for local_ci in range(len(local_cols)):
-                        if start <= local_ci <= end:
-                            continue
-                        self._prune_leading_empty_cell_paragraphs(row.cells[local_ci])
+                        sub_cell = sub_cell.merge(sub_row.cells[end])
+                    _render_stream(
+                        sub_cell,
+                        [block],
+                        cols,
+                        sum(local_widths[start:end + 1]),
+                        base_y=row_top,
+                        gap_cap_pt=14.0,
+                    )
                     continue
 
-                band_blocks = payload
-                for ci in local_cols:
-                    local_ci = local_index[ci]
-                    cell = row.cells[local_ci]
-                    col_blocks = [
-                        block for block in band_blocks
-                        if (_block_cols(block)[0] if _block_cols(block) else ci) == ci
-                    ]
-                    _render_stream(cell, col_blocks, [ci], sub_widths[local_ci])
+                by_col: dict[int, List[Block]] = defaultdict(list)
+                for block in payload:
+                    cols = _block_cols(block)
+                    if cols:
+                        by_col[cols[0]].append(block)
+                for ci in seg_cols:
+                    _render_stream(
+                        sub_row.cells[local_index[ci]],
+                        by_col.get(ci, []),
+                        [ci],
+                        local_widths[local_index[ci]],
+                        base_y=row_top,
+                        gap_cap_pt=10.0,
+                    )
 
-        row = tbl.rows[0]
-        consumed: set[int] = set()
-        for seg_idx, (seg_type, cols) in enumerate(segments):
+            set_table_col_widths(sub_tbl, local_widths)
+            fit_table_to_width(sub_tbl, width_pt)
+            self._prune_leading_empty_cell_paragraphs(cell)
+
+        for seg_idx, (_, cols) in enumerate(segments):
             cell = row.cells[seg_idx]
             _init_cell(cell, add_gap=(seg_idx < len(segments) - 1))
-            col_set = set(cols)
-            if seg_type == "standalone":
-                stream = [
-                    block for block in blocks
-                    if id(block) not in consumed
-                    and len(_block_cols(block)) == 1
-                    and _block_cols(block)[0] in col_set
-                ]
-            else:
-                stream = [
-                    block for block in blocks
-                    if id(block) not in consumed
-                    and bool(set(_block_cols(block)) & col_set)
-                ]
-            for block in stream:
-                consumed.add(id(block))
-            _render_segment_subtable(cell, stream, cols, outer_widths[seg_idx])
+            col_set = segment_sets[seg_idx]
+            stream: List[Block] = []
+            for block in remaining:
+                if id(block) in assigned:
+                    continue
+                block_cols = set(_block_cols(block))
+                if len(block_cols) > 1:
+                    if block_cols <= col_set:
+                        stream.append(block)
+                        assigned.add(id(block))
+                    continue
+                if block_cols and next(iter(block_cols)) in col_set:
+                    stream.append(block)
+                    assigned.add(id(block))
+            _render_segment_cell(cell, cols, stream, outer_widths[seg_idx])
 
-        leftovers = [block for block in blocks if id(block) not in consumed]
+        leftovers = [block for block in remaining if id(block) not in assigned]
         if leftovers:
-            fallback = doc.add_table(rows=1, cols=1)
-            fallback.autofit = False
-            clear_table_borders(fallback)
-            set_table_col_widths(fallback, [sum(col_widths)])
-            cell = fallback.rows[0].cells[0]
-            _init_cell(cell, add_gap=False)
-            _render_stream(cell, leftovers, list(range(num_cols)), sum(col_widths))
+            _render_stream(row.cells[-1], leftovers, list(range(num_cols)), outer_widths[-1], gap_cap_pt=10.0)
+
+        fit_table_to_width(tbl, sum(col_widths))
         return
 
     @staticmethod

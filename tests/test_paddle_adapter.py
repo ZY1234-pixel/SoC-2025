@@ -522,3 +522,25 @@ def test_caption_anchored_visual_recall_does_not_duplicate_existing_figure() -> 
     blocks = converted["pages"][0]["blocks"]
 
     assert [block["category"] for block in blocks].count("figure") == 1
+
+
+def test_formula_number_category_and_attributes_are_preserved() -> None:
+    adapter = PaddleAdapter()
+    image = np.zeros((200, 200, 3), dtype=np.uint8)
+    results = [
+        {
+            "type": "formula",
+            "bbox": [20, 20, 180, 60],
+            "score": 0.9,
+            "res": [
+                {"text": "y = ax + b"},
+                {"text": "(1)"},
+            ],
+        }
+    ]
+
+    converted = adapter.convert(results, image)
+    block = converted["pages"][0]["blocks"][0]
+
+    assert block["category"] == "formula"
+    assert block["attributes"]["formula_number_text"] == "(1)"

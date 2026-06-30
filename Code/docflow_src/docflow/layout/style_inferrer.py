@@ -123,6 +123,7 @@ def infer_block_styles(
                     mapper=mapper,
                     font_mapper=font_mapper,
                     justify_min_lines=justify_min_lines,
+                    page_width_px=page_width_px,
                     reflow_title_page_width_px=reflow_title_page_width_px,
                 )
                 all_text_blocks.append(block)
@@ -130,6 +131,7 @@ def infer_block_styles(
     # 对同类别区块的字号离群值归一化
     _normalize_category_styles(all_text_blocks)
     _normalize_numbered_heading_styles(all_text_blocks)
+    _smooth_page_body_fonts(all_text_blocks)
 
     # 使用推断出的行距修正字号（设计文档 §4.1：字号应在源页面坐标系中推断）
     # 初始估算假设 line_spacing ≈ 1.15，现用实际推断值修正
@@ -147,6 +149,7 @@ def _infer_text_block(
     mapper: "CoordMapper",
     font_mapper: "CoordMapper",
     justify_min_lines: int,
+    page_width_px: float = 0.0,
     reflow_title_page_width_px: float = 0.0,
 ) -> None:
     """对单个 TextBlock 推断并填充缺失的 style 字段。
@@ -179,7 +182,30 @@ def _infer_text_block(
         ci = block.col_index
         fallback = [block.bbox.x1, block.bbox.x2]
         col_left, col_right = col_px_text.get(ci, col_px_all.get(ci, fallback))
-        if is_title and reflow_title_page_width_px > 0:
+        span_cols = [
+            int(sci)
+            for sci in (getattr(block, "spanned_cols", []) or [])
+            if int(sci) in col_px_text or int(sci) in col_px_all
+        ]
+        if len(span_cols) > 1:
+            span_bounds = [
+                col_px_text.get(sci, col_px_all.get(sci))
+                for sci in span_cols
+                if col_px_text.get(sci, col_px_all.get(sci)) is not None
+            ]
+            if span_bounds:
+                col_left = min(float(bound[0]) for bound in span_bounds)
+                col_right = max(float(bound[1]) for bound in span_bounds)
+        if block.block_type in {BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER} and page_width_px > 0:
+            col_left, col_right = 0.0, float(page_width_px)
+        elif (
+            is_title
+            and reflow_title_page_width_px > 0
+            and (
+                block.col_count <= 1
+                or float(block.bbox.width) >= float(reflow_title_page_width_px) * 0.55
+            )
+        ):
             col_left, col_right = 0.0, float(reflow_title_page_width_px)
         bs.alignment = _detect_alignment(
             block=block,
@@ -199,6 +225,9 @@ def _infer_text_block(
     # ── 段后间距默认值 ────────────────────────────────────────────────
     if bs.space_after_pt is None:
         bs.space_after_pt = 4.0 if is_title else 1.0
+
+    if is_title:
+        bs.first_line_indent_pt = None
 
     # ── 首行缩进（单段落情形） ─────────────────────────────────────────
     if (bs.first_line_indent_pt is None
@@ -255,6 +284,29 @@ def _infer_paragraph_indents(block: TextBlock) -> None:
         if fx is None:
             continue
         para.first_line_indent_px = max(0.0, fx - baseline_x)
+
+
+def _smooth_page_body_fonts(blocks: List[TextBlock]) -> None:
+    """用页面主字体平滑正文中的 'other' 字体预测。"""
+    font_votes: List[str] = []
+    for block in blocks:
+        if not isinstance(block, TextBlock) or block.style is None:
+            continue
+        family = getattr(block.style, "font_family", None)
+        if family and family != "其他" and block.block_type in {BlockType.TEXT, BlockType.TITLE, BlockType.REFERENCE, BlockType.ABSTRACT}:
+            font_votes.extend([family] * max(1, len(block.full_text().strip()) // 20))
+    if not font_votes:
+        return
+    from collections import Counter
+
+    dominant = Counter(font_votes).most_common(1)[0][0]
+    for block in blocks:
+        if not isinstance(block, TextBlock) or block.style is None:
+            continue
+        if block.block_type not in {BlockType.TEXT, BlockType.TITLE, BlockType.REFERENCE, BlockType.ABSTRACT}:
+            continue
+        if getattr(block.style, "font_family", None) in {None, "其他"}:
+            block.style.font_family = dominant
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +424,23 @@ def _detect_alignment(
         title_text = (block.full_text() or "").strip()
         if title_text[:1] in {"“", "\"", "‘", "'"} and len(title_text) <= 42:
             return "center"
+        block_left_gap = max(0.0, float(block.bbox.x1) - col_left)
+        block_right_gap = max(0.0, col_right - float(block.bbox.x2))
+        block_width = max(1.0, float(block.bbox.x2) - float(block.bbox.x1))
+        if (
+            len(line_edges) <= 2
+            and getattr(block, "col_count", 1) > 1
+            and block_width <= col_w * 1.05
+        ):
+            if block_left_gap <= col_w * 0.04 and block_right_gap >= block_left_gap + col_w * 0.04:
+                return "left"
+            if block_right_gap <= col_w * 0.04 and block_left_gap >= block_right_gap + col_w * 0.04:
+                return "right"
+        if len(line_edges) >= 2:
+            first_width = line_edges[0][1] - line_edges[0][0]
+            second_width = line_edges[1][1] - line_edges[1][0]
+            if first_width >= col_w * 0.82 and second_width <= col_w * 0.72:
+                return "center"
         if center_score >= 0.52:
             return "center"
         if left_hit_ratio >= 0.58 and right_hit_ratio >= 0.58:

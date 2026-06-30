@@ -217,6 +217,38 @@ def test_repaired_model_order_short_titles_anchor_to_following_text_column():
     assert blocks["short_title"].col_index == blocks["left_body"].col_index
 
 
+def test_model_order_geometric_repair_is_applied_by_default_for_model_order_strategy():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1200,
+                "height": 1600,
+                "blocks": [
+                    _model_order_text_block("right_mid", [620, 720, 1120, 920], "right middle body", 0),
+                    _model_order_text_block("left_bottom", [80, 980, 560, 1210], "left bottom body", 1),
+                    _model_order_text_block("right_top", [620, 300, 1120, 520], "right top body", 2),
+                    _model_order_text_block("left_top", [80, 300, 560, 520], "left top body", 3),
+                    _model_order_text_block("title", [80, 90, 560, 150], "Magazine Title", 4, category="title"),
+                    _model_order_text_block("right_bottom", [620, 960, 1120, 1210], "right bottom body", 5),
+                ],
+            }
+        ],
+    }
+
+    pipeline = RecoveryPipeline(
+        config=RecoveryConfig(
+            reading_order_strategy="model_order",
+            font_classification_enabled=False,
+        )
+    )
+    doc = pipeline.build_document(page)
+
+    assert doc.pages[0].attributes["rule_stats"]["model_order_geometric_repair"] == 1
+
+
 def test_pipeline_suppresses_visual_boxes_that_duplicate_text_regions():
     page = {
         "version": "2.0",

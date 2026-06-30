@@ -574,7 +574,7 @@ def test_long_narrow_title_uses_body_sized_cap():
     assert resolved == 12.075
 
 
-def test_multicolumn_latin_body_escapes_font_floor():
+def test_multicolumn_latin_body_keeps_inferred_font_size():
     page = Page(index=0, image_width=5000, image_height=6567)
     block = TextBlock(
         bbox=BBox(300, 3000, 1720, 4260),
@@ -591,7 +591,7 @@ def test_multicolumn_latin_body_escapes_font_floor():
         font_size_pt=8.5,
     )
 
-    assert resolved == 9.3
+    assert resolved == 8.5
 
 
 def test_single_page_fit_search_retries_with_lower_font_floor(monkeypatch):
