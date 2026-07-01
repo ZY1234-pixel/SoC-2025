@@ -13,23 +13,6 @@ from utils.utils import cvtColor, preprocess_input, resize_image
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def refine_mask(mask):
-    mask = (mask == 1).astype(np.uint8) * 255
-    mask = cv2.erode(mask, np.ones((3, 3), np.uint8), iterations=1)
-
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    if num_labels > 1:
-        largest = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
-        mask = (labels == largest).astype(np.uint8)
-    else:
-        mask = (mask > 0).astype(np.uint8)
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    return mask.astype(np.uint8)
-
-
 def mask_to_edge(mask, edge_width=2):
     edge_width = max(1, int(edge_width))
     mask = (mask > 0).astype(np.uint8) * 255
@@ -43,9 +26,9 @@ class DeeplabV3:
     def __init__(
         self,
         model_path=os.path.join(BASE_DIR, "best_epoch_weights.pth"),
-        input_shape=(640, 640),
+        input_shape=(1024, 1024),
         downsample_factor=8,
-        book_threshold=0.65,
+        book_threshold=0.60,
         blend_alpha=0.7,
         # 0: blend output, 1: 0-255 mask output.
         mix_type=1,
@@ -98,7 +81,7 @@ class DeeplabV3:
         prediction = cv2.resize(prediction, (original_w, original_h), interpolation=cv2.INTER_LINEAR)
 
         mask = (prediction[..., 1] >= self.book_threshold).astype(np.uint8)
-        return refine_mask(mask)
+        return mask
 
     def detect_image(self, image, output_type="mask", edge_width=2):
         image = cvtColor(image)

@@ -15,7 +15,7 @@ OUTPUT_TYPE = "mask"
 EDGE_WIDTH = 2
 # 0: blend mask with original image, only works when OUTPUT_TYPE is "mask"
 # 1: save 0-255 mask/edge image
-MIX_TYPE = 1
+MIX_TYPE = 0
 
 
 def main():
