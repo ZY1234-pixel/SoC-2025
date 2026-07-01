@@ -1024,218 +1024,6 @@ def _assign_single_column(blocks: Sequence["Block"]) -> None:
         blk.spanned_cols = [0]
 
 
-def _visual_column_fallback_source(
-    ordered: Sequence["Block"],
-    text_candidates: Sequence["Block"],
-    *,
-    page_w: float,
-    page_h: float,
-) -> List["Block"]:
-    """Build a conservative column source for pages with a visual side column.
-
-    Some textbook pages use a main text stream plus a side column made mostly of
-    figures, captions, and short local headings. Body-text-only column detection
-    sees only the main stream and collapses the page to one column. This fallback
-    adds stable visual anchors while keeping wide text out of the column skeleton.
-    """
-    text_anchors = [
-        block for block in text_candidates
-        if block.block_type in _COLUMN_ANCHOR_TYPES
-        and _w(block) <= page_w * 0.54
-        and _h(block) >= max(18.0, page_h * 0.012)
-    ]
-    visual_anchors = [
-        block for block in ordered
-        if block.block_type in _VISUAL_TYPES
-        and page_w * 0.10 <= _w(block) <= page_w * 0.48
-        and _h(block) >= max(60.0, page_h * 0.045)
-    ]
-    if len(text_anchors) < 2 or not visual_anchors:
-        return []
-
-    text_center = median([_cx(block) for block in text_anchors])
-    visual_center = median([_cx(block) for block in visual_anchors])
-    if abs(visual_center - text_center) < page_w * 0.22:
-        return []
-
-    if visual_center > text_center:
-        side_text = [block for block in text_anchors if _cx(block) <= visual_center - page_w * 0.10]
-    else:
-        side_text = [block for block in text_anchors if _cx(block) >= visual_center + page_w * 0.10]
-    if len(side_text) < 2:
-        return []
-
-    side_text = sorted(side_text, key=lambda block: (-_area(block), _y1(block), _x1(block)))[:2]
-
-    captions = [
-        block for block in ordered
-        if block.block_type in _CAPTION_TYPES
-        and _w(block) <= page_w * 0.30
-        and any(
-            abs(_cx(block) - _cx(visual)) <= max(page_w * 0.13, _w(visual) * 0.70)
-            and -max(24.0, page_h * 0.015) <= _y1(block) - _y2(visual) <= max(130.0, page_h * 0.08)
-            for visual in visual_anchors
-        )
-    ]
-    return side_text + visual_anchors + captions
-
-
-def _visual_column_fallback_quality(
-    columns: Sequence[Sequence["Block"]],
-    *,
-    page_w: float,
-) -> bool:
-    if len(columns) < 2:
-        return False
-    text_cols = 0
-    visual_cols = 0
-    centers: List[float] = []
-    for column in columns:
-        if not column:
-            continue
-        centers.append(median([_cx(block) for block in column]))
-        if any(block.block_type in _COLUMN_ANCHOR_TYPES for block in column):
-            text_cols += 1
-        if any(block.block_type in _VISUAL_TYPES for block in column):
-            visual_cols += 1
-    if text_cols < 1 or visual_cols < 1 or len(centers) < 2:
-        return False
-    centers = sorted(centers)
-    return max(b - a for a, b in zip(centers, centers[1:])) >= page_w * 0.22
-
-
-def _assign_near_visual_titles_to_visual_columns(
-    blocks: Sequence["Block"],
-    *,
-    page_w: float,
-    page_h: float,
-) -> None:
-    visuals = [
-        block for block in blocks
-        if block.block_type in _VISUAL_TYPES
-        and len(getattr(block, "spanned_cols", []) or []) == 1
-    ]
-    if not visuals:
-        return
-
-    for title in blocks:
-        if title.block_type != BlockType.TITLE:
-            continue
-        title_text = re.sub(r"\s+", "", _block_text(title))
-        if not title_text or len(title_text) > 12:
-            continue
-        if _w(title) > page_w * 0.22:
-            continue
-
-        best: tuple[float, "Block"] | None = None
-        for visual in visuals:
-            vertical_gap = _y1(visual) - _y2(title)
-            if not (0.0 <= vertical_gap <= max(150.0, page_h * 0.09)):
-                continue
-            center_gap = abs(_cx(title) - _cx(visual))
-            if center_gap > max(page_w * 0.26, _w(visual) * 0.85):
-                continue
-            score = vertical_gap + center_gap * 0.35
-            if best is None or score < best[0]:
-                best = (score, visual)
-
-        if best is None:
-            continue
-        visual = best[1]
-        title.spanned_cols = list(getattr(visual, "spanned_cols", []) or [getattr(visual, "col_index", 0)])
-        title.col_index = int(title.spanned_cols[0])
-
-
-def _sync_local_title_visual_columns(blocks: Sequence["Block"]) -> None:
-    by_id = {_block_id(block): block for block in blocks if _block_id(block)}
-    for block in blocks:
-        if block.block_type != BlockType.TITLE:
-            continue
-        anchor_id = _marked(block, "local_title_visual_anchor_id")
-        if not anchor_id:
-            continue
-        visual = by_id.get(str(anchor_id))
-        if visual is None:
-            continue
-        visual_cols = list(getattr(visual, "spanned_cols", []) or [])
-        if len(visual_cols) != 1:
-            continue
-        block.spanned_cols = visual_cols
-        block.col_index = int(visual_cols[0])
-
-
-def _assign_centered_section_starts_to_spanned_columns(
-    blocks: Sequence["Block"],
-    *,
-    page_w: float,
-    page_h: float,
-    col_count: int,
-) -> None:
-    if col_count < 2:
-        return
-    has_spanned_text = any(
-        block.block_type in _TEXTLIKE_TYPES
-        and block.block_type != BlockType.TITLE
-        and block.block_type not in _STRIP_TYPES
-        and len(getattr(block, "spanned_cols", []) or []) > 1
-        for block in blocks
-    )
-    if not has_spanned_text:
-        return
-
-    visuals = [
-        block for block in blocks
-        if block.block_type in _VISUAL_TYPES
-        and len(getattr(block, "spanned_cols", []) or []) == 1
-    ]
-    page_center = page_w * 0.5
-    center_tol = max(42.0, page_w * 0.055)
-    all_cols = list(range(col_count))
-
-    def _has_nearby_visual_anchor(title: "Block") -> bool:
-        for visual in visuals:
-            vertical_gap = _y1(visual) - _y2(title)
-            if not (0.0 <= vertical_gap <= max(180.0, page_h * 0.12)):
-                continue
-            if abs(_cx(title) - _cx(visual)) <= max(page_w * 0.26, _w(visual) * 0.85):
-                return True
-        return False
-
-    for title in blocks:
-        if title.block_type != BlockType.TITLE:
-            continue
-        title_text = re.sub(r"\s+", "", _block_text(title))
-        if not title_text or len(title_text) > 12:
-            continue
-        if _w(title) > page_w * 0.22:
-            continue
-        if abs(_cx(title) - page_center) > center_tol:
-            continue
-        if _has_nearby_visual_anchor(title):
-            continue
-
-        title.spanned_cols = all_cols
-        title.col_index = 0
-        _mark(title, centered_section_spanned=True)
-
-        followers = [
-            block for block in blocks
-            if block.block_type in _TEXTLIKE_TYPES
-            and block.block_type != BlockType.TITLE
-            and block.block_type not in _STRIP_TYPES
-            and _y1(block) >= _y2(title)
-            and _y1(block) - _y2(title) <= max(70.0, page_h * 0.05)
-            and _w(block) <= page_w * 0.50
-            and _x1(block) <= page_w * 0.28
-        ]
-        if not followers:
-            continue
-        follower = min(followers, key=lambda block: (_y1(block), _x1(block)))
-        follower.spanned_cols = all_cols
-        follower.col_index = 0
-        _mark(follower, centered_section_follower=True, centered_section_title_id=_block_id(title))
-
-
 def _assign_column_metadata(
     ordered: Sequence["Block"],
     *,
@@ -1278,22 +1066,6 @@ def _assign_column_metadata(
         cluster_thresh=cluster_thresh,
     )
     if len(columns) <= 1:
-        fallback_source = _visual_column_fallback_source(
-            ordered,
-            candidates,
-            page_w=page_w,
-            page_h=max(float(image_height or 0), max((_y2(block) for block in ordered), default=1.0)),
-        )
-        if fallback_source:
-            fallback_columns, fallback_bounds = detect_columns(
-                fallback_source,
-                image_width,
-                max_cols=max_cols,
-                cluster_thresh=min(cluster_thresh, 0.08),
-            )
-            if _visual_column_fallback_quality(fallback_columns, page_w=page_w):
-                columns, col_bounds = fallback_columns, fallback_bounds
-    if len(columns) <= 1:
         _assign_single_column(ordered)
         return
 
@@ -1312,19 +1084,6 @@ def _assign_column_metadata(
                 blk.col_count = 1
                 blk.col_index = 0
                 blk.spanned_cols = [0]
-
-    _assign_near_visual_titles_to_visual_columns(
-        ordered,
-        page_w=page_w,
-        page_h=max(float(image_height or 0), max((_y2(block) for block in ordered), default=1.0)),
-    )
-    _sync_local_title_visual_columns(ordered)
-    _assign_centered_section_starts_to_spanned_columns(
-        ordered,
-        page_w=page_w,
-        page_h=max(float(image_height or 0), max((_y2(block) for block in ordered), default=1.0)),
-        col_count=len(columns),
-    )
 
     for blk in ordered:
         if _marked(blk, "mask_reason") != "top_attachment":
@@ -2100,113 +1859,6 @@ def _promote_upper_visual_family_before_lower_band(
         insert_pos = remain.index(first_blocker)
         seq = remain[:insert_pos] + moving + remain[insert_pos:]
         _mark(figure, upper_visual_band_promoted=True, upper_visual_blocker_id=_block_id(first_blocker))
-    return seq
-
-
-def _reorder_side_visual_families_by_caption_anchor(
-    ordered: Sequence["Block"],
-    *,
-    image_width: int,
-    image_height: Optional[int],
-) -> List["Block"]:
-    seq = list(ordered)
-    if len(seq) < 5:
-        return seq
-
-    page_w = max(float(image_width), 1.0)
-    page_h = max(float(image_height or 0), max((_y2(block) for block in seq), default=1.0))
-    has_spanned_text = any(
-        block.block_type in _TEXTLIKE_TYPES
-        and block.block_type != BlockType.TITLE
-        and block.block_type not in _STRIP_TYPES
-        and len(getattr(block, "spanned_cols", []) or []) > 1
-        for block in seq
-    )
-    if not has_spanned_text:
-        return seq
-
-    figures = [
-        block for block in seq
-        if block.block_type in _VISUAL_TYPES
-        and page_w * 0.10 <= _w(block) <= page_w * 0.48
-        and len(getattr(block, "spanned_cols", []) or []) == 1
-    ]
-    for figure in figures:
-        captions = [
-            block for block in seq
-            if block.block_type == BlockType.FIGURE_CAPTION
-            and ((getattr(block, "attributes", None) or {}).get("xycutpp_proto", {}) or {}).get("figure_family_anchor_id") == _block_id(figure)
-        ]
-        if not captions:
-            continue
-
-        family = [figure] + captions
-        family_ids = {id(block) for block in family}
-        anchor_y = max(_y2(block) for block in family)
-        family_first_idx = min(seq.index(block) for block in family)
-
-        nearby_titles = [
-            block for block in seq
-            if id(block) not in family_ids
-            and block.block_type == BlockType.TITLE
-            and _w(block) <= page_w * 0.22
-            and _y2(block) <= _y1(figure) + max(24.0, page_h * 0.015)
-            and _y1(figure) - _y2(block) <= max(180.0, page_h * 0.12)
-            and abs(_cx(block) - _cx(figure)) <= max(page_w * 0.22, _w(figure) * 0.85)
-        ]
-        if nearby_titles:
-            title = max(nearby_titles, key=lambda block: (_y2(block), _x1(block)))
-            family.insert(0, title)
-            family_ids.add(id(title))
-            title.spanned_cols = list(getattr(figure, "spanned_cols", []) or [getattr(figure, "col_index", 0)])
-            title.col_index = int(title.spanned_cols[0])
-            _mark(title, local_title_visual_anchor_id=_block_id(figure))
-
-        if any(
-            block.block_type in _TEXTLIKE_TYPES
-            and len(getattr(block, "spanned_cols", []) or []) > 1
-            and _overlap_1d(_y1(block), _y2(block), _y1(caption), _y2(caption))
-            >= min(_h(block), _h(caption)) * 0.25
-            for block in seq
-            for caption in captions
-        ):
-            continue
-
-        preceding = [
-            block for block in seq
-            if id(block) not in family_ids
-            and block.block_type in _TEXTLIKE_TYPES
-            and block.block_type not in _STRIP_TYPES
-            and (
-                (
-                    len(getattr(block, "spanned_cols", []) or []) > 1
-                    and _y2(block) <= anchor_y + max(10.0, page_h * 0.008)
-                )
-                or (
-                    len(getattr(block, "spanned_cols", []) or []) <= 1
-                    and _y1(block) <= anchor_y + max(10.0, page_h * 0.008)
-                )
-            )
-            and _y1(block) >= _y1(figure) - max(260.0, page_h * 0.18)
-            and (
-                len(getattr(block, "spanned_cols", []) or []) > 1
-                or int(getattr(block, "col_index", 0) or 0) != int(getattr(figure, "col_index", 0) or 0)
-            )
-        ]
-        if not preceding:
-            continue
-
-        target_idx = max(seq.index(block) for block in preceding) + 1
-        if abs(family_first_idx - target_idx) <= 1 and family_first_idx < target_idx:
-            continue
-
-        moving = [block for block in seq if id(block) in family_ids]
-        remain = [block for block in seq if id(block) not in family_ids]
-        target_block = seq[target_idx - 1] if target_idx > 0 else None
-        insert_pos = remain.index(target_block) + 1 if target_block in remain else 0
-        seq = remain[:insert_pos] + moving + remain[insert_pos:]
-        _mark(figure, side_visual_caption_anchor_order=True, side_visual_anchor_y=round(anchor_y, 3))
-
     return seq
 
 
@@ -3460,11 +3112,6 @@ def postprocess_xycutpp_local_attachments(
         image_width=image_width,
         image_height=image_height,
     )
-    seq = _reorder_side_visual_families_by_caption_anchor(
-        seq,
-        image_width=image_width,
-        image_height=image_height,
-    )
     seq = _promote_upper_visual_family_before_lower_band(
         seq,
         image_width=image_width,
@@ -3532,11 +3179,6 @@ def postprocess_xycutpp_local_attachments(
         image_width=image_width,
         image_height=image_height,
     )
-    seq = _reorder_side_visual_families_by_caption_anchor(
-        seq,
-        image_width=image_width,
-        image_height=image_height,
-    )
     seq = _enforce_local_title_before_side_visual(
         seq,
         image_width=image_width,
@@ -3548,13 +3190,6 @@ def postprocess_xycutpp_local_attachments(
         image_height=image_height,
     )
     seq = _enforce_inline_equation_label_adjacency(seq)
-    _assign_centered_section_starts_to_spanned_columns(
-        seq,
-        page_w=max(float(image_width), 1.0),
-        page_h=max(float(image_height or 0), max((_y2(block) for block in seq), default=1.0)),
-        col_count=max((int(getattr(block, "col_count", 1) or 1) for block in seq), default=1),
-    )
-    _sync_local_title_visual_columns(seq)
     return seq
 
 

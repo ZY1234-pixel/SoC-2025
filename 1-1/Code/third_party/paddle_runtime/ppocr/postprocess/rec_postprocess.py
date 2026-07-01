@@ -39,7 +39,10 @@ class BaseRecLabelDecode(object):
                     line = line.decode("utf-8").strip("\n").strip("\r\n")
                     self.character_str.append(line)
             if use_space_char:
-                self.character_str.append(" ")
+                if self.character_str and self.character_str[0] == "":
+                    self.character_str = self.character_str[1:]
+                if " " not in self.character_str:
+                    self.character_str.append(" ")
             dict_character = list(self.character_str)
             if "arabic" in character_dict_path:
                 self.reverse = True

@@ -6,14 +6,27 @@ from model import RuntimePaths
 from test import build_layout_dict_from_inference
 
 
-def test_runtime_paths_default_layout_model_points_to_headfloat100() -> None:
+def test_runtime_paths_default_models_point_to_pp_doclayout_v3_and_ppocr_v6() -> None:
     paths = RuntimePaths.discover()
     assert paths.layout_model == (
         Path(__file__).resolve().parents[1]
         / "Code"
         / "models"
         / "layout"
-        / "doclayout_yolo_docstructbench_headfloat100_runtime"
+        / "pp-doclayout-v3"
+        / "PP-DocLayoutV3.onnx"
+    )
+    assert paths.layout_model_spec.name == "pp-doclayout-v3"
+    assert paths.layout_model_spec.use_onnx is True
+    assert paths.det_model.name == "PP-OCRv6_small_det.onnx"
+    assert paths.rec_model.name == "PP-OCRv6_small_rec.onnx"
+    assert paths.table_model == (
+        Path(__file__).resolve().parents[1]
+        / "Code"
+        / "models"
+        / "table"
+        / "SLANet_plus"
+        / "SLANet_plus.onnx"
     )
 
 
@@ -43,6 +56,17 @@ def test_runtime_paths_can_switch_to_pp_doclayout_onnx_model() -> None:
     assert paths.layout_model_spec.use_onnx is True
 
 
+def test_build_layout_dict_for_pp_doclayout_v3(tmp_path: Path) -> None:
+    paths = RuntimePaths.discover(layout_model_name="pp-doclayout-v3")
+    fallback = paths.paddle_root / "ppocr" / "utils" / "dict" / "layout_dict" / "layout_cdla_dict.txt"
+    dict_path = build_layout_dict_from_inference(paths.layout_model_spec, fallback, tmp_path)
+
+    labels = dict_path.read_text(encoding="utf-8").splitlines()
+    assert labels[:5] == ["abstract", "algorithm", "aside_text", "chart", "content"]
+    assert labels[-5:] == ["seal", "table", "text", "vertical_text", "vision_footnote"]
+    assert len(labels) == 25
+
+
 def test_build_layout_dict_for_picodet_17cls(tmp_path: Path) -> None:
     paths = RuntimePaths.discover(layout_model_name="picodet-l_layout_17cls")
     fallback = paths.paddle_root / "ppocr" / "utils" / "dict" / "layout_dict" / "layout_cdla_dict.txt"
@@ -60,6 +84,6 @@ def test_build_layout_dict_for_pp_doclayout_m(tmp_path: Path) -> None:
     dict_path = build_layout_dict_from_inference(paths.layout_model_spec, fallback, tmp_path)
 
     labels = dict_path.read_text(encoding="utf-8").splitlines()
-    assert labels[0:4] == ["paragraph_title", "doc_title", "text", "number"]
-    assert labels[-3:] == ["aside_text", "formula_number", "figure_caption"]
+    assert labels[0:4] == ["paragraph_title", "image", "text", "number"]
+    assert labels[-3:] == ["header_image", "footer_image", "aside_text"]
     assert len(labels) == 23

@@ -57,15 +57,6 @@ _ACADEMIC_SECTION_TITLE_RE = re.compile(
     r")\s+\S",
     re.IGNORECASE,
 )
-_ACADEMIC_CUE_TYPES = frozenset({
-    BlockType.FORMULA,
-    BlockType.EQUATION,
-    BlockType.TABLE,
-    BlockType.TABLE_CAPTION,
-    BlockType.FIGURE_CAPTION,
-    BlockType.TABLE_FOOTNOTE,
-    BlockType.FORMULA_CAPTION,
-})
 _SPANNING_CAPTION_TYPES = frozenset({
     BlockType.FIGURE_CAPTION,
     BlockType.TABLE_CAPTION,
@@ -498,7 +489,7 @@ def _annotate_layout_hierarchy(
         "selected_confidence": round(float(selected.profile.confidence), 4),
         "selected_main_col_count": int(selected.profile.main_col_count),
         "core_confidence": round(float(core_proposal.profile.confidence), 4),
-        "legacy_confidence": round(float(fallback_proposal.profile.confidence), 4) if fallback_proposal else None,
+        "fallback_confidence": round(float(fallback_proposal.profile.confidence), 4) if fallback_proposal else None,
         "local_sort_applied": bool(local_sort_applied),
         "local_score_before": round(float(local_score_before), 4),
         "local_score_after": round(float(local_score_after), 4),
@@ -630,34 +621,6 @@ def _looks_like_academic_sectioned_page(blocks: List["Block"], image_width: int)
     if narrow_titles < max(2, len(title_blocks) // 2):
         return False
     return lower_section_like >= 2
-
-
-def _has_stable_two_column_text_distribution(blocks: List["Block"], image_width: int) -> bool:
-    page_w = max(float(image_width), 1.0)
-    left = 0
-    right = 0
-    for blk in blocks:
-        if blk.block_type in SPAN_ELIGIBLE_TYPES:
-            continue
-        if float(blk.bbox.width) >= page_w * 0.72:
-            continue
-        cx = (float(blk.bbox.x1) + float(blk.bbox.x2)) * 0.5
-        if cx <= page_w * 0.46:
-            left += 1
-        elif cx >= page_w * 0.54:
-            right += 1
-    return left >= 3 and right >= 3
-
-
-def _should_force_legacy_for_academic_page(blocks: List["Block"], image_width: int) -> bool:
-    if not _has_stable_two_column_text_distribution(blocks, image_width):
-        return False
-    if _looks_like_academic_sectioned_page(blocks, image_width):
-        return True
-
-    cue_count = sum(1 for blk in blocks if blk.block_type in _ACADEMIC_CUE_TYPES)
-    title_count = sum(1 for blk in blocks if blk.block_type == BlockType.TITLE)
-    return cue_count >= 5 and title_count <= 4
 
 
 def _looks_like_stable_multicol_spanning_page(
@@ -2108,6 +2071,68 @@ def _sort_single_column_blocks(blocks: List["Block"]) -> List["Block"]:
     return sorted(blocks, key=lambda b: (b.bbox.y1, b.bbox.x1))
 
 
+def _promote_upper_figure_caption_pairs(
+    ordered: List["Block"],
+    image_height: int | None,
+) -> List["Block"]:
+    """Keep upper-page figure/caption pairs before lower article flows.
+
+    Geometry fallback can keep a figure and its caption adjacent but place the
+    pair after lower text in other columns.  When the visual anchor is in the
+    upper half and the caption is immediately attached, the pair belongs to the
+    upper band and should precede the lower section flows that start beneath it.
+    """
+    if len(ordered) < 3:
+        return ordered
+    page_h = max(float(image_height or 0), 1.0)
+    result = list(ordered)
+    idx = 0
+    while idx < len(result) - 1:
+        visual = result[idx]
+        caption = result[idx + 1]
+        if (
+            visual.block_type not in SPAN_ELIGIBLE_TYPES
+            or caption.block_type != BlockType.FIGURE_CAPTION
+        ):
+            idx += 1
+            continue
+        gap = float(caption.bbox.y1) - float(visual.bbox.y2)
+        if gap < -12.0 or gap > max(90.0, page_h * 0.05):
+            idx += 1
+            continue
+        if float(visual.bbox.y1) > page_h * 0.55:
+            idx += 1
+            continue
+        has_body_continuation = any(
+            block.block_type not in SPAN_ELIGIBLE_TYPES
+            and block.block_type not in _SPANNING_CAPTION_TYPES
+            and block.block_type != BlockType.TITLE
+            and float(block.bbox.y1) >= float(visual.bbox.y2) - 24.0
+            and float(block.bbox.y1) <= float(caption.bbox.y2) + page_h * 0.15
+            and float(block.bbox.x1) <= float(visual.bbox.x1) - 40.0
+            and float(block.bbox.x2) >= float(visual.bbox.x1) + 40.0
+            for block in result[:idx]
+        )
+        if has_body_continuation:
+            idx += 2
+            continue
+
+        lower_flow_y = max(float(visual.bbox.y1) + 120.0, float(caption.bbox.y1) - page_h * 0.20)
+        insert_at = None
+        for probe_idx, block in enumerate(result[:idx]):
+            if float(block.bbox.y1) >= lower_flow_y:
+                insert_at = probe_idx
+                break
+        if insert_at is None:
+            idx += 2
+            continue
+
+        pair = [result.pop(idx), result.pop(idx)]
+        result[insert_at:insert_at] = pair
+        idx = insert_at + len(pair)
+    return result
+
+
 def _sort_blocks_by_reading_row(blocks: List["Block"], min_row_overlap: float = 6.0) -> List["Block"]:
     """单栏读序排序：先按 y 分行，行内按 x。"""
     if not blocks:
@@ -2617,7 +2642,7 @@ def sort_layout(
     cluster_thresh: float = COLUMN_CLUSTER_THRESH,
     column_confidence_min: float = 0.55,
     zone_strip_height_ratio: float = 0.12,
-    strategy: str = "auto",
+    strategy: str = "xycutpp_hybrid",
     xycutpp_beta: float = 1.3,
     xycutpp_density_threshold: float = 0.9,
     xycutpp_min_gap_ratio: float = 0.015,
@@ -2628,23 +2653,10 @@ def sort_layout(
     Parameters
     ----------
     strategy:
-        ``"legacy"`` 使用原有分区/分栏排序器；
-        其余 ``"xycutpp"`` / ``"xycutpp_hybrid"`` / ``"xycutpp_paper"`` /
-        ``"newspaper_hybrid"`` / ``"auto"`` 全部统一走 XY-Cut++ 内核。
+        只保留 ``"xycutpp_hybrid"`` 作为旧几何阅读顺序兜底。历史策略名
+        ``"legacy"`` / ``"auto"`` / ``"xycutpp"`` / ``"xycutpp_paper"`` /
+        ``"newspaper_hybrid"`` 会被兼容映射到同一条 hybrid 逻辑。
     """
-    mode = (strategy or "auto").strip().lower()
-    if mode not in {"legacy", "xycutpp", "xycutpp_paper", "xycutpp_hybrid", "newspaper_hybrid", "auto"}:
-        mode = "auto"
-    if mode == "legacy":
-        return sort_layout_legacy(
-            blocks,
-            image_width=image_width,
-            image_height=image_height,
-            max_cols=max_cols,
-            cluster_thresh=cluster_thresh,
-            column_confidence_min=column_confidence_min,
-            zone_strip_height_ratio=zone_strip_height_ratio,
-        )
     raw_evidence_blocks = _clone_blocks_for_evidence(blocks)
     raw_evidence = _collect_layout_evidence(
         raw_evidence_blocks,
@@ -2681,15 +2693,12 @@ def sort_layout(
 
     fallback_proposal: _LayoutProposal | None = None
     if (
-        mode in {"xycutpp_hybrid", "newspaper_hybrid", "auto"}
-        and (
-            raw_strong_multiflow
-            or raw_evidence.has_peripheral_sidebar
-            or _has_stable_multicol_spanning_evidence(raw_evidence)
-        )
+        raw_strong_multiflow
+        or raw_evidence.has_peripheral_sidebar
+        or _has_stable_multicol_spanning_evidence(raw_evidence)
     ):
         fallback_proposal = _build_layout_proposal(
-            "legacy_fallback",
+            "geometry_fallback",
             blocks,
             image_width=image_width,
             image_height=image_height,
@@ -2718,7 +2727,7 @@ def sort_layout(
     local_score_before = _estimate_local_region_order_score(selected_blocks)
     local_score_after = local_score_before
     local_sort_applied = False
-    if mode in {"xycutpp_hybrid", "newspaper_hybrid", "auto"} and _should_apply_local_subregion_sort(
+    if _should_apply_local_subregion_sort(
         selected_proposal,
         raw_strong_multiflow=raw_strong_multiflow,
     ):
@@ -2752,4 +2761,5 @@ def sort_layout(
         local_score_before=local_score_before,
         local_score_after=local_score_after,
     )
+    selected_blocks = _promote_upper_figure_caption_pairs(selected_blocks, image_height)
     return selected_blocks

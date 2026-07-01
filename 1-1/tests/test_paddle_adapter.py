@@ -90,6 +90,102 @@ def test_text_block_bbox_expands_to_cover_text_line_polys() -> None:
     assert block["bbox"] == [20.0, 58.0, 160.0, 150.0]
 
 
+def test_text_duplicate_keeps_multiline_region_over_short_suffix() -> None:
+    adapter = PaddleAdapter()
+    results = [
+        {
+            "type": "text",
+            "bbox": [472, 693, 1518, 729],
+            "score": 0.74,
+            "res": [
+                {
+                    "text": "a Department of Public Health and Hygiene, Medical College of Oita, Oita, Japan",
+                    "text_region": [[472, 693], [1518, 693], [1518, 718], [472, 718]],
+                },
+                {
+                    "text": "b Tokyo Rosai Hospital, Tokyo, Japan",
+                    "text_region": [[473, 725], [955, 725], [955, 750], [473, 750]],
+                },
+            ],
+        },
+        {
+            "type": "text",
+            "bbox": [473, 734, 955, 771],
+            "score": 0.75,
+            "res": [
+                {
+                    "text": "b Tokyo Rosai Hospital, Tokyo, Japan",
+                    "text_region": [[473, 734], [955, 734], [955, 771], [473, 771]],
+                }
+            ],
+        },
+    ]
+
+    filtered, report = adapter._suppress_nested_duplicates(results)
+
+    assert len(filtered) == 1
+    assert "a Department of Public Health" in adapter._extract_region_text(filtered[0])
+    assert any(item["reason"] == "nested_text_duplicate_replaced_shorter" for item in report)
+
+
+def test_pp_doclayout_v3_model_order_and_raw_labels_are_preserved() -> None:
+    adapter = PaddleAdapter()
+    image = np.zeros((200, 200, 3), dtype=np.uint8)
+    results = [
+        {
+            "type": "text",
+            "raw_type": "text",
+            "layout_model": "pp-doclayout-v3",
+            "model_order": 2,
+            "bbox": [20, 120, 180, 160],
+            "score": 0.9,
+            "res": [{"text": "second"}],
+        },
+        {
+            "type": "title",
+            "raw_type": "doc_title",
+            "layout_model": "pp-doclayout-v3",
+            "model_order": 1,
+            "bbox": [20, 20, 180, 60],
+            "score": 0.9,
+            "res": [{"text": "first"}],
+        },
+    ]
+
+    converted = adapter.convert(results, image)
+    blocks = converted["pages"][0]["blocks"]
+
+    assert [block["text"] for block in blocks] == ["first", "second"]
+    assert blocks[0]["attributes"]["raw_layout_label"] == "doc_title"
+    assert blocks[0]["attributes"]["model_order"] == 1
+    assert blocks[0]["attributes"]["layout_model"] == "pp-doclayout-v3"
+
+
+def test_model_order_defaults_to_upstream_list_index() -> None:
+    adapter = PaddleAdapter()
+    image = np.zeros((200, 200, 3), dtype=np.uint8)
+    results = [
+        {
+            "type": "text",
+            "bbox": [20, 120, 180, 160],
+            "score": 0.9,
+            "res": [{"text": "first upstream item"}],
+        },
+        {
+            "type": "title",
+            "bbox": [20, 20, 180, 60],
+            "score": 0.9,
+            "res": [{"text": "second upstream item"}],
+        },
+    ]
+
+    converted = adapter.convert(results, image)
+    blocks = converted["pages"][0]["blocks"]
+
+    assert [block["text"] for block in blocks] == ["first upstream item", "second upstream item"]
+    assert [block["attributes"]["model_order"] for block in blocks] == [0, 1]
+
+
 def test_sentence_like_title_duplicate_does_not_suppress_adjacent_text() -> None:
     adapter = PaddleAdapter()
     results = [
@@ -176,6 +272,194 @@ def test_low_score_merged_text_does_not_suppress_higher_score_split_text_blocks(
     assert len(filtered) == 2
     assert [round(float(item.get("score", 0.0)), 2) for item in filtered] == [0.81, 0.74]
     assert any(entry["removed_index"] == 2 for entry in report)
+
+
+def test_pp_doclayout_v3_content_parent_is_suppressed_by_specific_children() -> None:
+    adapter = PaddleAdapter()
+    results = [
+        {
+            "type": "content",
+            "bbox": [90, 90, 510, 330],
+            "score": 0.96,
+            "res": [{"text": "paragraph formula paragraph"}],
+        },
+        {
+            "type": "text",
+            "bbox": [100, 105, 500, 170],
+            "score": 0.82,
+            "res": [{"text": "paragraph"}],
+        },
+        {
+            "type": "display_formula",
+            "bbox": [120, 190, 360, 235],
+            "score": 0.79,
+            "res": [],
+        },
+        {
+            "type": "paragraph_title",
+            "bbox": [100, 255, 470, 290],
+            "score": 0.88,
+            "res": [{"text": "4 Numerical Solution"}],
+        },
+    ]
+
+    filtered, report = adapter._suppress_nested_duplicates(results)
+
+    assert [item["type"] for item in filtered] == ["text", "display_formula", "paragraph_title"]
+    assert any(
+        entry["reason"] == "generic_parent_suppressed"
+        and entry["removed_index"] == 0
+        for entry in report
+    )
+
+
+def test_high_confidence_long_text_is_not_suppressed_by_formula_children() -> None:
+    adapter = PaddleAdapter()
+    results = [
+        {
+            "type": "text",
+            "bbox": [100, 100, 620, 260],
+            "score": 0.95,
+            "res": [
+                {
+                    "text": "高5~8cm。表面黑褐色，粗糙，附有盐粒结晶，可见突起的支根及支根痕。",
+                }
+            ],
+        },
+        {"type": "inline_formula", "bbox": [130, 150, 210, 175], "score": 0.54, "res": []},
+        {"type": "inline_formula", "bbox": [420, 200, 510, 225], "score": 0.39, "res": []},
+    ]
+
+    filtered, report = adapter._suppress_nested_duplicates(results)
+
+    assert [item["type"] for item in filtered] == ["text"]
+    assert not any(entry["reason"] == "generic_parent_suppressed" for entry in report)
+
+
+def test_pp_doclayout_v3_table_keeps_parent_and_nests_internal_children() -> None:
+    adapter = PaddleAdapter()
+    image = np.zeros((500, 700, 3), dtype=np.uint8)
+    results = [
+        {
+            "type": "table",
+            "bbox": [80, 120, 620, 430],
+            "score": 0.91,
+            "res": {"html": "<table><tr><td>x</td></tr></table>"},
+        },
+        {
+            "type": "display_formula",
+            "bbox": [100, 160, 210, 190],
+            "score": 0.83,
+            "res": [],
+        },
+        {
+            "type": "text",
+            "bbox": [260, 160, 560, 190],
+            "score": 0.85,
+            "res": [{"text": "internal table text"}],
+        },
+    ]
+
+    converted = adapter.convert(results, image)
+    blocks = converted["pages"][0]["blocks"]
+
+    assert [block["category"] for block in blocks] == ["table"]
+    attrs = blocks[0]["attributes"]
+    assert attrs["nested_child_count"] == 2
+    assert {child["type"] for child in attrs["nested_children"]} == {"display_formula", "text"}
+    cleanup = converted["pages"][0]["attributes"]
+    assert cleanup["cleanup_rule_counts"]["table_container_child"] == 2
+
+
+def test_low_confidence_footer_table_noise_is_dropped() -> None:
+    adapter = PaddleAdapter()
+    image = np.zeros((1000, 800, 3), dtype=np.uint8)
+    results = [
+        {
+            "type": "table",
+            "bbox": [0, 850, 790, 990],
+            "score": 0.34,
+            "res": {"html": "<table><tr><td>30</td></tr></table>"},
+        },
+        {
+            "type": "table",
+            "bbox": [80, 500, 720, 760],
+            "score": 0.93,
+            "res": {"html": "<table><tr><td>real table</td></tr></table>"},
+        },
+    ]
+
+    converted = adapter.convert(results, image)
+    blocks = converted["pages"][0]["blocks"]
+
+    assert [block["category"] for block in blocks] == ["table"]
+    assert blocks[0]["bbox"] == [80.0, 500.0, 720.0, 760.0]
+    cleanup = converted["pages"][0]["attributes"]
+    assert cleanup["cleanup_rule_counts"]["footer_table_noise_drop"] == 1
+
+
+def test_pp_doclayout_v3_header_absorbs_page_number_child() -> None:
+    adapter = PaddleAdapter()
+    image = np.zeros((260, 400, 3), dtype=np.uint8)
+    results = [
+        {
+            "type": "header",
+            "bbox": [280, 20, 370, 70],
+            "score": 0.87,
+            "res": [{"text": "Full Paper"}],
+        },
+        {
+            "type": "number",
+            "bbox": [320, 28, 350, 52],
+            "score": 0.81,
+            "res": [{"text": "1181"}],
+        },
+    ]
+
+    converted = adapter.convert(results, image)
+    blocks = converted["pages"][0]["blocks"]
+
+    assert [block["category"] for block in blocks] == ["header"]
+    assert blocks[0]["attributes"]["nested_children"][0]["type"] == "number"
+    assert converted["pages"][0]["attributes"]["cleanup_rule_counts"]["page_strip_container_child"] == 1
+
+
+def test_duplicate_ocr_line_trim_drops_low_confidence_carryover_fragment() -> None:
+    adapter = PaddleAdapter()
+    results = [
+        {
+            "type": "text",
+            "bbox": [100, 100, 600, 180],
+            "score": 0.9,
+            "res": [
+                {
+                    "text": "灯塔指引开始被用来增加光的强度。",
+                    "text_region": [[100, 140], [600, 140], [600, 164], [100, 164]],
+                }
+            ],
+        },
+        {
+            "type": "text",
+            "bbox": [90, 140, 610, 235],
+            "score": 0.52,
+            "res": [
+                {
+                    "text": "灯塔指引开始被用来增加光的强度。",
+                    "text_region": [[100, 140], [600, 140], [600, 164], [100, 164]],
+                },
+                {
+                    "text": "的方向",
+                    "text_region": [[90, 200], [155, 200], [155, 225], [90, 225]],
+                },
+            ],
+        },
+    ]
+
+    filtered, report = adapter._trim_duplicate_ocr_lines(results)
+
+    assert len(filtered) == 1
+    assert filtered[0]["bbox"] == [100, 100, 600, 180]
+    assert any(item["reason"] == "text_fragment_carryover_drop" for item in report)
 
 
 def test_low_score_formula_duplicate_does_not_suppress_section_title() -> None:
@@ -276,3 +560,55 @@ def test_caption_anchored_visual_recall_does_not_duplicate_existing_figure() -> 
     blocks = converted["pages"][0]["blocks"]
 
     assert [block["category"] for block in blocks].count("figure") == 1
+
+
+def test_caption_anchored_visual_recall_does_not_cover_existing_text_region() -> None:
+    adapter = PaddleAdapter()
+    image = np.full((900, 700, 3), 255, dtype=np.uint8)
+    image[260:520, 120:620] = 210
+    long_text = (
+        "segmentation model trained on clear imagery, and multi-task models jointly outputting "
+        "CR and segmentation. Although multi-stage pipelines can benefit from reconstruction"
+    )
+    results = [
+        {
+            "type": "figure_caption",
+            "bbox": [260, 545, 430, 575],
+            "score": 0.8,
+            "res": [{"text": "Fig. 3 visualizes the learned prompt map"}],
+        },
+        {
+            "type": "text",
+            "bbox": [125, 270, 610, 510],
+            "score": 0.96,
+            "res": [{"text": long_text}],
+        },
+    ]
+
+    converted = adapter.convert(results, image)
+    blocks = converted["pages"][0]["blocks"]
+
+    assert [block["category"] for block in blocks].count("figure") == 0
+    assert any(block["category"] == "text" and "segmentation model" in block.get("text", "") for block in blocks)
+
+
+def test_formula_number_category_and_attributes_are_preserved() -> None:
+    adapter = PaddleAdapter()
+    image = np.zeros((200, 200, 3), dtype=np.uint8)
+    results = [
+        {
+            "type": "formula",
+            "bbox": [20, 20, 180, 60],
+            "score": 0.9,
+            "res": [
+                {"text": "y = ax + b"},
+                {"text": "(1)"},
+            ],
+        }
+    ]
+
+    converted = adapter.convert(results, image)
+    block = converted["pages"][0]["blocks"][0]
+
+    assert block["category"] == "formula"
+    assert block["attributes"]["formula_number_text"] == "(1)"

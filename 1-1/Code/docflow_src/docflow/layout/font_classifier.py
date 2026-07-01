@@ -250,6 +250,16 @@ class FontClassifier:
         image = _load_page_image(page)
         if image is None:
             return {"enabled": True, "available": False, "reason": "page_image_missing", "applied": 0}
+        try:
+            self._ensure_model()
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "available": False,
+                "reason": str(exc),
+                "checkpoint": str(self.checkpoint_path),
+                "applied": 0,
+            }
 
         applied = 0
         accepted = 0
@@ -298,12 +308,12 @@ class FontClassifier:
     def predict_block(self, page_image: Image.Image, block: TextBlock) -> Optional[FontPrediction]:
         import torch
 
+        model = self._ensure_model()
         crops = self._line_crops(page_image, block)
         if not crops:
             return None
         tensors = [self.transform(self._preprocess_crop(crop)) for crop in crops]
         batch = torch.stack(tensors).to(self._device or self._select_device())
-        model = self._ensure_model()
         with torch.inference_mode():
             batch = batch.to(self._device)
             batch_size, num_crops, channels, height, width = batch.shape

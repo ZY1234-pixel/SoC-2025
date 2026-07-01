@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
-from dataclasses import replace
 from difflib import SequenceMatcher
 import json
 import os
@@ -60,9 +59,10 @@ DOCLAYOUT_YOLO_LABELS = [
 ]
 
 DEFAULT_LAYOUT_SCORE_THRESHOLD = 0.50
+DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD = 0.50
 DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD = 0.18
 RAW_RESULT_PREVIEW_MAX_TEXT = 300
-TITLE_OCR_RECHECK_TYPES = {"title"}
+OCR_RECHECK_TYPES = {"title", "text", "header"}
 PICODET_LAYOUT_17CLS_LABELS = [
     "text",
     "title",
@@ -107,6 +107,33 @@ PP_DOCLAYOUT_M_LABELS = [
     "footer_image",
     "aside_text",
 ]
+PP_DOCLAYOUT_V3_LABELS = [
+    "abstract",
+    "algorithm",
+    "aside_text",
+    "chart",
+    "content",
+    "display_formula",
+    "doc_title",
+    "figure_title",
+    "footer",
+    "footer_image",
+    "footnote",
+    "formula_number",
+    "header",
+    "header_image",
+    "image",
+    "inline_formula",
+    "number",
+    "paragraph_title",
+    "reference",
+    "reference_content",
+    "seal",
+    "table",
+    "text",
+    "vertical_text",
+    "vision_footnote",
+]
 
 
 def bootstrap_import_paths(paths: RuntimePaths) -> None:
@@ -147,7 +174,10 @@ def resolve_layout_score_threshold(layout_spec: LayoutModelSpec) -> str:
             value = min(1.0, max(0.01, value))
         return f"{value:.2f}"
 
-    if "doclayout_yolo" in layout_spec.name.lower():
+    spec_name = layout_spec.name.lower()
+    if "pp-doclayout-v3" in spec_name:
+        return f"{DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD:.2f}"
+    if "doclayout_yolo" in spec_name:
         return f"{DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD:.2f}"
     return f"{DEFAULT_LAYOUT_SCORE_THRESHOLD:.2f}"
 
@@ -160,6 +190,7 @@ def build_layout_dict_from_inference(layout_spec: LayoutModelSpec, fallback_dict
         explicit_labels = {
             "picodet-l_layout_17cls": PICODET_LAYOUT_17CLS_LABELS,
             "pp-doclayout-m": PP_DOCLAYOUT_M_LABELS,
+            "pp-doclayout-v3": PP_DOCLAYOUT_V3_LABELS,
         }.get(layout_spec.name)
         if explicit_labels:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -226,7 +257,13 @@ def make_engine(paths: RuntimePaths, layout_dict_dir: Path):
 
     ppstructure_dir = paths.paddle_root / "ppstructure"
     fallback_layout_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "layout_dict" / "layout_cdla_dict.txt"
-    rec_char_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "ppocrv5_dict.txt"
+    rec_char_dict = (
+        paths.models_root
+        / "rec"
+        / "ch"
+        / "PP-OCRv6_small_rec"
+        / "ppocrv6_dict.txt"
+    )
     table_char_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "table_structure_dict_ch.txt"
     layout_dict = build_layout_dict_from_inference(paths.layout_model_spec, fallback_layout_dict, layout_dict_dir)
     layout_score_threshold = resolve_layout_score_threshold(paths.layout_model_spec)
@@ -308,6 +345,10 @@ def summarize_raw_result(result: list) -> dict:
         }
         if "img_idx" in region:
             item["img_idx"] = region.get("img_idx")
+        for key in ("raw_type", "model_order", "layout_model"):
+            value = region.get(key)
+            if value is not None:
+                item[key] = value
         img = region.get("img")
         if hasattr(img, "shape"):
             item["img_shape"] = list(img.shape)
@@ -333,6 +374,40 @@ def summarize_raw_result(result: list) -> dict:
             item["res"] = res_preview
         regions.append(item)
     return {"regions": regions}
+
+
+def _converted_blocks_to_debug_regions(page_document: dict) -> list[dict]:
+    pages = page_document.get("pages") if isinstance(page_document, dict) else None
+    if not pages:
+        return []
+    page = pages[0] or {}
+    regions: list[dict] = []
+    for block in page.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        region: dict = {
+            "type": block.get("category", block.get("type", "?")),
+            "bbox": block.get("bbox", [0, 0, 0, 0]),
+            "score": float(block.get("confidence", block.get("score", 0.0)) or 0.0),
+            "res": [],
+        }
+        if block.get("text_lines"):
+            converted_lines = []
+            for line in block.get("text_lines") or []:
+                if not isinstance(line, dict):
+                    continue
+                converted_lines.append(
+                    {
+                        "text": line.get("text", ""),
+                        "confidence": line.get("confidence", 1.0),
+                        "text_region": line.get("poly"),
+                    }
+                )
+            region["res"] = converted_lines
+        elif block.get("text"):
+            region["res"] = [{"text": block.get("text", "")}]
+        regions.append(region)
+    return regions
 
 
 def _line_texts(region: dict) -> list[str]:
@@ -483,18 +558,53 @@ def _merge_rechecked_lines(region: dict, candidate_lines: list[dict]) -> list[di
             used_candidates.add(best_index)
         else:
             merged.append(old)
-    return merged if changed else current
+
+    def _line_key(line: dict) -> tuple[float, float]:
+        text_region = line.get("text_region")
+        if not isinstance(text_region, list) or not text_region:
+            return (float("inf"), float("inf"))
+        xs = [
+            float(point[0])
+            for point in text_region
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        ]
+        ys = [
+            float(point[1])
+            for point in text_region
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        ]
+        return ((min(ys) + max(ys)) * 0.5, min(xs)) if xs and ys else (float("inf"), float("inf"))
+
+    existing_texts = {str(line.get("text", "") or "").strip() for line in merged if str(line.get("text", "") or "").strip()}
+    for idx, candidate in enumerate(candidate_lines):
+        if idx in used_candidates:
+            continue
+        candidate_text = str(candidate.get("text", "") or "").strip()
+        if not candidate_text or candidate_text in existing_texts:
+            continue
+        if any(SequenceMatcher(None, candidate_text, existing).ratio() >= 0.86 for existing in existing_texts):
+            continue
+        if float(candidate.get("confidence", 0.0) or 0.0) < 0.88:
+            continue
+        merged.append(candidate)
+        existing_texts.add(candidate_text)
+        changed = True
+
+    if changed:
+        merged.sort(key=_line_key)
+        return merged
+    return current
 
 
-def recheck_title_ocr_with_preprocessing(engine, image, result: list) -> int:
-    """用扩边二值化 OCR 复核容易漏行首字符的标题/短文本块。"""
+def recheck_text_ocr_with_preprocessing(engine, image, result: list) -> int:
+    """用扩边二值化 OCR 复核容易漏行/漏字符的标题和页首短文本块。"""
     if not result:
         return 0
     h, w = image.shape[:2]
     changed = 0
     for region in result:
         region_type = str(region.get("type", "") or "").lower()
-        if region_type not in TITLE_OCR_RECHECK_TYPES:
+        if region_type not in OCR_RECHECK_TYPES:
             continue
         bbox = region.get("bbox")
         if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
@@ -505,10 +615,14 @@ def recheck_title_ocr_with_preprocessing(engine, image, result: list) -> int:
         x1, y1, x2, y2 = [int(round(float(v))) for v in bbox]
         bw = max(1, x2 - x1)
         bh = max(1, y2 - y1)
+        is_top_text = region_type in {"text", "header"} and y1 <= max(96, int(round(h * 0.07)))
+        if region_type not in {"title"} and not is_top_text:
+            continue
         pad_x = max(16, int(round(bw * 0.08)))
         pad_y = max(8, int(round(bh * 0.12)))
+        pad_top = max(pad_y, 36, int(round(bh * 0.45))) if is_top_text else pad_y
         ex1 = max(0, x1 - pad_x)
-        ey1 = max(0, y1 - pad_y)
+        ey1 = max(0, y1 - pad_top)
         ex2 = min(w, x2 + pad_x)
         ey2 = min(h, y2 + pad_y)
         crop = image[ey1:ey2, ex1:ex2]
@@ -540,7 +654,7 @@ def recheck_title_ocr_with_preprocessing(engine, image, result: list) -> int:
 def analyze_page(engine, adapter: PaddleAdapter, image, page_index: int, source_path: str) -> tuple[dict, list, float]:
     started_at = time.time()
     result, _ = engine(image, img_idx=page_index)
-    recheck_title_ocr_with_preprocessing(engine, image, result)
+    recheck_text_ocr_with_preprocessing(engine, image, result)
     elapsed = time.time() - started_at
     page_document = adapter.convert(result, image, img_idx=page_index)
     page_document["pages"][0]["image_path"] = source_path
@@ -557,8 +671,6 @@ def save_debug_images(
 ) -> None:
     from docflow.utils.visualization import (
         draw_layout_ocr,
-        draw_reading_order_comparison,
-        draw_reading_order_map,
         draw_sorted_layout,
         extract_sorted_blocks,
     )
@@ -610,49 +722,22 @@ def save_debug_images(
 
     sample_layout.debug_dir.mkdir(parents=True, exist_ok=True)
     layout_path = sample_layout.debug_image_path(page_index, "layout_ocr")
-    sorted_path = sample_layout.debug_image_path(page_index, "sorted_layout")
-    legacy_order_path = sample_layout.debug_image_path(page_index, "reading_order_legacy")
-    xycutpp_order_path = sample_layout.debug_image_path(page_index, "reading_order_xycutpp")
-    compare_path = sample_layout.debug_image_path(page_index, "reading_order_compare")
-    vis_layout = draw_layout_ocr(image, result, font_path=None, show_text_preview=True)
+    order_columns_path = sample_layout.debug_image_path(page_index, "reading_order_columns")
+    clean_regions = _converted_blocks_to_debug_regions(page_document)
+    vis_layout = draw_layout_ocr(
+        image,
+        clean_regions or result,
+        font_path=None,
+        show_text_preview=True,
+    )
     cv2.imwrite(str(layout_path), vis_layout)
 
-    legacy_pipeline = RecoveryPipeline(
-        config=replace(pipeline.config, reading_order_strategy="legacy")
-    )
-    xycutpp_pipeline = RecoveryPipeline(
-        config=replace(pipeline.config, reading_order_strategy="xycutpp_hybrid")
-    )
     actual_document = pipeline.build_document(deepcopy(page_document))
-    legacy_document = legacy_pipeline.build_document(deepcopy(page_document))
-    xycutpp_document = xycutpp_pipeline.build_document(deepcopy(page_document))
     source_page = (page_document.get("pages") or [{}])[0]
 
-    sorted_blocks = extract_sorted_blocks(actual_document, page_index=0)
-    legacy_blocks = _remap_to_source_bboxes(extract_sorted_blocks(legacy_document, page_index=0), source_page)
-    xycutpp_blocks = _remap_to_source_bboxes(extract_sorted_blocks(xycutpp_document, page_index=0), source_page)
-
-    vis_sorted = draw_sorted_layout(image, sorted_blocks)
-    legacy_map = draw_reading_order_map(
-        image,
-        legacy_blocks,
-        title="Legacy Reading Order",
-    )
-    xycutpp_map = draw_reading_order_map(
-        image,
-        xycutpp_blocks,
-        title="XY-Cut++ Hybrid Reading Order",
-    )
-    compare_map = draw_reading_order_comparison(
-        image,
-        legacy_blocks,
-        xycutpp_blocks,
-    )
-
-    cv2.imwrite(str(sorted_path), vis_sorted)
-    cv2.imwrite(str(legacy_order_path), legacy_map)
-    cv2.imwrite(str(xycutpp_order_path), xycutpp_map)
-    cv2.imwrite(str(compare_path), compare_map)
+    ordered_blocks = _remap_to_source_bboxes(extract_sorted_blocks(actual_document, page_index=0), source_page)
+    vis_order_columns = draw_sorted_layout(image, ordered_blocks)
+    cv2.imwrite(str(order_columns_path), vis_order_columns)
 
 
 def _sample_cleanup_removed_count(merged_document: dict) -> int:
@@ -753,8 +838,8 @@ def main() -> int:
     parser.add_argument("--no-debug-vis", action="store_true", help="关闭 debug 可视化图导出")
     parser.add_argument(
         "--layout-model",
-        default="doclayout_yolo",
-        choices=["doclayout_yolo", "picodet-l_layout_17cls", "pp-doclayout-m"],
+        default="pp-doclayout-v3",
+        choices=["pp-doclayout-v3", "PP-DocLayoutV3", "doclayout_yolo", "picodet-l_layout_17cls", "pp-doclayout-m"],
         help="选择版面分析模型。",
     )
     args = parser.parse_args()

@@ -40,6 +40,22 @@ def _text_block(block_id: str, bbox: list[float], text: str, category: str = "te
     }
 
 
+def _model_order_text_block(
+    block_id: str,
+    bbox: list[float],
+    text: str,
+    model_order: int,
+    category: str = "text",
+) -> dict:
+    block = _text_block(block_id, bbox, text, category=category)
+    block["attributes"] = {
+        "layout_model": "pp-doclayout-v3",
+        "model_order": model_order,
+        "raw_layout_label": category,
+    }
+    return block
+
+
 def _figure_block(block_id: str, bbox: list[float]) -> dict:
     return {
         "id": block_id,
@@ -54,6 +70,16 @@ def _formula_block(block_id: str, bbox: list[float]) -> dict:
         "category": "formula",
         "bbox": bbox,
     }
+
+
+def _model_order_figure_block(block_id: str, bbox: list[float], model_order: int) -> dict:
+    block = _figure_block(block_id, bbox)
+    block["attributes"] = {
+        "layout_model": "pp-doclayout-v3",
+        "model_order": model_order,
+        "raw_layout_label": "figure",
+    }
+    return block
 
 
 def test_pipeline_reclassifies_cjk_figure_caption_and_page_number():
@@ -81,6 +107,255 @@ def test_pipeline_reclassifies_cjk_figure_caption_and_page_number():
 
     assert by_id["cap_as_title"].block_type == BlockType.FIGURE_CAPTION
     assert by_id["page_no"].block_type == BlockType.PAGE_NUMBER
+
+
+def test_pipeline_model_order_strategy_preserves_upstream_reading_order():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1000,
+                "height": 1000,
+                "blocks": [
+                    _model_order_text_block("left_second", [100, 100, 400, 180], "model says second", 1),
+                    _model_order_text_block("bottom_third", [100, 500, 900, 580], "model says third", 2),
+                    _model_order_text_block("right_first", [600, 100, 900, 180], "model says first", 0),
+                ],
+            }
+        ],
+    }
+
+    pipeline = RecoveryPipeline(
+        config=RecoveryConfig(
+            reading_order_strategy="model_order",
+            font_classification_enabled=False,
+        )
+    )
+    doc = pipeline.build_document(page)
+    blocks = [blk for zone in doc.pages[0].zones for blk in zone.blocks]
+
+    assert [block.block_id for block in blocks] == ["right_first", "left_second", "bottom_third"]
+    assert all((block.attributes or {}).get("reading_order_strategy") == "model_order" for block in blocks)
+
+
+def test_model_order_four_column_magazine_keeps_regular_narrow_tracks():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1022,
+                "height": 1344,
+                "blocks": [
+                    _model_order_text_block("header", [732, 39, 976, 57], "The Economist December 9th 2023", 0, category="header"),
+                    _model_order_text_block("masthead", [61, 36, 478, 70], "The world this week Business", 1, category="title"),
+                    _model_order_text_block("c0_a", [58, 107, 274, 396], "ByteDance has offered to buy back stock from investors.\nAnother line in the first column.", 2),
+                    _model_order_text_block("c0_b", [58, 409, 271, 734], "Meanwhile, a federal judge imposed an injunction.\nThe first column continues here.", 3),
+                    _model_order_text_block("c1_a", [287, 107, 496, 306], "The conglomerate is writing off assets acquired almost two decades ago.", 4),
+                    _model_order_text_block("c1_b", [287, 339, 502, 697], "Return to never-ever land Disney was forced to defend its business strategy.", 5),
+                    _model_order_text_block("c2_a", [516, 108, 723, 182], "Gold, another asset that does well when interest rates are lower, hit a record.", 6),
+                    _model_order_text_block("c2_b", [516, 410, 729, 628], "The bullish mood on rate cuts spurred investors to push up stockmarkets.", 7),
+                    _model_order_text_block("c3_a", [745, 107, 919, 145], "Scheme took their toll on personal finances.", 8),
+                    _model_order_text_block("c3_b", [746, 447, 960, 836], "After being warned about greenwashing, companies are now being told not to engage in AI-washing.", 9),
+                    _model_order_figure_block("bottom_fig", [288, 859, 958, 1298], 10),
+                ],
+            }
+        ],
+    }
+
+    document = RecoveryPipeline(
+        config=RecoveryConfig(
+            reading_order_strategy="model_order",
+            font_classification_enabled=False,
+        )
+    ).build_document(page)
+    page_obj = document.pages[0]
+    blocks = [blk for zone in page_obj.zones for blk in zone.blocks]
+    by_id = {blk.block_id: blk for blk in blocks}
+    multicol = next(zone for zone in page_obj.zones if any(block.block_id == "bottom_fig" for block in zone.blocks))
+
+    assert multicol.col_count == 4
+    assert by_id["c0_a"].col_index == 0
+    assert by_id["c1_a"].col_index == 1
+    assert by_id["c2_a"].col_index == 2
+    assert by_id["c3_b"].col_index == 3
+    assert by_id["bottom_fig"].spanned_cols == [1, 2, 3]
+    assert by_id["header"].style.alignment == "right"
+    assert by_id["masthead"].style.alignment == "left"
+
+
+def test_pipeline_repairs_anomalous_model_order_for_two_column_magazine():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1200,
+                "height": 1600,
+                "blocks": [
+                    _model_order_text_block("right_mid", [620, 720, 1120, 920], "right middle body", 0),
+                    _model_order_text_block("left_bottom", [80, 980, 560, 1210], "left bottom body", 1),
+                    _model_order_text_block("right_top", [620, 300, 1120, 520], "right top body", 2),
+                    _model_order_text_block("left_top", [80, 300, 560, 520], "left top body", 3),
+                    _model_order_text_block("title", [80, 90, 560, 150], "Magazine Title", 4, category="title"),
+                    _model_order_text_block("right_bottom", [620, 960, 1120, 1210], "right bottom body", 5),
+                ],
+            }
+        ],
+    }
+
+    pipeline = RecoveryPipeline(
+        config=RecoveryConfig(
+            reading_order_strategy="model_order",
+            model_order_geometric_repair_enabled=True,
+            font_classification_enabled=False,
+        )
+    )
+    doc = pipeline.build_document(page)
+    blocks = [blk for zone in doc.pages[0].zones for blk in zone.blocks]
+
+    assert [block.block_id for block in blocks] == [
+        "title",
+        "left_top",
+        "left_bottom",
+        "right_top",
+        "right_mid",
+        "right_bottom",
+    ]
+    assert doc.pages[0].attributes["rule_stats"]["model_order_geometric_repair"] == 1
+    assert all((block.attributes or {}).get("reading_order_strategy") == "model_order_geometric_repair" for block in blocks)
+
+
+def test_repaired_model_order_short_titles_anchor_to_following_text_column():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1000,
+                "height": 1500,
+                "blocks": [
+                    _model_order_figure_block("right_image_placeholder", [650, 260, 900, 520], 0),
+                    _model_order_text_block("left_body", [120, 300, 480, 430], "left body paragraph\nleft body more", 1),
+                    _model_order_text_block("short_title", [485, 230, 570, 260], "Section", 2, category="title"),
+                    _model_order_text_block("left_tail", [120, 455, 480, 560], "left tail paragraph", 3),
+                    _model_order_text_block("right_body", [620, 620, 900, 760], "right body paragraph", 4),
+                    _model_order_text_block("top_heading", [120, 80, 260, 120], "Top", 5, category="title"),
+                ],
+            }
+        ],
+    }
+
+    pipeline = RecoveryPipeline(
+        config=RecoveryConfig(
+            reading_order_strategy="model_order",
+            model_order_geometric_repair_enabled=True,
+            font_classification_enabled=False,
+        )
+    )
+    doc = pipeline.build_document(page)
+    blocks = {blk.block_id: blk for zone in doc.pages[0].zones for blk in zone.blocks}
+
+    assert doc.pages[0].attributes["rule_stats"]["model_order_geometric_repair"] == 1
+    assert blocks["short_title"].col_count == 2
+    assert blocks["short_title"].col_index == blocks["left_body"].col_index
+
+
+def test_model_order_geometric_repair_is_disabled_by_default_for_model_order_strategy():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1200,
+                "height": 1600,
+                "blocks": [
+                    _model_order_text_block("right_mid", [620, 720, 1120, 920], "right middle body", 0),
+                    _model_order_text_block("left_bottom", [80, 980, 560, 1210], "left bottom body", 1),
+                    _model_order_text_block("right_top", [620, 300, 1120, 520], "right top body", 2),
+                    _model_order_text_block("left_top", [80, 300, 560, 520], "left top body", 3),
+                    _model_order_text_block("title", [80, 90, 560, 150], "Magazine Title", 4, category="title"),
+                    _model_order_text_block("right_bottom", [620, 960, 1120, 1210], "right bottom body", 5),
+                ],
+            }
+        ],
+    }
+
+    pipeline = RecoveryPipeline(
+        config=RecoveryConfig(
+            reading_order_strategy="model_order",
+            font_classification_enabled=False,
+        )
+    )
+    doc = pipeline.build_document(page)
+    blocks = [blk for zone in doc.pages[0].zones for blk in zone.blocks]
+
+    assert [block.block_id for block in blocks] == [
+        "right_mid",
+        "left_bottom",
+        "right_top",
+        "left_top",
+        "title",
+        "right_bottom",
+    ]
+    assert doc.pages[0].attributes["rule_stats"]["model_order_geometric_repair"] == 0
+    assert all((block.attributes or {}).get("reading_order_strategy") == "model_order" for block in blocks)
+
+
+def test_weak_multicolumn_collapse_preserves_model_reading_order():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1653,
+                "height": 2339,
+                "blocks": [
+                    _model_order_text_block("header", [185, 274, 1198, 356], "HYDROLOGICAL PROCESSES", 0, category="header"),
+                    _model_order_text_block("paper_title", [200, 418, 1442, 527], "Daily streamflow modelling", 1, category="title"),
+                    _model_order_text_block("authors", [419, 574, 1223, 612], "Jin-Yong Choi Bernard Engel", 2),
+                    _model_order_text_block("affiliations", [232, 616, 1412, 673], "Department of Agricultural Engineering", 3),
+                    _model_order_text_block("abstract_title", [771, 784, 899, 817], "Abstract:", 4, category="title"),
+                    _model_order_text_block("abstract", [216, 835, 1428, 1368], "A cell-based long-term hydrological model " * 8, 5, category="abstract"),
+                    _model_order_text_block("keywords", [216, 1383, 1450, 1441], "KEY WORDS watershed modelling GIS", 6),
+                    _model_order_text_block("intro_title", [710, 1506, 934, 1537], "INTRODUCTION", 7, category="title"),
+                    _model_order_text_block("intro_1", [182, 1557, 1459, 1789], "Water resources development and watershed management " * 6, 8),
+                    _model_order_text_block("intro_2", [183, 1791, 1462, 1891], "Continuous models are useful " * 6, 9),
+                    _model_order_text_block("footnote", [187, 1937, 1457, 1991], "Correspondence to Jin-Yong Choi", 10, category="footnote"),
+                ],
+            }
+        ],
+    }
+
+    pipeline = RecoveryPipeline(
+        config=RecoveryConfig(
+            reading_order_strategy="model_order",
+            font_classification_enabled=False,
+        )
+    )
+    doc = pipeline.build_document(page)
+    blocks = [blk for zone in doc.pages[0].zones for blk in zone.blocks]
+
+    assert [block.block_id for block in blocks] == [
+        "header",
+        "paper_title",
+        "authors",
+        "affiliations",
+        "abstract_title",
+        "abstract",
+        "keywords",
+        "intro_title",
+        "intro_1",
+        "intro_2",
+        "footnote",
+    ]
 
 
 def test_pipeline_suppresses_visual_boxes_that_duplicate_text_regions():
@@ -138,6 +413,43 @@ def test_pipeline_suppresses_visual_boxes_that_duplicate_text_regions():
     assert by_id["section_title"].block_type == BlockType.TITLE
     assert by_id["real_formula"].block_type == BlockType.EQUATION
     assert stats["spurious_visual_suppressed"] == 2
+
+
+def test_pipeline_suppresses_footer_page_number_visual_container():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1102,
+                "height": 1631,
+                "blocks": [
+                    _text_block("body", [130, 1200, 990, 1370], "正文内容应保留。"),
+                    {
+                        **_figure_block("footer_page_number_box", [0, 1483, 250, 1554]),
+                        "attributes": {
+                            "nested_children": [
+                                {
+                                    "type": "page_number",
+                                    "category": "page_number",
+                                    "bbox": [140, 1504, 180, 1528],
+                                }
+                            ]
+                        },
+                    },
+                    _text_block("footer", [387, 1524, 675, 1550], "连锁药店店员中药基础训练手册", category="footer"),
+                ],
+            }
+        ],
+    }
+
+    document = RecoveryPipeline(config=RecoveryConfig(reading_order_strategy="xycutpp_hybrid")).build_document(page)
+    block_ids = {blk.block_id for zone in document.pages[0].zones for blk in zone.blocks}
+
+    assert "footer_page_number_box" not in block_ids
+    assert "body" in block_ids
+    assert "footer" in block_ids
 
 
 def _magazine_like_page() -> dict:
@@ -427,9 +739,9 @@ def test_magazine_like_page_under_unified_xycutpp_does_not_emit_project_flow_ids
     assert "phase_counts" in page.attributes.get("xycutpp_debug", {})
 
 
-def test_xycutpp_alias_strategies_share_the_same_core_order():
+def test_old_reading_order_strategy_names_are_hybrid_aliases():
     expected_ids = None
-    for strategy in ("auto", "xycutpp", "xycutpp_hybrid", "xycutpp_paper", "newspaper_hybrid"):
+    for strategy in ("legacy", "auto", "xycutpp", "xycutpp_hybrid", "xycutpp_paper", "newspaper_hybrid"):
         pipeline = RecoveryPipeline(config=RecoveryConfig(reading_order_strategy=strategy))
         document = pipeline.build_document(_magazine_like_page())
         page = document.pages[0]
@@ -615,7 +927,7 @@ def test_stable_multicol_alias_prefers_column_major_without_fragmenting_into_man
         ],
     }
 
-    pipeline = RecoveryPipeline(config=RecoveryConfig(reading_order_strategy="newspaper_hybrid"))
+    pipeline = RecoveryPipeline(config=RecoveryConfig(reading_order_strategy="xycutpp_hybrid"))
     document = pipeline.build_document(page)
     page_obj = document.pages[0]
     ids = [getattr(block, "block_id", "") for zone in page_obj.zones for block in zone.blocks]

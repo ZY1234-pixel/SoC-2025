@@ -19,4 +19,6 @@ class RenderContext:
     col_left_px: float = 0.0
     col_right_px: float = 0.0
     in_table_cell: bool = False
+    span_gap_pt: float = 0.0
+    local_visual_band: bool = False
     image_loader: Optional[Callable] = None

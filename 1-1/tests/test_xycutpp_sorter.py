@@ -842,51 +842,6 @@ def test_xycutpp_keeps_local_centered_title_before_right_side_figure():
     assert ids.index("title") < ids.index("fig")
 
 
-def test_xycutpp_uses_visual_side_column_when_body_text_is_left_heavy():
-    blocks = [
-        _text_block("chapter", (136, 172, 297, 204), BlockType.TITLE),
-        _text_block("left_source", (176, 275, 542, 300)),
-        _text_block("left_process", (136, 308, 616, 400)),
-        _text_block("left_quality", (136, 408, 617, 533)),
-        _figure_block("right_fig_0", (710, 316, 913, 485)),
-        _text_block("right_cap_0", (730, 540, 893, 565), BlockType.FIGURE_CAPTION),
-        _text_block("wide_desc_top", (134, 572, 993, 734)),
-        _text_block("left_store", (176, 740, 446, 767)),
-        _text_block("right_title_1", (522, 780, 604, 812), BlockType.TITLE),
-        _figure_block("right_fig_1", (634, 827, 991, 1079)),
-        _text_block("right_cap_1", (740, 1091, 887, 1117), BlockType.FIGURE_CAPTION),
-        _text_block("left_quality_2", (136, 889, 616, 982)),
-        _text_block("left_feature_2", (134, 989, 618, 1183)),
-        _text_block_with_text("right_title_2", (520, 1233, 604, 1264), "干姜", BlockType.TITLE),
-        _text_block_with_text("center_source_2", (176, 1276, 424, 1302), "【来源】姜科植物姜的根茎。"),
-        _text_block("wide_desc_bottom", (134, 1310, 994, 1370)),
-    ]
-
-    ordered = sort_layout(
-        blocks,
-        image_width=1102,
-        image_height=1631,
-        strategy="xycutpp",
-    )
-    by_id = {block.block_id: block for block in ordered}
-
-    assert max(block.col_count for block in ordered) == 2
-    assert by_id["right_fig_1"].spanned_cols == [1]
-    assert by_id["right_cap_1"].spanned_cols == [1]
-    assert by_id["right_title_1"].spanned_cols == [1]
-    assert by_id["right_title_2"].spanned_cols == [0, 1]
-    assert by_id["center_source_2"].spanned_cols == [0, 1]
-    assert by_id["wide_desc_top"].spanned_cols == [0, 1]
-    assert by_id["wide_desc_bottom"].spanned_cols == [0, 1]
-    ids = [block.block_id for block in ordered]
-    assert ids.index("left_quality") < ids.index("right_fig_0")
-    assert ids.index("right_fig_0") < ids.index("wide_desc_top")
-    assert ids.index("right_cap_0") < ids.index("wide_desc_top")
-    assert ids.index("left_feature_2") < ids.index("right_fig_1")
-    assert ids.index("right_title_1") < ids.index("right_fig_1")
-    assert ids.index("right_cap_1") < ids.index("right_title_2") < ids.index("center_source_2")
-
-
 def test_xycutpp_defers_right_side_figure_family_until_after_continuing_body():
     blocks = [
         _text_block("chapter", (120, 80, 320, 125), BlockType.TITLE),

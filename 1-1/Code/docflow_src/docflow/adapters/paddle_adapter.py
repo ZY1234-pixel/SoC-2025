@@ -34,6 +34,26 @@ class PaddleAdapter(BaseAdapter):
 
     # PaddleOCR 类型 → v2.0 类别映射
     _CATEGORY_MAP: Dict[str, str] = {
+        "abstract": "abstract",
+        "algorithm": "code",
+        "aside_text": "text",
+        "chart": "figure",
+        "content": "text",
+        "display_formula": "formula",
+        "doc_title": "title",
+        "figure_title": "figure_caption",
+        "footer_image": "figure",
+        "footnote": "footnote",
+        "formula_number": "formula",
+        "header_image": "figure",
+        "image": "figure",
+        "inline_formula": "formula",
+        "number": "page_number",
+        "paragraph_title": "title",
+        "reference_content": "reference",
+        "seal": "figure",
+        "vertical_text": "text",
+        "vision_footnote": "footnote",
         "text": "text",
         "title": "title",
         "table": "table",
@@ -51,6 +71,9 @@ class PaddleAdapter(BaseAdapter):
         "text", "title", "reference", "header", "footer",
         "figure_caption", "table_caption", "abstract",
         "table_footnote", "formula_caption", "footnote",
+        "algorithm", "aside_text", "content", "doc_title",
+        "paragraph_title", "figure_title", "reference_content",
+        "vertical_text", "vision_footnote",
     })
     _DEDUP_CATEGORIES = frozenset({
         "text",
@@ -63,6 +86,10 @@ class PaddleAdapter(BaseAdapter):
         "table_caption",
         "table_footnote",
         "formula_caption",
+        "abstract",
+        "code",
+        "footnote",
+        "page_number",
     })
     _CAPTION_FAMILY = frozenset({
         "figure_caption",
@@ -78,6 +105,63 @@ class PaddleAdapter(BaseAdapter):
         "table_caption",
         "table_footnote",
         "formula_caption",
+        "abstract",
+        "code",
+        "footnote",
+        "page_number",
+    })
+    _GENERIC_PARENT_RAW_TYPES = frozenset({
+        "content",
+        "text",
+        "aside_text",
+        "vertical_text",
+        "algorithm",
+    })
+    _GENERIC_PARENT_CATEGORIES = frozenset({
+        "text",
+        "code",
+    })
+    _SEMANTIC_CONTAINER_CATEGORIES = frozenset({
+        "table",
+        "figure",
+        "header",
+        "footer",
+        "reference",
+        "abstract",
+    })
+    _SEMANTIC_CONTAINER_RAW_TYPES = frozenset({
+        "table",
+        "image",
+        "chart",
+        "header",
+        "header_image",
+        "footer",
+        "footer_image",
+        "reference",
+        "abstract",
+        "seal",
+    })
+    _TITLE_LIKE_RAW_TYPES = frozenset({
+        "doc_title",
+        "paragraph_title",
+        "figure_title",
+        "table_caption",
+        "figure_caption",
+    })
+    _FORMULA_RAW_TYPES = frozenset({
+        "display_formula",
+        "inline_formula",
+        "formula_number",
+        "equation",
+        "formula",
+    })
+    _FORMULA_NUMBER_RE = re.compile(r"^\s*\(?\s*\d{1,3}[a-zA-Z]?\s*\)?\s*$")
+    _TOP_LEVEL_PRESERVE_RAW_TYPES = frozenset({
+        "doc_title",
+        "paragraph_title",
+        "figure_title",
+        "table_caption",
+        "figure_caption",
     })
     _FIGURE_CAPTION_RE = re.compile(
         r"^\s*(?:图|fig(?:ure)?\.?)\s*[\d一二三四五六七八九十]+(?:[-－—]\d+)?\s*\S*",
@@ -108,20 +192,27 @@ class PaddleAdapter(BaseAdapter):
         """
         h, w = image.shape[:2]
         blocks: List[Dict[str, Any]] = []
+        results = self._attach_model_order(results)
         results = self._recall_missing_figures_from_captions(results, image)
         filtered_results, cleanup_report = self._suppress_nested_duplicates(results)
+        filtered_results, footer_noise_report = self._drop_footer_table_noise(filtered_results, w, h)
         filtered_results, trim_report = self._trim_carry_over_text_regions(filtered_results)
+        filtered_results, line_dedup_report = self._trim_duplicate_ocr_lines(filtered_results)
         filtered_results = [
             self._trim_title_leading_formula_number(region)
             for region in filtered_results
         ]
+        cleanup_report.extend(footer_noise_report)
         cleanup_report.extend(trim_report)
+        cleanup_report.extend(line_dedup_report)
         page_attributes = None
         if cleanup_report:
             page_attributes = {
                 "cleanup_removed_count": len(cleanup_report),
                 "cleanup_rule_counts": dict(Counter(item["reason"] for item in cleanup_report)),
             }
+
+        filtered_results = self._ensure_model_order(filtered_results)
 
         for idx, region in enumerate(filtered_results):
             block = self._convert_region(region, w, h, idx)
@@ -143,6 +234,107 @@ class PaddleAdapter(BaseAdapter):
                 }
             ],
         }
+
+    @staticmethod
+    def _attach_model_order(results: list) -> list:
+        """Persist upstream model order and interpolate OCR-recall regions."""
+        ordered: list = []
+        for index, region in enumerate(results or []):
+            if not isinstance(region, dict):
+                ordered.append(region)
+                continue
+            cloned = dict(region)
+            if not PaddleAdapter._has_numeric_model_order(cloned):
+                cloned.pop("model_order", None)
+            ordered.append(cloned)
+
+        dict_regions = [region for region in ordered if isinstance(region, dict)]
+        if not dict_regions:
+            return ordered
+        if not any(PaddleAdapter._has_numeric_model_order(region) for region in dict_regions):
+            for index, region in enumerate(dict_regions):
+                region["model_order"] = float(index)
+            return ordered
+
+        geom_order = sorted(
+            dict_regions,
+            key=lambda region: PaddleAdapter._region_geometry_key(region),
+        )
+        pending: list[dict] = []
+        prev_order: float | None = None
+
+        def flush_missing(next_order: float | None) -> None:
+            nonlocal pending, prev_order
+            if not pending:
+                return
+            count = len(pending)
+            if prev_order is None and next_order is None:
+                start = 0.0
+                step = 1.0
+            elif prev_order is None:
+                step = 1.0
+                start = float(next_order) - count * step
+            elif next_order is None:
+                step = 1.0
+                start = float(prev_order) + step
+            else:
+                step = (float(next_order) - float(prev_order)) / float(count + 1)
+                if step <= 0:
+                    step = 0.01
+                start = float(prev_order) + step
+            for offset, region in enumerate(pending):
+                region["model_order"] = start + step * offset
+            pending = []
+
+        for region in geom_order:
+            if PaddleAdapter._has_numeric_model_order(region):
+                current_order = PaddleAdapter._region_model_order(region, 0.0)
+                flush_missing(current_order)
+                prev_order = current_order
+            else:
+                pending.append(region)
+        flush_missing(None)
+        return ordered
+
+    @staticmethod
+    def _ensure_model_order(results: list) -> list:
+        """Keep PP-DocLayoutV3 reading order stable after cleanup passes."""
+        ordered = list(results or [])
+        if not ordered:
+            return ordered
+        order_values = []
+        for index, region in enumerate(ordered):
+            try:
+                order_values.append((PaddleAdapter._region_model_order(region, index), index, region))
+            except (TypeError, ValueError):
+                return ordered
+        order_values.sort(key=lambda item: (item[0], item[1]))
+        return [item[2] for item in order_values]
+
+    @staticmethod
+    def _region_model_order(region: dict, fallback: float) -> float:
+        try:
+            return float(region.get("model_order"))
+        except (AttributeError, TypeError, ValueError):
+            return float(fallback)
+
+    @staticmethod
+    def _has_numeric_model_order(region: dict) -> bool:
+        try:
+            float(region.get("model_order"))
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return True
+
+    @staticmethod
+    def _region_geometry_key(region: dict) -> tuple[float, float]:
+        bbox = region.get("bbox") if isinstance(region, dict) else None
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            return (float("inf"), float("inf"))
+        try:
+            return (float(bbox[1]), float(bbox[0]))
+        except (TypeError, ValueError):
+            return (float("inf"), float("inf"))
 
     def _suppress_nested_duplicates(self, results: list) -> tuple[list, list[dict]]:
         """抑制大框包小框的重复区域。
@@ -168,6 +360,7 @@ class PaddleAdapter(BaseAdapter):
                 {
                     "index": index,
                     "region": region,
+                    "raw_type": type_name,
                     "category": mapped,
                     "bbox": bbox,
                     "text": text,
@@ -175,6 +368,7 @@ class PaddleAdapter(BaseAdapter):
                     "area": area,
                 }
             )
+        self._annotate_contained_child_counts(enriched)
 
         # 同类中优先保留信息量更大、得分更高的块
         ranked = sorted(enriched, key=self._dedup_sort_key, reverse=True)
@@ -187,24 +381,92 @@ class PaddleAdapter(BaseAdapter):
                 continue
             duplicate = False
             duplicate_reason = None
-            for existing in kept:
+            duplicate_existing = None
+            duplicate_existing_index = -1
+            for existing_index, existing in enumerate(kept):
                 duplicate_reason = self._is_nested_duplicate(candidate, existing)
                 if duplicate_reason is not None:
                     duplicate = True
+                    duplicate_existing = existing
+                    duplicate_existing_index = existing_index
                     break
             if not duplicate:
                 kept.append(candidate)
             else:
+                if (
+                    duplicate_existing is not None
+                    and duplicate_existing_index >= 0
+                    and self._should_replace_text_duplicate(candidate, duplicate_existing, duplicate_reason)
+                ):
+                    kept[duplicate_existing_index] = candidate
+                    report.append(
+                        {
+                            "reason": "nested_text_duplicate_replaced_shorter",
+                            "removed_index": duplicate_existing["index"],
+                            "removed_category": duplicate_existing["category"],
+                            "parent_index": candidate["index"],
+                            "parent_category": candidate["category"],
+                        }
+                    )
+                    continue
+                if duplicate_existing is not None and duplicate_reason in {
+                    "semantic_container_child",
+                    "table_container_child",
+                    "page_strip_container_child",
+                }:
+                    self._attach_nested_child(
+                        duplicate_existing["region"],
+                        candidate["region"],
+                        reason=duplicate_reason,
+                    )
                 report.append(
                     {
                         "reason": duplicate_reason,
                         "removed_index": candidate["index"],
                         "removed_category": candidate["category"],
+                        "parent_index": duplicate_existing["index"] if duplicate_existing is not None else None,
+                        "parent_category": duplicate_existing["category"] if duplicate_existing is not None else None,
                     }
                 )
 
         kept.sort(key=lambda item: item["index"])
         return [item["region"] for item in kept], report
+
+    @classmethod
+    def _should_replace_text_duplicate(cls, candidate: dict, existing: dict, reason: Optional[str]) -> bool:
+        if reason not in {"nested_text_duplicate", "similar_text_duplicate", "cross_category_text_duplicate", "cross_category_similar_text_duplicate"}:
+            return False
+        if (
+            candidate.get("category") not in cls._TEXTLIKE_DEDUP_CATEGORIES
+            or existing.get("category") not in cls._TEXTLIKE_DEDUP_CATEGORIES
+        ):
+            return False
+        cand_score = float(candidate.get("score", 0.0) or 0.0)
+        exist_score = float(existing.get("score", 0.0) or 0.0)
+        if cand_score + 0.12 < exist_score:
+            return False
+
+        cand_lines = [
+            cls._normalize_text(line)
+            for line in cls._extract_region_line_texts(candidate.get("region", {}))
+            if cls._normalize_text(line)
+        ]
+        exist_lines = [
+            cls._normalize_text(line)
+            for line in cls._extract_region_line_texts(existing.get("region", {}))
+            if cls._normalize_text(line)
+        ]
+        if not cand_lines or not exist_lines or len(cand_lines) <= len(exist_lines):
+            return False
+
+        exist_set = set(exist_lines)
+        extra_lines = [line for line in cand_lines if line not in exist_set]
+        if not extra_lines:
+            return False
+
+        cand_text = str(candidate.get("text", "") or "")
+        exist_text = str(existing.get("text", "") or "")
+        return len(cand_text) >= len(exist_text) + max(8, len(exist_text) // 5)
 
     @classmethod
     def _recall_missing_figures_from_captions(
@@ -235,6 +497,11 @@ class PaddleAdapter(BaseAdapter):
             for region in results
             if str(region.get("type", "")).lower() == "figure"
         ]
+        existing_text_regions = [
+            region
+            for region in results
+            if str(region.get("type", "")).lower() in cls._TEXT_TYPES
+        ]
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
 
         for region in results:
@@ -247,6 +514,8 @@ class PaddleAdapter(BaseAdapter):
             if candidate is None:
                 continue
             if any(cls._overlap_ratio(candidate, box) >= 0.65 for box in existing_figures):
+                continue
+            if cls._overlaps_high_confidence_text_region(candidate, existing_text_regions):
                 continue
             if any(cls._overlap_ratio(candidate, cls._safe_bbox(item.get("bbox"))) >= 0.65 for item in recalled):
                 continue
@@ -264,6 +533,7 @@ class PaddleAdapter(BaseAdapter):
                 "score": 0.42,
                 "res": [],
                 "img": image[y1:y2, x1:x2].copy(),
+                "model_order": cls._region_model_order(region, 0.0) + 0.25,
             }
             recalled.append(recalled_region)
             existing_figures.append(recalled_region["bbox"])
@@ -271,6 +541,29 @@ class PaddleAdapter(BaseAdapter):
         if not recalled:
             return list(results)
         return list(results) + recalled
+
+    @classmethod
+    def _overlaps_high_confidence_text_region(cls, candidate_box: List[float], text_regions: List[dict]) -> bool:
+        candidate_area = max(
+            1.0,
+            (float(candidate_box[2]) - float(candidate_box[0]))
+            * (float(candidate_box[3]) - float(candidate_box[1])),
+        )
+        for region in text_regions:
+            text_box = cls._safe_bbox(region.get("bbox"))
+            text = cls._normalize_text(cls._extract_region_text(region))
+            if len(text) < 80:
+                continue
+            score = float(region.get("score", 0.0) or 0.0)
+            if score < 0.80:
+                continue
+            overlap_w = max(0.0, min(float(candidate_box[2]), text_box[2]) - max(float(candidate_box[0]), text_box[0]))
+            overlap_h = max(0.0, min(float(candidate_box[3]), text_box[3]) - max(float(candidate_box[1]), text_box[1]))
+            overlap_area = overlap_w * overlap_h
+            text_area = max(1.0, (text_box[2] - text_box[0]) * (text_box[3] - text_box[1]))
+            if overlap_area / text_area >= 0.62 or overlap_area / candidate_area >= 0.50:
+                return True
+        return False
 
     @classmethod
     def _is_figure_caption_like(cls, region: dict) -> bool:
@@ -359,7 +652,7 @@ class PaddleAdapter(BaseAdapter):
         return candidates[0][2]
 
     @classmethod
-    def _dedup_sort_key(cls, item: dict) -> tuple[float, float, float, float]:
+    def _dedup_sort_key(cls, item: dict) -> tuple[float, ...]:
         """Category-aware preference for nested-duplicate resolution.
 
         For text-like regions, detection confidence should dominate over raw
@@ -373,14 +666,135 @@ class PaddleAdapter(BaseAdapter):
         area = float(item.get("area", 0.0) or 0.0)
         index_bias = -float(item.get("index", 0))
         category = str(item.get("category", ""))
+        raw_type = str(item.get("raw_type", ""))
+        if cls._is_semantic_container_item(item):
+            return (3.0, score, area, text_len, index_bias)
+        if cls._is_generic_parent_item(item):
+            # Coarse V3 parent regions are useful only when no finer children
+            # exist, so let specific child boxes win containment decisions.
+            return (0.25, score, text_len, area, index_bias)
         if category in cls._TEXTLIKE_DEDUP_CATEGORIES:
             text = str(item.get("text", "") or "").strip()
+            if raw_type in cls._TITLE_LIKE_RAW_TYPES:
+                return (2.4, score, text_len, area, index_bias)
             if category == "title" and text.endswith(("。", "！", "？", ".", "!", "?")):
                 return (1.95, score, text_len, area, index_bias)
             return (2.0, score, text_len, area, index_bias)
         if category == "formula":
             return (1.0, score, area, text_len, index_bias)
         return (1.0, area, score, text_len, index_bias)
+
+    @classmethod
+    def _annotate_contained_child_counts(cls, items: List[dict]) -> None:
+        for parent in items:
+            count = 0
+            specific_count = 0
+            for child in items:
+                if child is parent:
+                    continue
+                if cls._is_containment_pair(parent, child):
+                    count += 1
+                    if cls._is_specific_child_item(child):
+                        specific_count += 1
+            parent["contained_child_count"] = count
+            parent["contained_specific_child_count"] = specific_count
+
+    @classmethod
+    def _is_containment_pair(
+        cls,
+        parent: dict,
+        child: dict,
+        *,
+        child_cover_threshold: float = 0.85,
+        area_ratio_threshold: float = 1.5,
+    ) -> bool:
+        parent_area = max(1.0, float(parent.get("area", 0.0) or 0.0))
+        child_area = max(1.0, float(child.get("area", 0.0) or 0.0))
+        if parent_area <= child_area * area_ratio_threshold:
+            return False
+        return cls._contain_ratio(child["bbox"], parent["bbox"]) >= child_cover_threshold
+
+    @classmethod
+    def _is_semantic_container_item(cls, item: dict) -> bool:
+        raw_type = str(item.get("raw_type", ""))
+        category = str(item.get("category", ""))
+        if raw_type in cls._TOP_LEVEL_PRESERVE_RAW_TYPES:
+            return False
+        return (
+            raw_type in cls._SEMANTIC_CONTAINER_RAW_TYPES
+            or category in cls._SEMANTIC_CONTAINER_CATEGORIES
+        )
+
+    @classmethod
+    def _is_generic_parent_item(cls, item: dict) -> bool:
+        raw_type = str(item.get("raw_type", ""))
+        category = str(item.get("category", ""))
+        if raw_type in cls._TOP_LEVEL_PRESERVE_RAW_TYPES:
+            return False
+        if raw_type == "content":
+            return True
+        if raw_type in {"text", "aside_text", "vertical_text", "algorithm"}:
+            if cls._is_high_value_text_item(item):
+                return False
+            return int(item.get("contained_specific_child_count", 0) or 0) >= 2
+        return (
+            category in cls._GENERIC_PARENT_CATEGORIES
+            and int(item.get("contained_specific_child_count", 0) or 0) >= 2
+        )
+
+    @staticmethod
+    def _is_high_value_text_item(item: dict) -> bool:
+        text = str(item.get("text", "") or "").strip()
+        score = float(item.get("score", 0.0) or 0.0)
+        return score >= 0.70 and len(text) >= 30
+
+    @classmethod
+    def _is_specific_child_item(cls, item: dict) -> bool:
+        raw_type = str(item.get("raw_type", ""))
+        category = str(item.get("category", ""))
+        if raw_type in cls._TOP_LEVEL_PRESERVE_RAW_TYPES or raw_type in cls._FORMULA_RAW_TYPES:
+            return True
+        return category in {
+            "text",
+            "title",
+            "code",
+            "formula",
+            "figure_caption",
+            "table_caption",
+            "table_footnote",
+            "footnote",
+            "page_number",
+            "reference",
+            "table",
+            "figure",
+        }
+
+    @classmethod
+    def _attach_nested_child(cls, parent_region: dict, child_region: dict, *, reason: str) -> None:
+        attributes = parent_region.setdefault("attributes", {})
+        if not isinstance(attributes, dict):
+            attributes = {}
+            parent_region["attributes"] = attributes
+        children = attributes.setdefault("nested_children", [])
+        if not isinstance(children, list):
+            children = []
+            attributes["nested_children"] = children
+        child_type = str(child_region.get("type", ""))
+        child_summary: Dict[str, Any] = {
+            "type": child_type,
+            "category": cls._CATEGORY_MAP.get(child_type.lower(), child_type.lower()),
+            "bbox": [float(v) for v in cls._safe_bbox(child_region.get("bbox"))],
+            "score": float(child_region.get("score", 0.0) or 0.0),
+            "reason": reason,
+        }
+        text = cls._normalize_text(cls._extract_region_text(child_region))
+        if text:
+            child_summary["text"] = text[:240]
+        for key in ("model_order", "raw_type", "layout_model"):
+            if child_region.get(key) is not None:
+                child_summary[key] = child_region.get(key)
+        children.append(child_summary)
+        attributes["nested_child_count"] = len(children)
 
     @classmethod
     def _trim_carry_over_text_regions(
@@ -439,7 +853,150 @@ class PaddleAdapter(BaseAdapter):
         ]
         return trimmed, report
 
+    @classmethod
+    def _drop_footer_table_noise(
+        cls,
+        results: List[dict],
+        page_w: int,
+        page_h: int,
+    ) -> tuple[List[dict], List[Dict[str, Any]]]:
+        if not results:
+            return list(results or []), []
+
+        kept: List[dict] = []
+        report: List[Dict[str, Any]] = []
+        for index, region in enumerate(results):
+            if not cls._is_footer_table_noise(region, page_w, page_h):
+                kept.append(region)
+                continue
+            report.append(
+                {
+                    "reason": "footer_table_noise_drop",
+                    "removed_index": index,
+                    "removed_category": "table",
+                }
+            )
+        return kept, report
+
+    @classmethod
+    def _is_footer_table_noise(cls, region: dict, page_w: int, page_h: int) -> bool:
+        if str(region.get("type", "")).lower() != "table":
+            return False
+        bbox = cls._safe_bbox(region.get("bbox"))
+        width = max(0.0, bbox[2] - bbox[0])
+        height = max(0.0, bbox[3] - bbox[1])
+        if page_w <= 0 or page_h <= 0 or width <= 0 or height <= 0:
+            return False
+        score = float(region.get("score", 0.0) or 0.0)
+        near_footer = bbox[1] >= page_h * 0.84 and bbox[3] >= page_h * 0.95
+        wide = width >= page_w * 0.72
+        shallow = height <= page_h * 0.16
+        if not (score <= 0.45 and near_footer and wide and shallow):
+            return False
+        text = cls._normalize_text(cls._extract_region_text(region))
+        return len(text) <= 40
+
+    @classmethod
+    def _trim_duplicate_ocr_lines(
+        cls,
+        results: List[dict],
+    ) -> tuple[List[dict], List[Dict[str, Any]]]:
+        if len(results) < 2:
+            return results, []
+
+        entries = [{"order": index, "region": cls._clone_region(region)} for index, region in enumerate(results)]
+        report: List[Dict[str, Any]] = []
+        page_w = max(
+            (cls._safe_bbox(item["region"].get("bbox"))[2] for item in entries if item.get("region")),
+            default=1.0,
+        )
+
+        seen_lines: List[tuple[str, List[float], int]] = []
+        for entry in entries:
+            region = entry["region"]
+            if region is None:
+                continue
+            rtype = str(region.get("type", "")).lower()
+            if rtype not in cls._TEXT_TYPES:
+                continue
+            res = region.get("res")
+            if not isinstance(res, list) or len(res) < 2:
+                for item in res or []:
+                    text = cls._normalize_text(cls._extract_item_text(item))
+                    bbox = cls._bbox_from_single_region_res(item)
+                    if text and bbox is not None:
+                        seen_lines.append((text, bbox, entry["order"]))
+                continue
+
+            kept = []
+            removed = 0
+            for item in res:
+                text = cls._normalize_text(cls._extract_item_text(item))
+                bbox = cls._bbox_from_single_region_res(item)
+                duplicate = False
+                if text and bbox is not None and len(text) >= 8:
+                    for prev_text, prev_bbox, _prev_order in reversed(seen_lines[-80:]):
+                        if prev_text != text:
+                            continue
+                        if cls._overlap_ratio(bbox, prev_bbox) >= 0.90:
+                            duplicate = True
+                            break
+                if duplicate:
+                    removed += 1
+                    continue
+                kept.append(item)
+
+            if removed:
+                if kept:
+                    region["res"] = kept
+                    bbox = cls._bbox_from_region_res(kept)
+                    if bbox is not None:
+                        region["bbox"] = bbox
+                    text_len = sum(len(cls._normalize_text(cls._extract_item_text(item))) for item in kept)
+                    width = max(0.0, cls._safe_bbox(region.get("bbox"))[2] - cls._safe_bbox(region.get("bbox"))[0])
+                    score = float(region.get("score", 0.0) or 0.0)
+                    if text_len <= 12 and width <= page_w * 0.18 and score <= 0.65:
+                        entry["region"] = None
+                        report.append({"reason": "text_fragment_carryover_drop", "removed_lines": removed})
+                        continue
+                    report.append({"reason": "duplicate_ocr_line_trim", "removed_lines": removed})
+                else:
+                    entry["region"] = None
+                    report.append({"reason": "duplicate_ocr_line_drop", "removed_lines": removed})
+                    continue
+
+            for item in (region.get("res") or []):
+                text = cls._normalize_text(cls._extract_item_text(item))
+                bbox = cls._bbox_from_single_region_res(item)
+                if text and bbox is not None:
+                    seen_lines.append((text, bbox, entry["order"]))
+
+        trimmed = [
+            item["region"]
+            for item in sorted(entries, key=lambda item: item["order"])
+            if item["region"] is not None
+        ]
+        return trimmed, report
+
     def _is_nested_duplicate(self, candidate: dict, existing: dict) -> Optional[str]:
+        if self._is_containment_pair(existing, candidate):
+            if (
+                self._is_semantic_container_item(existing)
+                and not self._is_generic_parent_item(existing)
+                and candidate["raw_type"] not in self._TOP_LEVEL_PRESERVE_RAW_TYPES
+            ):
+                if existing["category"] == "table":
+                    return "table_container_child"
+                if existing["category"] in {"header", "footer"} or existing["raw_type"] in {"header", "footer"}:
+                    return "page_strip_container_child"
+                return "semantic_container_child"
+            if self._is_generic_parent_item(existing):
+                return None
+
+        if self._is_containment_pair(candidate, existing):
+            if self._is_generic_parent_item(candidate):
+                return "generic_parent_suppressed"
+
         same_category = candidate["category"] == existing["category"]
         same_caption_family = (
             candidate["category"] in self._CAPTION_FAMILY
@@ -467,6 +1024,11 @@ class PaddleAdapter(BaseAdapter):
             # 典型场景：低分 title 检测出 "瓦的北红海省博物馆。"，但高分 text
             # 已包含完整段落 "瓦的北红海省博物馆。博物馆二层陈列着..."
             if candidate["text"] and existing["text"]:
+                if (
+                    existing["category"] in {"figure", "table"}
+                    and candidate["category"] in self._TEXTLIKE_DEDUP_CATEGORIES
+                ):
+                    return None
                 short_text, long_text = sorted(
                     (candidate["text"], existing["text"]), key=len,
                 )
@@ -802,12 +1364,29 @@ class PaddleAdapter(BaseAdapter):
             "confidence": confidence,
             "order": index,
         }
+        attributes: Dict[str, Any] = {}
+        if isinstance(region.get("attributes"), dict):
+            attributes.update(region["attributes"])
+        for source_key, target_key in (
+            ("raw_type", "raw_layout_label"),
+            ("model_order", "model_order"),
+            ("layout_model", "layout_model"),
+        ):
+            value = region.get(source_key)
+            if value is not None:
+                attributes[target_key] = value
+        if attributes:
+            block["attributes"] = attributes
 
         res = region.get("res")
 
         # -- 文本类型：将 OCR 结果转换为 text_lines ------------------
         if type_name in self._TEXT_TYPES:
             text_lines = self._convert_text_lines(res)
+            if category == "formula" and len(text_lines) == 1:
+                only_text = self._normalize_text(text_lines[0].get("text", ""))
+                if self._FORMULA_NUMBER_RE.match(only_text or ""):
+                    block["category"] = "formula_number"
             block["text_lines"] = text_lines
             block["text"] = "\n".join(
                 tl["text"] for tl in text_lines if tl.get("text")
@@ -820,11 +1399,18 @@ class PaddleAdapter(BaseAdapter):
         elif type_name == "table":
             if isinstance(res, dict) and "html" in res:
                 block["html"] = res["html"]
+            if isinstance(res, dict) and "cells" in res and "html" not in block:
+                block["html"] = self._table_cells_to_html(res)
 
         # -- 公式：提取 LaTeX ----------------------------------------
-        elif type_name == "equation":
+        elif category == "formula":
             if isinstance(res, dict) and "latex" in res:
                 block["latex"] = res["latex"]
+            elif isinstance(res, list) and res:
+                formula_number = self._extract_formula_number_text(res)
+                if formula_number:
+                    block["latex"] = ""
+                    attributes["formula_number_text"] = formula_number
 
         # -- 将 ROI 图像编码为 base64 PNG ---------------------------------
         roi_img = region.get("img")
@@ -834,6 +1420,44 @@ class PaddleAdapter(BaseAdapter):
                 block["image_base64"] = encoded
 
         return block
+
+    @classmethod
+    def _extract_formula_number_text(cls, res: Any) -> str:
+        if not isinstance(res, list):
+            return ""
+        for item in res:
+            text = cls._normalize_text(cls._extract_item_text(item))
+            if cls._FORMULA_NUMBER_RE.match(text or ""):
+                return text
+        return ""
+
+    @staticmethod
+    def _table_cells_to_html(res: dict) -> str:
+        cells = res.get("cells")
+        if not isinstance(cells, list) or not cells:
+            return ""
+        rows: dict[int, list[str]] = {}
+        max_col = 0
+        for cell in cells:
+            if not isinstance(cell, dict):
+                continue
+            row_idx = int(cell.get("row", cell.get("row_idx", 0)) or 0)
+            col_idx = int(cell.get("col", cell.get("col_idx", 0)) or 0)
+            text = str(cell.get("text", "") or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            rows.setdefault(row_idx, [])
+            while len(rows[row_idx]) <= col_idx:
+                rows[row_idx].append("")
+            rows[row_idx][col_idx] = f"<td>{text}</td>"
+            max_col = max(max_col, col_idx)
+        if not rows:
+            return ""
+        html_rows = []
+        for row_idx in sorted(rows):
+            cols = rows[row_idx]
+            while len(cols) <= max_col:
+                cols.append("<td></td>")
+            html_rows.append(f"<tr>{''.join(cols)}</tr>")
+        return f"<table>{''.join(html_rows)}</table>"
 
     # ------------------------------------------------------------------
     # 辅助方法

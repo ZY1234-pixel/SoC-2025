@@ -50,7 +50,8 @@ class TextDetector(object):
             logger = get_logger()
         self.args = args
         self.det_algorithm = args.det_algorithm
-        self.use_onnx = args.use_onnx
+        self.use_onnx = bool(args.use_onnx) or str(args.det_model_dir or "").lower().endswith(".onnx")
+        args.use_onnx = self.use_onnx
         pre_process_list = [
             {
                 "DetResizeForTest": {
@@ -148,6 +149,7 @@ class TextDetector(object):
             self.output_tensors,
             self.config,
         ) = utility.create_predictor(args, "det", logger)
+        args.use_onnx = False
 
         if self.use_onnx:
             img_h, img_w = self.input_tensor.shape[2:]

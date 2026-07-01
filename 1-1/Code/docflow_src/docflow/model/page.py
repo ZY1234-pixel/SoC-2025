@@ -262,11 +262,25 @@ class Page:
         # ── 右边距：所有区块的 15th 百分位数 ──
         mr_raw = _pct([self.page_width_pt - b.bbox.x2 * sx for b in blocks], 0.15)
 
-        # ── 对称化：取较大边距为基准，左右统一 ──
-        # 大多数文档（学术/教材/书籍）使用对称页边距。
-        # 若分别计算，内容会偏向边距小的一侧，视觉上"挤压"另一边。
-        # 以较大边距为准，确保内容居中。
-        margin_lr = max(ml_raw, mr_raw)
+        # ── 对称化：普通文档取较大边距为基准，左右统一 ──
+        # 大多数文档（学术/教材/书籍）使用对称页边距；但横版报纸/杂志
+        # 往往是满版多栏，内容接近左右纸边。若此时仍用较大边距对称化，
+        # 会显著压窄版心，导致四栏字号和图片比例整体失真。
+        min_x = min(float(b.bbox.x1) for b in blocks)
+        max_x2 = max(float(b.bbox.x2) for b in blocks)
+        full_bleed_dense = (
+            self.orientation == "landscape"
+            and len(blocks) >= 12
+            and min_x <= page_w * 0.035
+            and max_x2 >= page_w * 0.965
+        )
+        if full_bleed_dense:
+            margin_left_raw = min_x * sx
+            margin_right_raw = self.page_width_pt - max_x2 * sx
+        else:
+            margin_lr = max(ml_raw, mr_raw)
+            margin_left_raw = margin_lr
+            margin_right_raw = margin_lr
 
         # ── 上边距：顶部 15% 区域内块的最小 y1 ──
         top_y = page_h * 0.15
@@ -286,19 +300,21 @@ class Page:
             mb = (self.page_height_pt - max_y2 * sy)
 
         # 限制在合理范围：
-        # 左右边距至少 36pt（~12.7mm），避免内容从侧边溢出
+        # 普通文档左右边距至少 36pt；满版横向多栏页允许更紧的 18pt，
+        # 以保留原图版心比例。
         # 上下边距至少 24pt（~8.5mm）
         # 所有边距至多 120pt（~42mm）
         def _clamp_lr(val: float) -> float:
-            return max(36.0, min(120.0, val))
+            min_lr = 18.0 if full_bleed_dense else 36.0
+            return max(min_lr, min(120.0, val))
 
         def _clamp_tb(val: float) -> float:
             # 短幅横版页面（报纸等）内容密集，需要更多可用高度
             min_tb = 24.0 if self.page_height_pt < 700 else 36.0
             return max(min_tb, min(120.0, val))
 
-        self.margin_left_pt = _clamp_lr(margin_lr)
-        self.margin_right_pt = _clamp_lr(margin_lr)
+        self.margin_left_pt = _clamp_lr(margin_left_raw)
+        self.margin_right_pt = _clamp_lr(margin_right_raw)
         self.margin_top_pt = _clamp_tb(mt)
         self.margin_bottom_pt = _clamp_tb(mb)
 

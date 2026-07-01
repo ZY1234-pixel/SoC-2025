@@ -163,6 +163,14 @@ def _x_center(block: "Block") -> float:
     return (float(block.bbox.x1) + float(block.bbox.x2)) * 0.5
 
 
+def _robust_column_bounds(blocks: List["Block"]) -> Tuple[float, float]:
+    """Return ``(min_x1, robust_x2)`` using the second-largest x2 as outlier guard."""
+    x1_min = min(b.bbox.x1 for b in blocks)
+    x2_values = sorted([b.bbox.x2 for b in blocks], reverse=True)
+    x2_robust = x2_values[1] if len(x2_values) > 1 else x2_values[0]
+    return x1_min, x2_robust
+
+
 def _is_textlike_for_skeleton(block: "Block") -> bool:
     return _block_type_value(block) in _ROW_TEXTLIKE_TYPES
 
@@ -345,10 +353,7 @@ def detect_columns(
 
     if _should_collapse_single_row_fragments(text_blocks, image_width):
         members = sorted(text_blocks, key=lambda b: b.bbox.x1)
-        x1_min = min(b.bbox.x1 for b in members)
-        x2_values = sorted([b.bbox.x2 for b in members], reverse=True)
-        x2_robust = x2_values[1] if len(x2_values) > 1 else x2_values[0]
-        return [members], [(x1_min, x2_robust)]
+        return [members], [_robust_column_bounds(members)]
 
     skeleton_source = [blk for blk in text_blocks if _is_narrow_body_candidate(blk, image_width)]
     if len(skeleton_source) >= 3:
@@ -389,11 +394,7 @@ def detect_columns(
 
     for _avg_x1, members in sorted(columns, key=_col_center):
         col_blocks.append(members)
-        x1_min = min(b.bbox.x1 for b in members)
-        x2_values = sorted([b.bbox.x2 for b in members], reverse=True)
-        # 使用第二大 x2 排除异常值；兜底用最大值
-        x2_robust = x2_values[1] if len(x2_values) > 1 else x2_values[0]
-        col_bounds.append((x1_min, x2_robust))
+        col_bounds.append(_robust_column_bounds(members))
 
     # 合并 X 范围明显重叠的相邻列（防止窄块被错误聚成独立列）
     merged_blocks: List[List["Block"]] = []

@@ -49,6 +49,7 @@ class BlockFactory:
         "table": (TableBlock, {}),
         "figure": (ImageBlock, {}),
         "formula": (EquationBlock, {}),
+        "formula_number": (EquationBlock, {}),
         "equation": (EquationBlock, {}),  # 别名
     }
 
