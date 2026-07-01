@@ -7,6 +7,7 @@ from docflow.layout.font_classifier import (
     FontPrediction,
     apply_font_prediction,
 )
+from docflow.layout.style_inferrer import _smooth_page_body_fonts
 from docflow.model.base import BBox, BlockType
 from docflow.model.blocks.text_block import TextBlock, TextLine
 from docflow.model.page import Page
@@ -111,6 +112,55 @@ def test_pipeline_font_classifier_preserves_explicit_font(monkeypatch):
     assert stats["accepted"] == 1
     assert explicit.style.font_family == "宋体"
     assert inferred.style.font_family == "黑体"
+
+
+def test_font_classifier_dependency_failure_is_reported(monkeypatch, tmp_path):
+    from PIL import Image
+
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (120, 60), "white").save(image_path)
+    page = Page(index=0, image_width=120, image_height=60)
+    page.image_path = str(image_path)
+    block = _text_block()
+
+    classifier = FontClassifier.from_config(RecoveryConfig())
+
+    def fail_model():
+        raise RuntimeError("font classification requires torchvision")
+
+    monkeypatch.setattr(classifier, "_ensure_model", fail_model)
+
+    stats = classifier.classify_page(page, [block])
+
+    assert stats["available"] is False
+    assert stats["applied"] == 0
+    assert "torchvision" in stats["reason"]
+
+
+def test_page_body_font_smoothing_does_not_override_titles():
+    body_with_font = TextBlock(
+        bbox=BBox(0, 50, 300, 90),
+        block_type=BlockType.TEXT,
+        lines=[TextLine(text="正文主字体投票文本")],
+        style=BlockStyle(font_family="黑体"),
+    )
+    body_missing = TextBlock(
+        bbox=BBox(0, 100, 300, 140),
+        block_type=BlockType.TEXT,
+        lines=[TextLine(text="正文缺失字体文本")],
+        style=BlockStyle(),
+    )
+    title_missing = TextBlock(
+        bbox=BBox(0, 0, 300, 40),
+        block_type=BlockType.TITLE,
+        lines=[TextLine(text="红头标题")],
+        style=BlockStyle(),
+    )
+
+    _smooth_page_body_fonts([body_with_font, body_missing, title_missing])
+
+    assert body_missing.style.font_family == "黑体"
+    assert title_missing.style.font_family is None
 
 
 def test_font_classifier_grayscale_is_default_and_removes_color(tmp_path):

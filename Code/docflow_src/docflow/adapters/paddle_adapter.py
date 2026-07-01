@@ -382,15 +382,33 @@ class PaddleAdapter(BaseAdapter):
             duplicate = False
             duplicate_reason = None
             duplicate_existing = None
-            for existing in kept:
+            duplicate_existing_index = -1
+            for existing_index, existing in enumerate(kept):
                 duplicate_reason = self._is_nested_duplicate(candidate, existing)
                 if duplicate_reason is not None:
                     duplicate = True
                     duplicate_existing = existing
+                    duplicate_existing_index = existing_index
                     break
             if not duplicate:
                 kept.append(candidate)
             else:
+                if (
+                    duplicate_existing is not None
+                    and duplicate_existing_index >= 0
+                    and self._should_replace_text_duplicate(candidate, duplicate_existing, duplicate_reason)
+                ):
+                    kept[duplicate_existing_index] = candidate
+                    report.append(
+                        {
+                            "reason": "nested_text_duplicate_replaced_shorter",
+                            "removed_index": duplicate_existing["index"],
+                            "removed_category": duplicate_existing["category"],
+                            "parent_index": candidate["index"],
+                            "parent_category": candidate["category"],
+                        }
+                    )
+                    continue
                 if duplicate_existing is not None and duplicate_reason in {
                     "semantic_container_child",
                     "table_container_child",
@@ -413,6 +431,42 @@ class PaddleAdapter(BaseAdapter):
 
         kept.sort(key=lambda item: item["index"])
         return [item["region"] for item in kept], report
+
+    @classmethod
+    def _should_replace_text_duplicate(cls, candidate: dict, existing: dict, reason: Optional[str]) -> bool:
+        if reason not in {"nested_text_duplicate", "similar_text_duplicate", "cross_category_text_duplicate", "cross_category_similar_text_duplicate"}:
+            return False
+        if (
+            candidate.get("category") not in cls._TEXTLIKE_DEDUP_CATEGORIES
+            or existing.get("category") not in cls._TEXTLIKE_DEDUP_CATEGORIES
+        ):
+            return False
+        cand_score = float(candidate.get("score", 0.0) or 0.0)
+        exist_score = float(existing.get("score", 0.0) or 0.0)
+        if cand_score + 0.12 < exist_score:
+            return False
+
+        cand_lines = [
+            cls._normalize_text(line)
+            for line in cls._extract_region_line_texts(candidate.get("region", {}))
+            if cls._normalize_text(line)
+        ]
+        exist_lines = [
+            cls._normalize_text(line)
+            for line in cls._extract_region_line_texts(existing.get("region", {}))
+            if cls._normalize_text(line)
+        ]
+        if not cand_lines or not exist_lines or len(cand_lines) <= len(exist_lines):
+            return False
+
+        exist_set = set(exist_lines)
+        extra_lines = [line for line in cand_lines if line not in exist_set]
+        if not extra_lines:
+            return False
+
+        cand_text = str(candidate.get("text", "") or "")
+        exist_text = str(existing.get("text", "") or "")
+        return len(cand_text) >= len(exist_text) + max(8, len(exist_text) // 5)
 
     @classmethod
     def _recall_missing_figures_from_captions(
@@ -443,6 +497,11 @@ class PaddleAdapter(BaseAdapter):
             for region in results
             if str(region.get("type", "")).lower() == "figure"
         ]
+        existing_text_regions = [
+            region
+            for region in results
+            if str(region.get("type", "")).lower() in cls._TEXT_TYPES
+        ]
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
 
         for region in results:
@@ -455,6 +514,8 @@ class PaddleAdapter(BaseAdapter):
             if candidate is None:
                 continue
             if any(cls._overlap_ratio(candidate, box) >= 0.65 for box in existing_figures):
+                continue
+            if cls._overlaps_high_confidence_text_region(candidate, existing_text_regions):
                 continue
             if any(cls._overlap_ratio(candidate, cls._safe_bbox(item.get("bbox"))) >= 0.65 for item in recalled):
                 continue
@@ -480,6 +541,29 @@ class PaddleAdapter(BaseAdapter):
         if not recalled:
             return list(results)
         return list(results) + recalled
+
+    @classmethod
+    def _overlaps_high_confidence_text_region(cls, candidate_box: List[float], text_regions: List[dict]) -> bool:
+        candidate_area = max(
+            1.0,
+            (float(candidate_box[2]) - float(candidate_box[0]))
+            * (float(candidate_box[3]) - float(candidate_box[1])),
+        )
+        for region in text_regions:
+            text_box = cls._safe_bbox(region.get("bbox"))
+            text = cls._normalize_text(cls._extract_region_text(region))
+            if len(text) < 80:
+                continue
+            score = float(region.get("score", 0.0) or 0.0)
+            if score < 0.80:
+                continue
+            overlap_w = max(0.0, min(float(candidate_box[2]), text_box[2]) - max(float(candidate_box[0]), text_box[0]))
+            overlap_h = max(0.0, min(float(candidate_box[3]), text_box[3]) - max(float(candidate_box[1]), text_box[1]))
+            overlap_area = overlap_w * overlap_h
+            text_area = max(1.0, (text_box[2] - text_box[0]) * (text_box[3] - text_box[1]))
+            if overlap_area / text_area >= 0.62 or overlap_area / candidate_area >= 0.50:
+                return True
+        return False
 
     @classmethod
     def _is_figure_caption_like(cls, region: dict) -> bool:

@@ -39,6 +39,14 @@ _CAPTION_TYPES: frozenset = frozenset({
 _NUMBERED_TITLE_LEVEL_RE = re.compile(
     r"^\s*(?:(\d+(?:\.\d+)*)(?:[\.、])?|[（(]?([一二三四五六七八九十百]+)[)）\.、])\s*\S"
 )
+_QUESTION_OR_OPTION_RE = re.compile(
+    r"^\s*(?:"
+    r"\d{1,2}\s*[A-Z][a-z]"
+    r"|\d{1,2}[\.\)．、]\s*\S"
+    r"|[A-H][\.\)]\s*\S"
+    r"|[•●]\s*\S"
+    r")"
+)
 
 
 def _numbered_title_level(text: str) -> Optional[int]:
@@ -288,12 +296,13 @@ def _infer_paragraph_indents(block: TextBlock) -> None:
 
 def _smooth_page_body_fonts(blocks: List[TextBlock]) -> None:
     """用页面主字体平滑正文中的 'other' 字体预测。"""
+    body_types = {BlockType.TEXT, BlockType.REFERENCE, BlockType.ABSTRACT}
     font_votes: List[str] = []
     for block in blocks:
         if not isinstance(block, TextBlock) or block.style is None:
             continue
         family = getattr(block.style, "font_family", None)
-        if family and family != "其他" and block.block_type in {BlockType.TEXT, BlockType.TITLE, BlockType.REFERENCE, BlockType.ABSTRACT}:
+        if family and family != "其他" and block.block_type in body_types:
             font_votes.extend([family] * max(1, len(block.full_text().strip()) // 20))
     if not font_votes:
         return
@@ -303,7 +312,7 @@ def _smooth_page_body_fonts(blocks: List[TextBlock]) -> None:
     for block in blocks:
         if not isinstance(block, TextBlock) or block.style is None:
             continue
-        if block.block_type not in {BlockType.TEXT, BlockType.TITLE, BlockType.REFERENCE, BlockType.ABSTRACT}:
+        if block.block_type not in body_types:
             continue
         if getattr(block.style, "font_family", None) in {None, "其他"}:
             block.style.font_family = dominant
@@ -418,9 +427,14 @@ def _detect_alignment(
         BlockType.REFERENCE,
     }
 
+    if block.block_type == BlockType.HEADER and _multi_line_center_evidence(block, col_left, col_right):
+        return "center"
+
     if is_title:
         if _title_level() is not None:
             return "left"
+        if _multi_line_center_evidence(block, col_left, col_right):
+            return "center"
         title_text = (block.full_text() or "").strip()
         if title_text[:1] in {"“", "\"", "‘", "'"} and len(title_text) <= 42:
             return "center"
@@ -452,10 +466,22 @@ def _detect_alignment(
         return "left"
 
     if non_justify_type:
+        if block.block_type in {BlockType.HEADER, BlockType.FOOTER} and len(line_edges) <= 3:
+            block_left_gap = max(0.0, float(block.bbox.x1) - col_left)
+            block_right_gap = max(0.0, col_right - float(block.bbox.x2))
+            block_center = (float(block.bbox.x1) + float(block.bbox.x2)) * 0.5
+            col_center = (col_left + col_right) * 0.5
+            if block_center >= col_center and block_right_gap <= block_left_gap * 0.45:
+                return "right"
+            if block_center <= col_center and block_left_gap <= block_right_gap * 0.45:
+                return "left"
         if center_score >= 0.72 and left_hit_ratio < 0.45 and right_hit_ratio < 0.45:
             return "center"
         if right_hit_ratio >= 0.85 and left_hit_ratio < 0.35:
             return "right"
+        return "left"
+
+    if _looks_like_question_or_option_block(block):
         return "left"
 
     if not is_short_block:
@@ -467,6 +493,65 @@ def _detect_alignment(
     if right_hit_ratio >= 0.82 and left_hit_ratio < 0.45:
         return "right"
     return "left"
+
+
+def _looks_like_question_or_option_block(block: TextBlock) -> bool:
+    """Detect exercise/list bodies whose short lines can look centered.
+
+    OCR often emits a whole exercise as one text box whose visual center is
+    close to the column center because option lines are short.  Alignment should
+    follow the semantic left rail when the block contains numbered prompts,
+    bullets, or multiple answer options.
+    """
+    if block.block_type != BlockType.TEXT:
+        return False
+    lines = [(getattr(line, "text", "") or "").strip() for line in block.lines or []]
+    lines = [line for line in lines if line]
+    if not lines:
+        return False
+    hits = sum(1 for line in lines if _QUESTION_OR_OPTION_RE.match(line))
+    if hits >= 2:
+        return True
+    text = re.sub(r"\s+", " ", block.full_text() or "").strip()
+    if not text:
+        return False
+    option_hits = len(re.findall(r"(?:^|\s)[A-H][\.\)]\s*\S", text))
+    numbered_prompt = bool(re.match(r"^\s*\d{1,2}\s*[A-Z][a-z]", text))
+    return numbered_prompt and option_hits >= 2
+
+
+def _multi_line_center_evidence(block: TextBlock, col_left: float, col_right: float) -> bool:
+    lines = [
+        (float(ln.x1), float(ln.x2), (ln.text or "").strip())
+        for ln in block.lines
+        if ln.x1 is not None and ln.x2 is not None and (ln.text or "").strip()
+    ]
+    if len(lines) < 2:
+        return False
+
+    block_left = min(float(block.bbox.x1), min(x1 for x1, _, _ in lines))
+    block_right = max(float(block.bbox.x2), max(x2 for _, x2, _ in lines))
+    col_left = block_left
+    col_right = block_right
+    col_w = max(float(col_right) - float(col_left), 1.0)
+    wide_lines = [
+        (x1, x2, text)
+        for x1, x2, text in lines
+        if (x2 - x1) >= col_w * 0.45
+    ]
+    if len(wide_lines) < 2:
+        return False
+
+    left_span = max(x1 for x1, _, _ in wide_lines) - min(x1 for x1, _, _ in wide_lines)
+    right_span = max(x2 for _, x2, _ in wide_lines) - min(x2 for _, x2, _ in wide_lines)
+    wide_center = sum((x1 + x2) * 0.5 for x1, x2, _ in wide_lines) / len(wide_lines)
+    col_center = (float(col_left) + float(col_right)) * 0.5
+    if left_span > col_w * 0.06 or right_span > col_w * 0.06:
+        return False
+    if abs(wide_center - col_center) > col_w * 0.10:
+        return False
+
+    return True
 
 
 # ---------------------------------------------------------------------------

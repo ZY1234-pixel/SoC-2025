@@ -274,11 +274,12 @@ class RecoveryPipeline:
                 blocks,
                 page_width=page.image_width,
             )
-            model_order_repaired, blocks = self._repair_anomalous_model_order(
-                blocks,
-                page_width=page.image_width,
-                page_height=page.image_height,
-            )
+            if bool(getattr(self.config, "model_order_geometric_repair_enabled", False)):
+                model_order_repaired, blocks = self._repair_anomalous_model_order(
+                    blocks,
+                    page_width=page.image_width,
+                    page_height=page.image_height,
+                )
         elif self._needs_layout_analysis(raw_blocks) and len(blocks) > 1:
             blocks = sort_layout(
                 blocks,
@@ -473,12 +474,14 @@ class RecoveryPipeline:
                 block.spanned_cols = [0]
             return
 
-        _columns, col_bounds = detect_columns(
-            skeleton,
-            page_width,
-            max_cols=self.config.max_cols,
-            cluster_thresh=self.config.column_cluster_thresh,
-        )
+        col_bounds = self._side_note_three_column_bounds(blocks, page_width)
+        if not col_bounds:
+            _columns, col_bounds = detect_columns(
+                skeleton,
+                page_width,
+                max_cols=self.config.max_cols,
+                cluster_thresh=self.config.column_cluster_thresh,
+            )
         col_count = len(col_bounds)
         if col_count <= 1:
             for block in blocks:
@@ -490,12 +493,44 @@ class RecoveryPipeline:
         detect_spanned_blocks(blocks, col_bounds)
         for block in blocks:
             block.col_count = col_count
+            self._collapse_weak_title_span_to_anchor_column(block, col_bounds)
             if block.block_type in _ZONE_STRIP_TYPES:
                 block.spanned_cols = list(range(col_count))
                 block.col_index = 0
             if block.attributes is None:
                 block.attributes = {}
             block.attributes["column_source"] = "model_order_geometry"
+
+    @staticmethod
+    def _collapse_weak_title_span_to_anchor_column(block: Block, col_bounds: List[tuple[float, float]]) -> bool:
+        if (
+            not isinstance(block, TextBlock)
+            or block.block_type != BlockType.TITLE
+            or len(col_bounds) < 2
+            or len(getattr(block, "spanned_cols", []) or []) <= 1
+        ):
+            return False
+
+        width = max(float(block.bbox.width), 1.0)
+        overlaps: List[tuple[int, float]] = []
+        for col_idx, (cx1, cx2) in enumerate(col_bounds):
+            overlap = max(0.0, min(float(block.bbox.x2), float(cx2)) - max(float(block.bbox.x1), float(cx1)))
+            if overlap > 0:
+                overlaps.append((col_idx, overlap))
+        if len(overlaps) <= 1:
+            return False
+
+        overlaps.sort(key=lambda item: item[1], reverse=True)
+        best_col, best_overlap = overlaps[0]
+        second_overlap = overlaps[1][1]
+        if best_overlap / width < 0.55:
+            return False
+        if second_overlap > max(32.0, width * 0.08):
+            return False
+
+        block.col_index = best_col
+        block.spanned_cols = [best_col]
+        return True
 
     @classmethod
     def _repair_anomalous_model_order(
@@ -590,12 +625,16 @@ class RecoveryPipeline:
         if len(column_source) < 3:
             return
 
-        columns, col_bounds = detect_columns(
-            column_source,
-            page_width,
-            max_cols=2,
-            cluster_thresh=0.10,
-        )
+        col_bounds = RecoveryPipeline._side_note_three_column_bounds(blocks, page_width)
+        if col_bounds:
+            columns = []
+        else:
+            columns, col_bounds = detect_columns(
+                column_source,
+                page_width,
+                max_cols=2,
+                cluster_thresh=0.10,
+            )
         if len(col_bounds) < 2:
             if band_major:
                 RecoveryPipeline._collapse_repaired_text_flow_columns(blocks)
@@ -725,6 +764,80 @@ class RecoveryPipeline:
             (min(float(block.bbox.x1) for block in left), max(float(block.bbox.x2) for block in left)),
             (min(float(block.bbox.x1) for block in right), max(float(block.bbox.x2) for block in right)),
         ]
+
+    @staticmethod
+    def _side_note_three_column_bounds(blocks: List[Block], page_width: int) -> List[tuple[float, float]]:
+        """Detect textbook pages with a left side-note rail plus two body rails.
+
+        This is a geometric page pattern, not a sample-specific exception: a
+        narrow annotation track on the left coexists with two regular body
+        columns to its right.  Collapsing it to two columns makes the side note
+        and first body column compete for the same Word column.
+        """
+        if page_width <= 0 or len(blocks) < 5:
+            return []
+        page_w = max(float(page_width), 1.0)
+
+        side_notes = [
+            block for block in blocks
+            if isinstance(block, TextBlock)
+            and block.block_type in {BlockType.FOOTNOTE, BlockType.TEXT}
+            and block.block_type not in _ZONE_STRIP_TYPES
+            and float(block.bbox.x1) <= page_w * 0.28
+            and float(block.bbox.x2) <= page_w * 0.42
+            and page_w * 0.10 <= float(block.bbox.width) <= page_w * 0.34
+            and (
+                block.count_lines() >= 3
+                or len((block.full_text() or "").strip()) >= 45
+            )
+        ]
+        if not side_notes:
+            return []
+
+        side_right = max(float(block.bbox.x2) for block in side_notes)
+        body_source = [
+            block for block in blocks
+            if isinstance(block, TextBlock)
+            and block.block_type in {BlockType.TEXT, BlockType.ABSTRACT, BlockType.REFERENCE, BlockType.TITLE}
+            and block.block_type not in _ZONE_STRIP_TYPES
+            and float(block.bbox.x1) >= side_right + page_w * 0.035
+            and page_w * 0.16 <= float(block.bbox.width) <= page_w * 0.42
+            and (
+                block.count_lines() >= 2
+                or len((block.full_text() or "").strip()) >= 24
+            )
+        ]
+        if len(body_source) < 4:
+            return []
+
+        _body_columns, body_bounds = detect_columns(
+            body_source,
+            page_width,
+            max_cols=2,
+            cluster_thresh=0.08,
+        )
+        if len(body_bounds) != 2:
+            return []
+        first_body_left = float(body_bounds[0][0])
+        if first_body_left - side_right < page_w * 0.045:
+            return []
+        if float(body_bounds[1][0]) - float(body_bounds[0][1]) < page_w * 0.012:
+            return []
+
+        side_top = min(float(block.bbox.y1) for block in side_notes)
+        side_bottom = max(float(block.bbox.y2) for block in side_notes)
+        body_overlap = [
+            block for block in body_source
+            if min(side_bottom, float(block.bbox.y2)) - max(side_top, float(block.bbox.y1)) > 0
+        ]
+        if len(body_overlap) < 2:
+            return []
+
+        side_bounds = (
+            min(float(block.bbox.x1) for block in side_notes),
+            max(float(block.bbox.x2) for block in side_notes),
+        )
+        return [side_bounds, *[(float(x1), float(x2)) for x1, x2 in body_bounds]]
 
     @classmethod
     def _model_order_needs_geometry_repair(
@@ -1755,6 +1868,33 @@ class RecoveryPipeline:
         for zone in page.zones:
             zone.col_count = 1
             zone.has_spanned = False
+        page.zones = RecoveryPipeline._merge_adjacent_single_column_zones(page.zones, blocks)
+
+    @staticmethod
+    def _merge_adjacent_single_column_zones(zones: List[Zone], blocks: List[Block]) -> List[Zone]:
+        if not zones:
+            return []
+        order_index = {id(block): idx for idx, block in enumerate(blocks)}
+
+        def _sort_zone(zone: Zone) -> None:
+            zone.blocks.sort(key=lambda block: order_index.get(id(block), 10**9))
+
+        merged: List[Zone] = []
+        for zone in zones:
+            _sort_zone(zone)
+            if (
+                merged
+                and zone.col_count == 1
+                and merged[-1].col_count == 1
+                and zone.rendering_strategy != "strip_row"
+                and merged[-1].rendering_strategy != "strip_row"
+            ):
+                merged[-1].blocks.extend(zone.blocks)
+                _sort_zone(merged[-1])
+                merged[-1].has_spanned = False
+                continue
+            merged.append(zone)
+        return merged
 
     @staticmethod
     def _has_weak_multicolumn_evidence(page: Page, blocks: List[Block]) -> bool:
@@ -1765,11 +1905,6 @@ class RecoveryPipeline:
         """
         max_cols = max((zone.col_count for zone in page.zones), default=1)
         if max_cols <= 1:
-            return False
-
-        figure_count = sum(1 for b in blocks if b.block_type in FIGURE_TYPES or b.block_type == BlockType.FIGURE)
-        table_count = sum(1 for b in blocks if b.block_type == BlockType.TABLE)
-        if figure_count or table_count:
             return False
 
         text_blocks = [
@@ -1941,6 +2076,7 @@ class RecoveryPipeline:
                 return True
             return float(block.bbox.y2) >= max(float(image_height) * 0.82, 1.0)
 
+        source_order_index = {id(block): idx for idx, block in enumerate(blocks)}
         core_blocks = list(blocks)
         prefix_strip_blocks: List[Block] = []
         while core_blocks and _is_top_strip_block(core_blocks[0]):
@@ -1952,7 +2088,7 @@ class RecoveryPipeline:
         if suffix_strip_blocks:
             suffix_ids = {id(block) for block in suffix_strip_blocks}
             core_blocks = [block for block in core_blocks if id(block) not in suffix_ids]
-            suffix_strip_blocks.sort(key=lambda b: (b.bbox.y1, b.bbox.x1))
+            suffix_strip_blocks.sort(key=lambda b: source_order_index.get(id(b), 10**9))
 
         blocks = core_blocks
         if not blocks:
@@ -2262,7 +2398,7 @@ class RecoveryPipeline:
         if prefix_strip_blocks:
             zones.insert(0, Zone(
                 col_count=1,
-                blocks=sorted(prefix_strip_blocks, key=lambda b: b.bbox.x1),
+                blocks=sorted(prefix_strip_blocks, key=lambda b: source_order_index.get(id(b), 10**9)),
                 has_spanned=False,
                 flow_id="",
                 flow_kind="",
@@ -2272,7 +2408,7 @@ class RecoveryPipeline:
         if suffix_strip_blocks:
             zones.append(Zone(
                 col_count=1,
-                blocks=sorted(suffix_strip_blocks, key=lambda b: (b.bbox.y1, b.bbox.x1)),
+                blocks=sorted(suffix_strip_blocks, key=lambda b: source_order_index.get(id(b), 10**9)),
                 has_spanned=False,
                 flow_id="",
                 flow_kind="",

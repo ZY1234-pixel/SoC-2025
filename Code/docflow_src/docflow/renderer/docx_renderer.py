@@ -11,6 +11,7 @@ import logging
 import math
 from pathlib import Path
 from collections import defaultdict
+from copy import copy
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from docx import Document as DocxDocument
@@ -66,6 +67,9 @@ _CAPTION_TYPES = frozenset({
 _LISTISH_RE = re.compile(
     r"^\s*(\d+[\.．、\)](?!\d)|[A-Za-z][\.\)]|[（(]?[一二三四五六七八九十百]+[)）\.、]?|[•\-·])\s*"
 )
+_QUESTION_OR_OPTION_RE = re.compile(
+    r"^\s*(?:\d{1,2}\s*[A-Z][a-z]|\d{1,2}[\.\)．、]\s*\S|[A-H][\.\)]\s*\S|[•●]\s*\S)"
+)
 _NUMBERED_TITLE_RE = re.compile(
     r"^\s*(\d+(?:\.\d+)*[\.、]|\d+[)）]|\(?\d+\)|[（(]?[一二三四五六七八九十百]+[)）\.、])\s*\S+"
 )
@@ -73,6 +77,15 @@ _NUMBERED_TITLE_LEVEL_RE = re.compile(
     r"^\s*(?:(\d+(?:\.\d+)*)(?:[\.、])?|[（(]?([一二三四五六七八九十百]+)[)）\.、])\s*\S"
 )
 _FORMULA_NUMBER_TEXT_RE = re.compile(r"^\s*\(?\s*\d{1,3}[a-zA-Z]?\s*\)?\s*$")
+_FIELD_LIKE_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:this\s+article\s+was\s+downloaded\s+by|on|publisher|registered\s+(?:number|office)|"
+    r"received|accepted|published\s+online|doi|to\s+cite\s+this\s+article|to\s+link\s+to\s+this\s+article)"
+    r"\s*:|"
+    r"https?://|www\.|doi\s*:|©|copyright"
+    r")",
+    re.IGNORECASE,
+)
 
 
 class DocxRenderer(BaseRenderer):
@@ -173,7 +186,8 @@ class DocxRenderer(BaseRenderer):
         if page.attributes:
             page_render_mode = page.attributes.get("render_mode", "")
 
-        render_zones = self._merge_adjacent_visual_text_zones(page.zones, page)
+        render_zones = self._prepare_edge_decorative_text_zones(page.zones, page)
+        render_zones = self._merge_adjacent_visual_text_zones(render_zones, page)
         render_zones = self._split_embedded_visual_text_bands(render_zones, page)
 
         for zi, zone in enumerate(render_zones):
@@ -182,9 +196,10 @@ class DocxRenderer(BaseRenderer):
 
             strategy = zone.rendering_strategy
             local_visual_band = zone.col_count > 1 and self._is_local_visual_zone(zone, page)
+            decorative_sidecar = zone.region_kind == "decorative_sidecar"
             # RenderPlan 模式覆盖。reflow 页面仍允许局部图文 sidecar band
             # 使用布局表格，否则图片会独占一整行并切断正文流。
-            if page_render_mode == "reflow" and not local_visual_band:
+            if page_render_mode == "reflow" and not (local_visual_band or decorative_sidecar):
                 strategy = "single_col"
 
             use_native_cols = self._should_use_native_columns(
@@ -192,6 +207,10 @@ class DocxRenderer(BaseRenderer):
                 col_px=col_px,
                 page_width_px=img_w,
             )
+            if local_visual_band:
+                use_native_cols = False
+            if decorative_sidecar:
+                use_native_cols = False
             # RenderPlan 的 native_columns 只是页面级偏好，实际仍由 zone
             # 安全检查决定；复杂图文混排若强制 Word 原生分栏，容易把后续
             # 块流入不可见/错误栏位。
@@ -271,6 +290,161 @@ class DocxRenderer(BaseRenderer):
     # ------------------------------------------------------------------
     # 渲染前 zone 规整
     # ------------------------------------------------------------------
+
+    def _prepare_edge_decorative_text_zones(self, zones: List[Zone], page: "Page") -> List[Zone]:
+        """Keep marginal labels visible without inserting them into body flow.
+
+        Textbook pages often contain vertical section labels or teacher-note
+        stickers on the outer margin.  They are useful visual decoration, but
+        rendering them as ordinary paragraphs shifts the real article body.
+        Left-side labels are rendered in a narrow sidecar column; right-edge
+        labels are still removed from the editable flow until we can anchor them
+        reliably without disturbing surrounding content.
+        """
+        if not zones or getattr(page, "image_width", 0) <= 0:
+            return list(zones)
+
+        output: List[Zone] = []
+        for zone in zones:
+            if zone.rendering_strategy == "strip_row" or not zone.blocks:
+                output.append(zone)
+                continue
+            left_decorative: List[Block] = []
+            kept: List[Block] = []
+            for block in zone.blocks:
+                decorative_side = self._edge_decorative_side(block, page, zone.blocks)
+                if decorative_side == "left":
+                    left_decorative.append(block)
+                    continue
+                if decorative_side == "right":
+                    if block.attributes is None:
+                        block.attributes = {}
+                    block.attributes["docx_suppressed_reason"] = "edge_decorative_text"
+                    continue
+                kept.append(block)
+            if not kept:
+                continue
+            if not left_decorative and len(kept) == len(zone.blocks):
+                output.append(zone)
+                continue
+
+            if left_decorative:
+                render_blocks: List[Block] = []
+                for block in sorted(left_decorative, key=lambda item: (item.bbox.y1, item.bbox.x1)):
+                    clone = self._clone_block_for_render_column(block, col_index=0, col_count=2)
+                    clone.attributes["docx_decorative_role"] = "left_sidecar"
+                    render_blocks.append(clone)
+                for block in kept:
+                    clone = self._clone_block_for_render_column(block, col_index=1, col_count=2)
+                    render_blocks.append(clone)
+                output.append(Zone(
+                    col_count=2,
+                    blocks=render_blocks,
+                    has_spanned=False,
+                    flow_id=zone.flow_id,
+                    flow_kind=zone.flow_kind,
+                    region_id=zone.region_id,
+                    region_kind="decorative_sidecar",
+                ))
+                continue
+
+            output.append(Zone(
+                col_count=max(1, max((int(getattr(block, "col_index", 0) or 0) for block in kept), default=0) + 1),
+                blocks=kept,
+                has_spanned=any(len(getattr(block, "spanned_cols", []) or []) > 1 for block in kept),
+                flow_id=zone.flow_id,
+                flow_kind=zone.flow_kind,
+                region_id=zone.region_id,
+                region_kind=zone.region_kind,
+            ))
+        return output
+
+    @staticmethod
+    def _clone_block_for_render_column(block: Block, *, col_index: int, col_count: int) -> Block:
+        clone = copy(block)
+        clone.col_index = col_index
+        clone.col_count = col_count
+        clone.spanned_cols = [col_index]
+        clone.attributes = dict(getattr(block, "attributes", None) or {})
+        return clone
+
+    @classmethod
+    def _edge_decorative_side(cls, block: Block, page: "Page", zone_blocks: List[Block]) -> Optional[str]:
+        if not cls._is_edge_decorative_text(block, page, zone_blocks):
+            return None
+        page_w = max(float(getattr(page, "image_width", 0) or 0), 1.0)
+        body_blocks = [
+            other for other in zone_blocks
+            if other is not block
+            and isinstance(other, TextBlock)
+            and other.block_type in {BlockType.TEXT, BlockType.ABSTRACT, BlockType.REFERENCE}
+            and len((other.full_text() or "").strip()) >= 40
+            and float(other.bbox.width) >= page_w * 0.30
+        ]
+        if not body_blocks:
+            return None
+        body_left = min(float(other.bbox.x1) for other in body_blocks)
+        body_right = max(float(other.bbox.x2) for other in body_blocks)
+        if float(block.bbox.x2) <= body_left - page_w * 0.025 or float(block.bbox.x1) <= page_w * 0.12:
+            return "left"
+        if float(block.bbox.x1) >= body_right + page_w * 0.035 or float(block.bbox.x2) >= page_w * 0.88:
+            return "right"
+        return None
+
+    def _suppress_edge_decorative_text_zones(self, zones: List[Zone], page: "Page") -> List[Zone]:
+        """Backward-compatible alias for tests and older call sites."""
+        return self._prepare_edge_decorative_text_zones(zones, page)
+
+    @staticmethod
+    def _is_edge_decorative_text(block: Block, page: "Page", zone_blocks: List[Block]) -> bool:
+        if not isinstance(block, TextBlock):
+            return False
+        if block.block_type not in {BlockType.TEXT, BlockType.TITLE}:
+            return False
+        text = (block.full_text() or "").strip()
+        if not text:
+            return False
+
+        page_w = max(float(getattr(page, "image_width", 0) or 0), 1.0)
+        page_h = max(float(getattr(page, "image_height", 0) or 0), 1.0)
+        x1 = float(block.bbox.x1)
+        x2 = float(block.bbox.x2)
+        width = max(float(block.bbox.width), 1.0)
+        height = max(float(block.bbox.height), 1.0)
+        left_edge = x1 <= page_w * 0.12
+        right_edge = x2 >= page_w * 0.88
+        vertical_label = height >= width * 1.6 and len(text) <= 18
+        short_margin_label = len(text) <= 18 and width <= page_w * 0.16
+
+        body_blocks = [
+            other for other in zone_blocks
+            if other is not block
+            and isinstance(other, TextBlock)
+            and other.block_type in {BlockType.TEXT, BlockType.ABSTRACT, BlockType.REFERENCE}
+            and len((other.full_text() or "").strip()) >= 40
+            and float(other.bbox.width) >= page_w * 0.30
+        ]
+        if not body_blocks:
+            return False
+
+        body_left = min(float(other.bbox.x1) for other in body_blocks)
+        body_right = max(float(other.bbox.x2) for other in body_blocks)
+        left_of_body = x2 <= body_left - page_w * 0.025
+        right_of_body = x1 >= body_right + page_w * 0.035
+        if not ((left_edge or right_edge or left_of_body or right_of_body) and (vertical_label or short_margin_label)):
+            return False
+
+        if left_edge or left_of_body:
+            if body_left - x2 < page_w * 0.025:
+                return False
+        if right_edge:
+            if x1 - body_right < page_w * 0.05:
+                return False
+
+        # Large sidebar notes are content, not decoration.
+        if height >= page_h * 0.10 and len(text) >= 24:
+            return False
+        return True
 
     def _merge_adjacent_visual_text_zones(self, zones: List[Zone], page: "Page") -> List[Zone]:
         """Merge local side-by-side image/text bands split by upstream zones.
@@ -367,10 +541,11 @@ class DocxRenderer(BaseRenderer):
                 output.append(zone)
                 continue
 
+            scan_blocks = self._zone_blocks_for_embedded_visual_split(zone, visual_bands)
             consumed: set[int] = set()
             cursor: List[Block] = []
             band_by_first_id = {id(band[0]): band for band in visual_bands}
-            for block in zone.blocks:
+            for block in scan_blocks:
                 if id(block) in consumed:
                     continue
                 band = band_by_first_id.get(id(block))
@@ -437,6 +612,33 @@ class DocxRenderer(BaseRenderer):
         return output
 
     @staticmethod
+    def _zone_blocks_for_embedded_visual_split(
+        zone: Zone,
+        visual_bands: List[List[Block]],
+    ) -> List[Block]:
+        if not visual_bands or zone.col_count != 1:
+            return list(zone.blocks)
+
+        band_ids = {id(block) for band in visual_bands for block in band}
+        band_first_ids = {id(band[0]) for band in visual_bands if band}
+        band_top_by_id = {
+            id(block): min(float(item.bbox.y1) for item in band)
+            for band in visual_bands
+            for block in band
+        }
+
+        def _key(block: Block) -> tuple[float, float, int]:
+            if id(block) in band_ids:
+                return (band_top_by_id[id(block)], float(block.bbox.x1), 1)
+            return (float(block.bbox.y1), float(block.bbox.x1), 0)
+
+        scan_blocks = [
+            block for block in zone.blocks
+            if id(block) not in band_ids or id(block) in band_first_ids
+        ]
+        return sorted(scan_blocks, key=_key)
+
+    @staticmethod
     def _split_local_section_titles_from_band(
         band: List[Block],
         page: "Page",
@@ -461,6 +663,13 @@ class DocxRenderer(BaseRenderer):
             and (block.full_text() or "").strip()
             and not _NUMBERED_TITLE_RE.match((block.full_text() or "").strip())
             and float(block.bbox.y1) <= visual_top + page_h * 0.08
+            and not (
+                any(
+                    DocxRenderer._is_side_of_visual(block, visual)
+                    and float(block.bbox.y2) >= float(visual.bbox.y1) + 6.0
+                    for visual in visuals
+                )
+            )
         ]
         if not local_titles:
             return [], [], band
@@ -734,6 +943,50 @@ class DocxRenderer(BaseRenderer):
                 visual_cx = (float(visual.bbox.x1) + float(visual.bbox.x2)) * 0.5
                 block.col_index = 0 if visual_cx < divider else 1
             block.spanned_cols = [block.col_index]
+
+    @staticmethod
+    def _local_visual_band_col_widths_pt(
+        zone: Zone,
+        page: "Page",
+        *,
+        total_width_pt: float,
+        visual_gap_pt: float,
+    ) -> List[float]:
+        if zone.col_count != 2 or total_width_pt <= 0:
+            return DocxRenderer._column_widths_pt(
+                max(int(zone.col_count or 1), 1),
+                DocxRenderer._build_render_col_px(zone),
+                float(getattr(page, "image_width", 0) or 0),
+                total_width_pt,
+            )
+
+        page_w = max(float(getattr(page, "image_width", 0) or 0), 1.0)
+        visuals = [block for block in zone.blocks if block.block_type in {BlockType.FIGURE, BlockType.TABLE}]
+        visual = visuals[0] if visuals else None
+        if visual is None:
+            return [total_width_pt / 2.0, total_width_pt / 2.0]
+
+        side_blocks = [
+            block for block in zone.blocks
+            if block is not visual and DocxRenderer._is_side_of_visual(block, visual)
+        ]
+        if not side_blocks:
+            return [total_width_pt / 2.0, total_width_pt / 2.0]
+
+        if int(getattr(visual, "col_index", 0) or 0) == 0:
+            side_left = min(float(block.bbox.x1) for block in side_blocks)
+            divider_px = (float(visual.bbox.x2) + side_left) * 0.5
+            left_ratio = max(0.12, min(0.48, divider_px / page_w))
+            left_width = total_width_pt * left_ratio
+            right_width = max(24.0, total_width_pt - left_width - visual_gap_pt)
+            return [left_width, right_width]
+
+        side_right = max(float(block.bbox.x2) for block in side_blocks)
+        divider_px = (side_right + float(visual.bbox.x1)) * 0.5
+        left_ratio = max(0.12, min(0.88, divider_px / page_w))
+        left_width = total_width_pt * left_ratio
+        right_width = max(24.0, total_width_pt - left_width - visual_gap_pt)
+        return [left_width, right_width]
 
     def _copy_section(self, src_sect, dst_sect) -> None:
         dst_sect.page_width = src_sect.page_width
@@ -1034,6 +1287,16 @@ class DocxRenderer(BaseRenderer):
         若仍溢页则降至 7.0pt 作为兜底。
         """
         return max(self._font_floor, value * self._fit_scale)
+
+    def _scale_title_font(self, block: TextBlock, page: "Page", value: float) -> float:
+        """Scale title fonts while preserving source-like masthead emphasis."""
+        layout_profile = str((getattr(page, "attributes", None) or {}).get("layout_profile", "") or "")
+        if (
+            layout_profile == "newspaper_mixed"
+            and self._is_masthead_title(block, page, str(getattr(block.style, "alignment", "") or "center"))
+        ):
+            return max(self._font_floor, value * max(self._fit_scale, 0.88))
+        return self._scale_font(value)
 
     def _render_single_page_fit(
         self, document: "Document", expected_pages: int, **build_options
@@ -1734,6 +1997,9 @@ class DocxRenderer(BaseRenderer):
         if len(text) >= 18 and aspect < 4.0:
             return min(font_size_pt, self.config.default_font_size_pt * 1.15)
         if self._is_masthead_title(block, page, alignment):
+            layout_profile = str((getattr(page, "attributes", None) or {}).get("layout_profile", "") or "")
+            if layout_profile == "newspaper_mixed":
+                return min(font_size_pt * max(cfg.title_masthead_scale, 1.55), 58.0)
             return min(font_size_pt * cfg.title_masthead_scale, cfg.title_masthead_cap)
         if title_level is not None:
             return font_size_pt
@@ -1750,14 +2016,142 @@ class DocxRenderer(BaseRenderer):
         cjk = sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff')
         return cjk / max(len(text), 1)
 
+    @classmethod
+    def _visual_fragment_gap_text(cls, prev_line, curr_line, block: TextBlock) -> str:
+        """Return source-geometry spaces between OCR fragments on the same row."""
+        if prev_line is None or curr_line is None:
+            return ""
+        if block.block_type not in {
+            BlockType.TITLE,
+            BlockType.HEADER,
+            BlockType.FOOTER,
+            BlockType.PAGE_NUMBER,
+            BlockType.TABLE_CAPTION,
+            BlockType.FIGURE_CAPTION,
+            BlockType.FORMULA_CAPTION,
+            BlockType.TABLE_FOOTNOTE,
+        }:
+            return ""
+        if (
+            getattr(prev_line, "x1", None) is None
+            or getattr(prev_line, "x2", None) is None
+            or getattr(curr_line, "x1", None) is None
+            or getattr(curr_line, "x2", None) is None
+        ):
+            return ""
+
+        gap_px = float(curr_line.x1) - float(prev_line.x2)
+        if gap_px <= 0:
+            return ""
+
+        widths: List[float] = []
+        for line in (prev_line, curr_line):
+            line_text = (getattr(line, "text", "") or "").strip()
+            char_count = max(len(line_text), 1)
+            width = max(float(line.x2) - float(line.x1), 0.0)
+            if width > 0:
+                widths.append(width / char_count)
+        if not widths:
+            return ""
+
+        widths.sort()
+        avg_char_px = widths[len(widths) // 2]
+        threshold = avg_char_px * (0.35 if block.block_type == BlockType.TITLE else 0.55)
+        if gap_px < max(threshold, 2.0):
+            return ""
+
+        combined = f"{getattr(prev_line, 'text', '')}{getattr(curr_line, 'text', '')}"
+        if cls._cjk_ratio(combined) >= 0.30:
+            count = max(1, min(6, int(round(gap_px / max(avg_char_px, 1.0)))))
+            return "\u3000" * count
+
+        count = max(1, min(12, int(round(gap_px / max(avg_char_px * 0.45, 1.0)))))
+        return " " * count
+
+    @staticmethod
+    def _should_render_visual_rows_as_paragraphs(
+        block: TextBlock,
+        visual_rows: List[List[object]],
+    ) -> bool:
+        if len(visual_rows) <= 1:
+            return False
+        if block.block_type not in {
+            BlockType.FOOTNOTE,
+            BlockType.FIGURE_CAPTION,
+            BlockType.TABLE_CAPTION,
+            BlockType.TABLE_FOOTNOTE,
+            BlockType.FORMULA_CAPTION,
+        }:
+            return False
+        text_len = len((block.full_text() or "").strip())
+        return len(visual_rows) <= 4 and text_len <= 160
+
+    @staticmethod
+    def _alignment_for_visual_row(row: List[object], block: TextBlock, fallback):
+        xs = [
+            float(getattr(ln, "x1"))
+            for ln in row
+            if getattr(ln, "x1", None) is not None
+        ]
+        xe = [
+            float(getattr(ln, "x2"))
+            for ln in row
+            if getattr(ln, "x2", None) is not None
+        ]
+        if not xs or not xe:
+            return fallback
+
+        row_left = min(xs)
+        row_right = max(xe)
+        row_center = (row_left + row_right) * 0.5
+        block_left = float(block.bbox.x1)
+        block_right = float(block.bbox.x2)
+        block_width = max(block_right - block_left, 1.0)
+        block_center = (block_left + block_right) * 0.5
+        left_gap = max(0.0, row_left - block_left)
+        right_gap = max(0.0, block_right - row_right)
+
+        if right_gap <= block_width * 0.04 and left_gap >= block_width * 0.18:
+            return WD_ALIGN_PARAGRAPH.RIGHT
+        if abs(row_center - block_center) <= block_width * 0.08:
+            return WD_ALIGN_PARAGRAPH.CENTER
+        if left_gap <= block_width * 0.04 and right_gap >= block_width * 0.18:
+            return WD_ALIGN_PARAGRAPH.LEFT
+        return fallback
+
     def _resolve_body_font_size_pt(
         self,
         block: TextBlock,
         page: "Page",
         font_size_pt: float,
     ) -> float:
-        """正文字号直接使用 style_inferrer 基于原图几何推断的结果。"""
+        """Use geometric font size, with page-level guards for short body blocks."""
+        page_body = self._page_body_font_size_pt(page)
+        if page_body is None:
+            return font_size_pt
+
+        text = (block.full_text() or "").strip()
+        is_short = block.count_lines() <= 2 or len(text) <= 120
+        is_listish = any(self._is_listish_line(getattr(line, "text", "")) for line in block.lines or [])
+        if is_short or is_listish:
+            return min(font_size_pt, page_body * 1.12)
+        if block.block_type == BlockType.TEXT and font_size_pt > page_body * 1.28:
+            return min(font_size_pt, page_body * 1.18)
         return font_size_pt
+
+    @staticmethod
+    def _looks_like_question_or_option_block(block: TextBlock) -> bool:
+        lines = [(getattr(line, "text", "") or "").strip() for line in block.lines or []]
+        lines = [line for line in lines if line]
+        if not lines:
+            return False
+        hits = sum(1 for line in lines if _QUESTION_OR_OPTION_RE.match(line))
+        if hits >= 2:
+            return True
+        text = re.sub(r"\s+", " ", block.full_text() or "").strip()
+        option_hits = len(re.findall(r"(?:^|\s)[A-H][\.\)]\s*\S", text))
+        numbered_prompt = bool(re.match(r"^\s*\d{1,2}\s*[A-Z][a-z]", text))
+        return numbered_prompt and option_hits >= 2
 
     @staticmethod
     def _page_body_font_size_pt(page: "Page") -> Optional[float]:
@@ -1818,27 +2212,7 @@ class DocxRenderer(BaseRenderer):
         if not image_data:
             return None
 
-        mapper = ctx.coord_mapper
-        bbox = block.bbox
-        # In table cells, recover image scale relative to the local column width
-        # instead of the full-page mapper; otherwise side-column figures become
-        # visibly undersized after the layout table narrows the available area.
-        local_col_px = max(float(ctx.col_right_px) - float(ctx.col_left_px), 1.0)
-        local_ratio = max(float(bbox.width), 1.0) / local_col_px
-        pw = min(mapper.w(bbox.width), ctx.col_width_pt * 0.98)
-        if getattr(ctx, "in_table_cell", False):
-            pw = min(max(pw, ctx.col_width_pt * min(local_ratio, 0.98)), ctx.col_width_pt * 0.98)
-            if getattr(block, "block_type", None) == BlockType.FIGURE:
-                pw = min(max(pw, ctx.col_width_pt * 0.72), ctx.col_width_pt * 0.98)
-        # 高度校正：仅对极宽的图片（宽高比 > 1.8，如横幅/全景图）才用高度约束，
-        # 避免报纸/杂志中常见的横图（宽高比 ~1.2~1.6）被不必要地缩小。
-        # 对于这类图片，目标列/跨列单元格通常足够高，按宽度渲染不会溢出。
-        if bbox.height > 0 and bbox.width > 0 and ctx.col_width_pt > 0:
-            src_aspect = bbox.width / bbox.height
-            if src_aspect > 1.8:
-                pw_by_height = mapper.h(bbox.height) * bbox.width / bbox.height
-                pw = min(pw, pw_by_height)
-        pw = self._scale(pw)
+        pw = self._visual_block_width_pt(block, ctx, apply_fit_scale=False)
 
         if space_before > self._scale(3):
             add_spacing_para(container, min(space_before, self._scale(12)))
@@ -1854,6 +2228,69 @@ class DocxRenderer(BaseRenderer):
             pass
         set_paragraph_spacing(p, space_after=self._scale(3))
         return p
+
+    def _visual_block_width_pt(
+        self,
+        block: Block,
+        ctx: RenderContext,
+        *,
+        apply_fit_scale: bool,
+        max_ratio: float = 0.98,
+        min_width_pt: float = 12.0,
+    ) -> float:
+        """Map a visual block's source bbox width into the current DOCX container."""
+        bbox = block.bbox
+        local_col_px = max(float(ctx.col_right_px) - float(ctx.col_left_px), 1.0)
+        source_ratio = max(float(bbox.width), 1.0) / local_col_px
+        width_pt = ctx.col_width_pt * min(max(source_ratio, 0.0), max_ratio)
+
+        mapper_width = ctx.coord_mapper.w(max(float(bbox.width), 1.0))
+        if not getattr(ctx, "in_table_cell", False):
+            width_pt = min(width_pt, mapper_width, ctx.col_width_pt * max_ratio)
+        else:
+            width_pt = min(width_pt, ctx.col_width_pt * max_ratio)
+            if (
+                block.block_type in {BlockType.FIGURE, BlockType.TABLE}
+                and float(getattr(ctx, "span_gap_pt", 0.0) or 0.0) > 0
+                and float(getattr(ctx.page, "usable_width_pt", 0.0) or 0.0) > 0
+            ):
+                page_ratio_width = (
+                    float(ctx.page.usable_width_pt)
+                    * max(float(bbox.width), 1.0)
+                    / max(float(ctx.page.image_width), 1.0)
+                )
+                width_pt = min(
+                    max(width_pt, page_ratio_width),
+                    ctx.col_width_pt + float(ctx.span_gap_pt),
+                    float(ctx.page.usable_width_pt) * max_ratio,
+                )
+
+        effective_max_ratio = max_ratio
+        if (
+            bool(getattr(ctx, "local_visual_band", False))
+            and block.block_type in {BlockType.FIGURE, BlockType.TABLE}
+        ):
+            effective_max_ratio = min(effective_max_ratio, 0.9)
+
+        cap_width_pt = ctx.col_width_pt * effective_max_ratio
+        if (
+            getattr(ctx, "in_table_cell", False)
+            and block.block_type in {BlockType.FIGURE, BlockType.TABLE}
+            and float(getattr(ctx, "span_gap_pt", 0.0) or 0.0) > 0
+        ):
+            cap_width_pt = min(
+                ctx.col_width_pt + float(ctx.span_gap_pt),
+                float(getattr(ctx.page, "usable_width_pt", ctx.col_width_pt) or ctx.col_width_pt) * max_ratio,
+            )
+
+        if float(bbox.height) > 0 and float(bbox.width) > 0:
+            src_aspect = float(bbox.width) / max(float(bbox.height), 1.0)
+            if src_aspect > 1.8:
+                height_width_pt = ctx.coord_mapper.h(float(bbox.height)) * src_aspect
+                width_pt = min(width_pt, height_width_pt)
+
+        width_pt = max(min_width_pt, min(width_pt, cap_width_pt))
+        return self._scale(width_pt) if apply_fit_scale else width_pt
 
     def _render_equation_block(self, container, block: EquationBlock,
                                ctx: RenderContext, space_before: float) -> Optional[object]:
@@ -1892,7 +2329,14 @@ class DocxRenderer(BaseRenderer):
             del tab_stop
             run = p.add_run()
             try:
-                run.add_picture(io.BytesIO(image_data), width=Pt(min(self._scale(max(ctx.col_width_pt * 0.72, 20.0)), ctx.col_width_pt * 0.78)))
+                formula_width = self._visual_block_width_pt(
+                    block,
+                    ctx,
+                    apply_fit_scale=True,
+                    max_ratio=0.72,
+                    min_width_pt=18.0,
+                )
+                run.add_picture(io.BytesIO(image_data), width=Pt(formula_width))
             except Exception:
                 pass
             p.add_run("\t")
@@ -2005,6 +2449,12 @@ class DocxRenderer(BaseRenderer):
             return None, True
 
         mapper = ctx.coord_mapper
+        layout_profile = str((getattr(ctx.page, "attributes", None) or {}).get("layout_profile", "") or "")
+        compact_multicol_text = (
+            layout_profile in {"newspaper_mixed", "generic_complex"}
+            and int(getattr(block, "col_count", 1) or 1) >= 3
+            and rtype == BlockType.TEXT
+        )
 
         # ── 从 block.style 读取全部样式（无推断逻辑） ────────────────
         alignment = _ALIGN_MAP.get(
@@ -2012,9 +2462,12 @@ class DocxRenderer(BaseRenderer):
             WD_ALIGN_PARAGRAPH.LEFT,
         )
         sp_after = self._scale(max(float(block_effective.get("space_after_pt", 1.0) or 1.0) - self._corr_space_after_pt, 0))
+        if compact_multicol_text:
+            sp_after = 0.0
         line_spacing = block_effective.get("line_spacing")
         if line_spacing is not None:
-            line_spacing = max(1.1, float(line_spacing))
+            min_line_spacing = 1.0 if compact_multicol_text else 1.1
+            line_spacing = max(min_line_spacing, float(line_spacing))
         preserve_breaks_on_ambiguous_justify = bool(
             getattr(self.config, "docx_preserve_breaks_on_ambiguous_justify", True)
         )
@@ -2028,6 +2481,17 @@ class DocxRenderer(BaseRenderer):
         ):
             alignment = WD_ALIGN_PARAGRAPH.LEFT
             ambiguous_justify = True
+        if (
+            alignment == WD_ALIGN_PARAGRAPH.CENTER
+            and rtype == BlockType.TEXT
+            and self._looks_like_question_or_option_block(block)
+        ):
+            alignment = WD_ALIGN_PARAGRAPH.LEFT
+        local_visual_band = bool(getattr(ctx, "local_visual_band", False))
+        if local_visual_band and is_title:
+            alignment = self._local_visual_title_alignment(block, ctx, alignment)
+        elif local_visual_band and rtype in {BlockType.TEXT, BlockType.ABSTRACT, BlockType.REFERENCE}:
+            alignment = self._local_visual_text_alignment(block, ctx, alignment)
         bbox_h_pt = mapper.h(max(block.bbox.height, 0.0))
         content_h_pt = self._estimate_text_content_height_pt(
             block=block,
@@ -2076,7 +2540,7 @@ class DocxRenderer(BaseRenderer):
 
             run = p.add_run(run_text)
             if is_title:
-                title_alignment = str(block_effective.get("alignment") or "left")
+                title_alignment = self._paragraph_alignment_name(alignment)
                 title_font_size = self._resolve_title_font_size_pt(
                     block=block,
                     page=ctx.page,
@@ -2088,7 +2552,7 @@ class DocxRenderer(BaseRenderer):
                     title_east_asia = east_asia
                 set_run_font(
                     run,
-                    font_size=self._scale_font(title_font_size),
+                    font_size=self._scale_title_font(block, ctx.page, title_font_size),
                     bold=bold,
                     italic=italic,
                     underline=underline,
@@ -2117,6 +2581,13 @@ class DocxRenderer(BaseRenderer):
                     font_size_pt=float(run_style.get("font_size_pt") or self.config.default_font_size_pt),
                 )
                 font_size = self._scale_font(body_font_size)
+                if (
+                    bool(getattr(ctx, "local_visual_band", False))
+                    and rtype == BlockType.TEXT
+                    and block.count_lines() <= 2
+                    and len(text) <= 120
+                ):
+                    font_size = min(font_size, self._scale_font(self.config.default_font_size_pt * 1.05))
 
             set_run_font(
                 run,
@@ -2148,10 +2619,14 @@ class DocxRenderer(BaseRenderer):
                     render_mode=str(getattr(ctx, "render_mode", "") or ""),
                     in_table_cell=bool(getattr(ctx, "in_table_cell", False)),
                     force_table_breaks=bool(getattr(ctx, "preserve_visual_breaks_in_table", False)),
+                    local_visual_band=local_visual_band,
                 )
+                if compact_multicol_text:
+                    keep_visual_breaks = False
                 prev_row_text = ""
                 for ri, row in enumerate(visual_rows):
                     prev_text = ""
+                    prev_line = None
                     for ln in row:
                         curr_text = ln.text.strip()
                         if not curr_text:
@@ -2163,10 +2638,15 @@ class DocxRenderer(BaseRenderer):
                             and should_insert_space(prev_row_text, curr_text)
                         ):
                             p.add_run(" ")
-                        if prev_text and should_insert_space(prev_text, curr_text):
-                            p.add_run(" ")
+                        if prev_text:
+                            gap_text = self._visual_fragment_gap_text(prev_line, ln, block)
+                            if gap_text:
+                                p.add_run(gap_text)
+                            elif should_insert_space(prev_text, curr_text):
+                                p.add_run(" ")
                         _write_one_run(p, curr_text, _line_effective_style(ln))
                         prev_text = curr_text
+                        prev_line = ln
                         prev_row_text = curr_text
                     if ri < len(visual_rows) - 1 and keep_visual_breaks:
                         p.add_run().add_break()
@@ -2189,12 +2669,35 @@ class DocxRenderer(BaseRenderer):
             _write_runs(p, txt, para_lines=para_lines)
             return p
 
+        def _make_visual_row_para(row: List[object], is_first: bool, is_last: bool) -> object:
+            row_text = "".join((getattr(ln, "text", "") or "").strip() for ln in row).strip()
+            p = container.add_paragraph()
+            reset_paragraph_format(p)
+            set_paragraph_spacing(
+                p,
+                space_before=space_before if is_first else 0,
+                space_after=sp_after if is_last else 0,
+            )
+            p.alignment = self._alignment_for_visual_row(row, block, alignment)
+            if line_spacing is not None:
+                p.paragraph_format.line_spacing = float(line_spacing)
+            _write_runs(p, row_text, para_lines=row)
+            return p
+
         # ── 多段落 vs 单段落渲染 ─────────────────────────────────────
         # 多段落时：block.paragraphs 已由 pipeline 设置，
         # 各段的 first_line_indent_px 已由 style_inferrer 填充
         # Caption 类块始终走单段落路径，以便用软换行保留行间结构
         last_p = None
-        if block.paragraphs and len(block.paragraphs) > 1 and not is_caption:
+        visual_rows = self._group_lines_into_visual_rows(block.lines or [])
+        if self._should_render_visual_rows_as_paragraphs(block, visual_rows):
+            for ri, row in enumerate(visual_rows):
+                last_p = _make_visual_row_para(
+                    row,
+                    is_first=(ri == 0),
+                    is_last=(ri == len(visual_rows) - 1),
+                )
+        elif block.paragraphs and len(block.paragraphs) > 1 and not is_caption:
             for pi, para in enumerate(block.paragraphs):
                 para_text = para.text.strip()
                 if not para_text.strip():
@@ -2334,6 +2837,75 @@ class DocxRenderer(BaseRenderer):
         return block.count_lines() >= 3 or len(text) >= 80
 
     @staticmethod
+    def _paragraph_alignment_name(alignment) -> str:
+        if alignment == WD_ALIGN_PARAGRAPH.CENTER:
+            return "center"
+        if alignment == WD_ALIGN_PARAGRAPH.RIGHT:
+            return "right"
+        if alignment == WD_ALIGN_PARAGRAPH.JUSTIFY:
+            return "justify"
+        return "left"
+
+    def _local_visual_title_alignment(self, block: TextBlock, ctx: RenderContext, fallback):
+        edges: List[Tuple[float, float]] = []
+        for line in block.lines or []:
+            if line.x1 is None or line.x2 is None:
+                continue
+            edges.append((float(line.x1), float(line.x2)))
+        if not edges:
+            return fallback
+
+        col_left = float(getattr(ctx, "col_left_px", 0.0) or 0.0)
+        col_right = float(getattr(ctx, "col_right_px", 0.0) or 0.0)
+        col_w = max(col_right - col_left, 1.0)
+        left_gap = min(max(0.0, x1 - col_left) for x1, _ in edges)
+        right_gap = min(max(0.0, col_right - x2) for _, x2 in edges)
+        left_edge_span = max(x1 for x1, _ in edges) - min(x1 for x1, _ in edges)
+        right_edge_span = max(x2 for _, x2 in edges) - min(x2 for _, x2 in edges)
+        centers = [((x1 + x2) * 0.5) for x1, x2 in edges]
+        center_delta = abs((sum(centers) / len(centers)) - ((col_left + col_right) * 0.5))
+
+        if (
+            len(edges) >= 2
+            and left_gap <= col_w * 0.08
+            and left_edge_span <= col_w * 0.035
+            and right_edge_span >= col_w * 0.12
+        ):
+            return WD_ALIGN_PARAGRAPH.LEFT
+        if left_gap <= col_w * 0.08 and right_gap >= max(left_gap + col_w * 0.04, col_w * 0.035):
+            return WD_ALIGN_PARAGRAPH.LEFT
+        if right_gap <= col_w * 0.08 and left_gap >= max(right_gap + col_w * 0.04, col_w * 0.035):
+            return WD_ALIGN_PARAGRAPH.RIGHT
+        if center_delta <= col_w * 0.08:
+            return WD_ALIGN_PARAGRAPH.CENTER
+        return fallback
+
+    def _local_visual_text_alignment(self, block: TextBlock, ctx: RenderContext, fallback):
+        edges: List[Tuple[float, float]] = []
+        for line in block.lines or []:
+            if line.x1 is None or line.x2 is None:
+                continue
+            edges.append((float(line.x1), float(line.x2)))
+        if not edges:
+            return fallback
+
+        col_left = float(getattr(ctx, "col_left_px", 0.0) or 0.0)
+        col_right = float(getattr(ctx, "col_right_px", 0.0) or 0.0)
+        col_w = max(col_right - col_left, 1.0)
+        left_gap = sum(max(0.0, x1 - col_left) for x1, _ in edges) / len(edges)
+        right_gap = sum(max(0.0, col_right - x2) for _, x2 in edges) / len(edges)
+        centers = [((x1 + x2) * 0.5) for x1, x2 in edges]
+        center_delta = abs((sum(centers) / len(centers)) - ((col_left + col_right) * 0.5))
+
+        if left_gap <= col_w * 0.08 and right_gap >= max(left_gap + col_w * 0.04, col_w * 0.035):
+            return WD_ALIGN_PARAGRAPH.LEFT
+        if right_gap <= col_w * 0.08 and left_gap >= max(right_gap + col_w * 0.04, col_w * 0.035):
+            return WD_ALIGN_PARAGRAPH.RIGHT
+        if center_delta <= col_w * 0.08:
+            return WD_ALIGN_PARAGRAPH.CENTER
+        return fallback
+
+    @staticmethod
     def _is_listish_line(text: str) -> bool:
         return bool(_LISTISH_RE.match((text or "").strip()))
 
@@ -2348,10 +2920,18 @@ class DocxRenderer(BaseRenderer):
         render_mode: str = "",
         in_table_cell: bool = False,
         force_table_breaks: bool = False,
+        local_visual_band: bool = False,
     ) -> bool:
         if block.block_type in _CAPTION_TYPES:
             return True
         if not preserve_line_breaks:
+            return False
+        if (
+            local_visual_band
+            and block.block_type == BlockType.TITLE
+            and alignment == WD_ALIGN_PARAGRAPH.LEFT
+            and self._cjk_ratio(block.full_text()) < 0.20
+        ):
             return False
         if (
             force_table_breaks
@@ -2360,8 +2940,6 @@ class DocxRenderer(BaseRenderer):
             and self._cjk_ratio(block.full_text()) < 0.20
         ):
             return True
-        if render_mode == "reflow" and block.block_type == BlockType.TEXT:
-            return False
 
         row_count = len(visual_rows)
         text_len = len(block.full_text().strip())
@@ -2369,6 +2947,12 @@ class DocxRenderer(BaseRenderer):
             row and self._is_listish_line(getattr(row[0], "text", ""))
             for row in visual_rows
         )
+
+        if self._should_preserve_field_like_visual_breaks(block, visual_rows):
+            return True
+
+        if render_mode == "reflow" and block.block_type == BlockType.TEXT:
+            return False
 
         if alignment == WD_ALIGN_PARAGRAPH.JUSTIFY:
             if not preserve_breaks_on_ambiguous_justify:
@@ -2399,6 +2983,65 @@ class DocxRenderer(BaseRenderer):
             return True
         return row_count <= 2
 
+    def _should_preserve_field_like_visual_breaks(
+        self,
+        block: TextBlock,
+        visual_rows: List[List[object]],
+    ) -> bool:
+        if block.block_type not in {
+            BlockType.TEXT,
+            BlockType.HEADER,
+            BlockType.FOOTER,
+            BlockType.PAGE_NUMBER,
+            BlockType.REFERENCE,
+            BlockType.FOOTNOTE,
+        }:
+            return False
+        if len(visual_rows) < 2:
+            return False
+
+        row_texts = [
+            " ".join((getattr(ln, "text", "") or "").strip() for ln in row).strip()
+            for row in visual_rows
+        ]
+        row_texts = [text for text in row_texts if text]
+        if len(row_texts) < 2:
+            return False
+
+        field_hits = sum(1 for text in row_texts if _FIELD_LIKE_LINE_RE.search(text))
+        colon_hits = sum(1 for text in row_texts if re.match(r"^\s*[\w\s]{1,32}:", text))
+        if field_hits >= 1 and (field_hits + colon_hits) >= 2:
+            return True
+
+        if block.block_type in {BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER}:
+            return True
+
+        page_h = max(float(getattr(block, "bbox", None).y2 if getattr(block, "bbox", None) else 0.0), 1.0)
+        page = getattr(block, "page", None)
+        if page is not None:
+            page_h = max(float(getattr(page, "image_height", 0) or 0), page_h)
+        page_like_top = float(block.bbox.y1) <= max(96.0, page_h * 0.07)
+        if not page_like_top:
+            return False
+
+        row_width_ratios = self._visual_row_width_ratios(block, visual_rows)
+        if len(row_width_ratios) < 2:
+            return False
+        width_spread = max(row_width_ratios) - min(row_width_ratios)
+        shortish_rows = sum(1 for text in row_texts if len(text) <= 72)
+        return width_spread >= 0.35 and shortish_rows >= max(1, len(row_texts) // 2)
+
+    @staticmethod
+    def _visual_row_width_ratios(block: TextBlock, visual_rows: List[List[object]]) -> List[float]:
+        base_width = max(float(block.bbox.width), 1.0)
+        ratios: List[float] = []
+        for row in visual_rows:
+            xs = [float(getattr(ln, "x1")) for ln in row if getattr(ln, "x1", None) is not None]
+            xe = [float(getattr(ln, "x2")) for ln in row if getattr(ln, "x2", None) is not None]
+            if xs and xe:
+                ratios.append((max(xe) - min(xs)) / base_width)
+        return ratios
+
     def _looks_like_sparse_latin_linebreak_block(
         self,
         block: TextBlock,
@@ -2413,14 +3056,7 @@ class DocxRenderer(BaseRenderer):
         if not text or self._cjk_ratio(text) >= 0.20:
             return False
 
-        base_width = max(float(block.bbox.width), 1.0)
-        row_widths: List[float] = []
-        for row in visual_rows:
-            xs = [float(getattr(ln, "x1")) for ln in row if getattr(ln, "x1", None) is not None]
-            xe = [float(getattr(ln, "x2")) for ln in row if getattr(ln, "x2", None) is not None]
-            if not xs or not xe:
-                continue
-            row_widths.append((max(xe) - min(xs)) / base_width)
+        row_widths = self._visual_row_width_ratios(block, visual_rows)
 
         if len(row_widths) < 4:
             return False
@@ -2516,6 +3152,7 @@ class DocxRenderer(BaseRenderer):
             return
 
         num_cols = zone.col_count
+        local_visual_band = self._is_local_visual_zone(zone, page)
 
         # 找出跨列集合
         spanned_set = set()
@@ -2525,7 +3162,29 @@ class DocxRenderer(BaseRenderer):
                 spanned_set.update(cols)
 
         visual_gap = min(12.0, usable_w_pt * 0.015)
+        if local_visual_band:
+            visual_gap = max(18.0, min(28.0, usable_w_pt * 0.035))
         col_widths = self._column_widths_pt(num_cols, col_px, img_w, usable_w_pt)
+        if zone.region_kind == "decorative_sidecar" and num_cols == 2:
+            label_width_px = max(
+                (
+                    float(block.bbox.width)
+                    for block in blocks
+                    if isinstance(block, TextBlock)
+                    and (getattr(block, "attributes", None) or {}).get("docx_decorative_role") == "left_sidecar"
+                ),
+                default=0.0,
+            )
+            side_ratio = min(0.20, max(0.12, (label_width_px / max(float(img_w), 1.0)) + 0.035))
+            col_widths = [usable_w_pt * side_ratio, usable_w_pt * (1.0 - side_ratio)]
+            visual_gap = min(8.0, usable_w_pt * 0.01)
+        if local_visual_band:
+            col_widths = self._local_visual_band_col_widths_pt(
+                zone,
+                page,
+                total_width_pt=usable_w_pt,
+                visual_gap_pt=visual_gap,
+            )
 
         if not spanned_set:
             # 无跨列区块：在简单的 N 列布局表格中渲染
@@ -2556,7 +3215,8 @@ class DocxRenderer(BaseRenderer):
                 ctx = RenderContext(coord_mapper=mapper, page=page,
                                    col_width_pt=col_widths[ci],
                                    col_left_px=cl, col_right_px=cr,
-                                   in_table_cell=True)
+                                   in_table_cell=True,
+                                   local_visual_band=local_visual_band)
                 prev_y = 0
                 for block in col_blks:
                     gap = max(0, block.bbox.y1 - prev_y)
@@ -2638,6 +3298,7 @@ class DocxRenderer(BaseRenderer):
                 col_left_px=left_px,
                 col_right_px=right_px,
                 in_table_cell=True,
+                span_gap_pt=max(0, len(cols) - 1) * visual_gap,
             )
             setattr(ctx, "render_mode", "reflow")
             prev_y = float(base_y or 0.0)
@@ -2735,6 +3396,25 @@ class DocxRenderer(BaseRenderer):
             _render_standalone_span(block)
             consumed.add(id(block))
 
+        body_single_top = min(
+            (
+                float(block.bbox.y1)
+                for block in single_blocks
+                if block.block_type not in {BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER}
+            ),
+            default=first_single_top,
+        )
+        leading_layout_spans = [
+            block for block in sorted(span_blocks, key=lambda b: (float(b.bbox.y1), float(b.bbox.x1)))
+            if id(block) not in consumed
+            and block.block_type in layout_span_types
+            and float(block.bbox.y1) <= body_single_top
+            and float(block.bbox.y2) <= body_single_top + max(18.0, float(page.image_height) * 0.015)
+        ]
+        for block in leading_layout_spans:
+            _render_standalone_span(block)
+            consumed.add(id(block))
+
         layout_spans = [
             block for block in span_blocks
             if id(block) not in consumed and block.block_type in layout_span_types
@@ -2789,7 +3469,15 @@ class DocxRenderer(BaseRenderer):
                 if before:
                     sub_units.append((min(float(b.bbox.y1) for b in before), "band", before))
                     assigned_single_ids.update(id(block) for block in before)
-                sub_units.append((float(span.bbox.y1), "span", span))
+                span_cols = set(_block_cols(span))
+                side_blocks = [
+                    block for block in single_items
+                    if id(block) not in assigned_single_ids
+                    and not (set(_block_cols(block)) & span_cols)
+                    and _is_side_block(block, span, span_cols)
+                ]
+                assigned_single_ids.update(id(block) for block in side_blocks)
+                sub_units.append((float(span.bbox.y1), "span", (span, side_blocks)))
             after = [block for block in single_items if id(block) not in assigned_single_ids]
             if after:
                 sub_units.append((min(float(b.bbox.y1) for b in after), "band", after))
@@ -2799,7 +3487,7 @@ class DocxRenderer(BaseRenderer):
                 for local_ci, sub_cell in enumerate(sub_row.cells):
                     _init_cell(sub_cell, add_gap=(local_ci < len(seg_cols) - 1))
                 if kind == "span":
-                    block = payload
+                    block, side_blocks = payload
                     cols = [ci for ci in _block_cols(block) if ci in local_index]
                     start = min(local_index[ci] for ci in cols)
                     end = max(local_index[ci] for ci in cols)
@@ -2814,6 +3502,24 @@ class DocxRenderer(BaseRenderer):
                         base_y=row_top,
                         gap_cap_pt=14.0,
                     )
+                    side_by_col: dict[int, List[Block]] = defaultdict(list)
+                    for side_block in side_blocks:
+                        side_cols = [ci for ci in _block_cols(side_block) if ci in local_index]
+                        if not side_cols:
+                            continue
+                        side_by_col[side_cols[0]].append(side_block)
+                    occupied = set(cols)
+                    for ci, side_stream in side_by_col.items():
+                        if ci in occupied:
+                            continue
+                        _render_stream(
+                            sub_row.cells[local_index[ci]],
+                            side_stream,
+                            [ci],
+                            local_widths[local_index[ci]],
+                            base_y=row_top,
+                            gap_cap_pt=10.0,
+                        )
                     continue
 
                 by_col: dict[int, List[Block]] = defaultdict(list)

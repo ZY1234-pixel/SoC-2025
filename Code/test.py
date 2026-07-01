@@ -62,7 +62,7 @@ DEFAULT_LAYOUT_SCORE_THRESHOLD = 0.50
 DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD = 0.50
 DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD = 0.18
 RAW_RESULT_PREVIEW_MAX_TEXT = 300
-TITLE_OCR_RECHECK_TYPES = {"title"}
+OCR_RECHECK_TYPES = {"title", "text", "header"}
 PICODET_LAYOUT_17CLS_LABELS = [
     "text",
     "title",
@@ -558,18 +558,53 @@ def _merge_rechecked_lines(region: dict, candidate_lines: list[dict]) -> list[di
             used_candidates.add(best_index)
         else:
             merged.append(old)
-    return merged if changed else current
+
+    def _line_key(line: dict) -> tuple[float, float]:
+        text_region = line.get("text_region")
+        if not isinstance(text_region, list) or not text_region:
+            return (float("inf"), float("inf"))
+        xs = [
+            float(point[0])
+            for point in text_region
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        ]
+        ys = [
+            float(point[1])
+            for point in text_region
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        ]
+        return ((min(ys) + max(ys)) * 0.5, min(xs)) if xs and ys else (float("inf"), float("inf"))
+
+    existing_texts = {str(line.get("text", "") or "").strip() for line in merged if str(line.get("text", "") or "").strip()}
+    for idx, candidate in enumerate(candidate_lines):
+        if idx in used_candidates:
+            continue
+        candidate_text = str(candidate.get("text", "") or "").strip()
+        if not candidate_text or candidate_text in existing_texts:
+            continue
+        if any(SequenceMatcher(None, candidate_text, existing).ratio() >= 0.86 for existing in existing_texts):
+            continue
+        if float(candidate.get("confidence", 0.0) or 0.0) < 0.88:
+            continue
+        merged.append(candidate)
+        existing_texts.add(candidate_text)
+        changed = True
+
+    if changed:
+        merged.sort(key=_line_key)
+        return merged
+    return current
 
 
-def recheck_title_ocr_with_preprocessing(engine, image, result: list) -> int:
-    """用扩边二值化 OCR 复核容易漏行首字符的标题/短文本块。"""
+def recheck_text_ocr_with_preprocessing(engine, image, result: list) -> int:
+    """用扩边二值化 OCR 复核容易漏行/漏字符的标题和页首短文本块。"""
     if not result:
         return 0
     h, w = image.shape[:2]
     changed = 0
     for region in result:
         region_type = str(region.get("type", "") or "").lower()
-        if region_type not in TITLE_OCR_RECHECK_TYPES:
+        if region_type not in OCR_RECHECK_TYPES:
             continue
         bbox = region.get("bbox")
         if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
@@ -580,10 +615,14 @@ def recheck_title_ocr_with_preprocessing(engine, image, result: list) -> int:
         x1, y1, x2, y2 = [int(round(float(v))) for v in bbox]
         bw = max(1, x2 - x1)
         bh = max(1, y2 - y1)
+        is_top_text = region_type in {"text", "header"} and y1 <= max(96, int(round(h * 0.07)))
+        if region_type not in {"title"} and not is_top_text:
+            continue
         pad_x = max(16, int(round(bw * 0.08)))
         pad_y = max(8, int(round(bh * 0.12)))
+        pad_top = max(pad_y, 36, int(round(bh * 0.45))) if is_top_text else pad_y
         ex1 = max(0, x1 - pad_x)
-        ey1 = max(0, y1 - pad_y)
+        ey1 = max(0, y1 - pad_top)
         ex2 = min(w, x2 + pad_x)
         ey2 = min(h, y2 + pad_y)
         crop = image[ey1:ey2, ex1:ex2]
@@ -615,7 +654,7 @@ def recheck_title_ocr_with_preprocessing(engine, image, result: list) -> int:
 def analyze_page(engine, adapter: PaddleAdapter, image, page_index: int, source_path: str) -> tuple[dict, list, float]:
     started_at = time.time()
     result, _ = engine(image, img_idx=page_index)
-    recheck_title_ocr_with_preprocessing(engine, image, result)
+    recheck_text_ocr_with_preprocessing(engine, image, result)
     elapsed = time.time() - started_at
     page_document = adapter.convert(result, image, img_idx=page_index)
     page_document["pages"][0]["image_path"] = source_path

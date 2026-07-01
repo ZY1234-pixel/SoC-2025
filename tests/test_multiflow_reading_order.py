@@ -164,6 +164,7 @@ def test_pipeline_repairs_anomalous_model_order_for_two_column_magazine():
     pipeline = RecoveryPipeline(
         config=RecoveryConfig(
             reading_order_strategy="model_order",
+            model_order_geometric_repair_enabled=True,
             font_classification_enabled=False,
         )
     )
@@ -206,6 +207,7 @@ def test_repaired_model_order_short_titles_anchor_to_following_text_column():
     pipeline = RecoveryPipeline(
         config=RecoveryConfig(
             reading_order_strategy="model_order",
+            model_order_geometric_repair_enabled=True,
             font_classification_enabled=False,
         )
     )
@@ -217,7 +219,7 @@ def test_repaired_model_order_short_titles_anchor_to_following_text_column():
     assert blocks["short_title"].col_index == blocks["left_body"].col_index
 
 
-def test_model_order_geometric_repair_is_applied_by_default_for_model_order_strategy():
+def test_model_order_geometric_repair_is_disabled_by_default_for_model_order_strategy():
     page = {
         "version": "2.0",
         "metadata": {},
@@ -245,8 +247,68 @@ def test_model_order_geometric_repair_is_applied_by_default_for_model_order_stra
         )
     )
     doc = pipeline.build_document(page)
+    blocks = [blk for zone in doc.pages[0].zones for blk in zone.blocks]
 
-    assert doc.pages[0].attributes["rule_stats"]["model_order_geometric_repair"] == 1
+    assert [block.block_id for block in blocks] == [
+        "right_mid",
+        "left_bottom",
+        "right_top",
+        "left_top",
+        "title",
+        "right_bottom",
+    ]
+    assert doc.pages[0].attributes["rule_stats"]["model_order_geometric_repair"] == 0
+    assert all((block.attributes or {}).get("reading_order_strategy") == "model_order" for block in blocks)
+
+
+def test_weak_multicolumn_collapse_preserves_model_reading_order():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1653,
+                "height": 2339,
+                "blocks": [
+                    _model_order_text_block("header", [185, 274, 1198, 356], "HYDROLOGICAL PROCESSES", 0, category="header"),
+                    _model_order_text_block("paper_title", [200, 418, 1442, 527], "Daily streamflow modelling", 1, category="title"),
+                    _model_order_text_block("authors", [419, 574, 1223, 612], "Jin-Yong Choi Bernard Engel", 2),
+                    _model_order_text_block("affiliations", [232, 616, 1412, 673], "Department of Agricultural Engineering", 3),
+                    _model_order_text_block("abstract_title", [771, 784, 899, 817], "Abstract:", 4, category="title"),
+                    _model_order_text_block("abstract", [216, 835, 1428, 1368], "A cell-based long-term hydrological model " * 8, 5, category="abstract"),
+                    _model_order_text_block("keywords", [216, 1383, 1450, 1441], "KEY WORDS watershed modelling GIS", 6),
+                    _model_order_text_block("intro_title", [710, 1506, 934, 1537], "INTRODUCTION", 7, category="title"),
+                    _model_order_text_block("intro_1", [182, 1557, 1459, 1789], "Water resources development and watershed management " * 6, 8),
+                    _model_order_text_block("intro_2", [183, 1791, 1462, 1891], "Continuous models are useful " * 6, 9),
+                    _model_order_text_block("footnote", [187, 1937, 1457, 1991], "Correspondence to Jin-Yong Choi", 10, category="footnote"),
+                ],
+            }
+        ],
+    }
+
+    pipeline = RecoveryPipeline(
+        config=RecoveryConfig(
+            reading_order_strategy="model_order",
+            font_classification_enabled=False,
+        )
+    )
+    doc = pipeline.build_document(page)
+    blocks = [blk for zone in doc.pages[0].zones for blk in zone.blocks]
+
+    assert [block.block_id for block in blocks] == [
+        "header",
+        "paper_title",
+        "authors",
+        "affiliations",
+        "abstract_title",
+        "abstract",
+        "keywords",
+        "intro_title",
+        "intro_1",
+        "intro_2",
+        "footnote",
+    ]
 
 
 def test_pipeline_suppresses_visual_boxes_that_duplicate_text_regions():

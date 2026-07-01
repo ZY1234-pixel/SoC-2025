@@ -29,6 +29,7 @@ _TEXT_TYPES = {
     BlockType.FOOTER,
     BlockType.REFERENCE,
     BlockType.ABSTRACT,
+    BlockType.FOOTNOTE,
     BlockType.FIGURE_CAPTION,
     BlockType.TABLE_CAPTION,
     BlockType.TABLE_FOOTNOTE,

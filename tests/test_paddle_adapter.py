@@ -90,6 +90,44 @@ def test_text_block_bbox_expands_to_cover_text_line_polys() -> None:
     assert block["bbox"] == [20.0, 58.0, 160.0, 150.0]
 
 
+def test_text_duplicate_keeps_multiline_region_over_short_suffix() -> None:
+    adapter = PaddleAdapter()
+    results = [
+        {
+            "type": "text",
+            "bbox": [472, 693, 1518, 729],
+            "score": 0.74,
+            "res": [
+                {
+                    "text": "a Department of Public Health and Hygiene, Medical College of Oita, Oita, Japan",
+                    "text_region": [[472, 693], [1518, 693], [1518, 718], [472, 718]],
+                },
+                {
+                    "text": "b Tokyo Rosai Hospital, Tokyo, Japan",
+                    "text_region": [[473, 725], [955, 725], [955, 750], [473, 750]],
+                },
+            ],
+        },
+        {
+            "type": "text",
+            "bbox": [473, 734, 955, 771],
+            "score": 0.75,
+            "res": [
+                {
+                    "text": "b Tokyo Rosai Hospital, Tokyo, Japan",
+                    "text_region": [[473, 734], [955, 734], [955, 771], [473, 771]],
+                }
+            ],
+        },
+    ]
+
+    filtered, report = adapter._suppress_nested_duplicates(results)
+
+    assert len(filtered) == 1
+    assert "a Department of Public Health" in adapter._extract_region_text(filtered[0])
+    assert any(item["reason"] == "nested_text_duplicate_replaced_shorter" for item in report)
+
+
 def test_pp_doclayout_v3_model_order_and_raw_labels_are_preserved() -> None:
     adapter = PaddleAdapter()
     image = np.zeros((200, 200, 3), dtype=np.uint8)
@@ -522,6 +560,36 @@ def test_caption_anchored_visual_recall_does_not_duplicate_existing_figure() -> 
     blocks = converted["pages"][0]["blocks"]
 
     assert [block["category"] for block in blocks].count("figure") == 1
+
+
+def test_caption_anchored_visual_recall_does_not_cover_existing_text_region() -> None:
+    adapter = PaddleAdapter()
+    image = np.full((900, 700, 3), 255, dtype=np.uint8)
+    image[260:520, 120:620] = 210
+    long_text = (
+        "segmentation model trained on clear imagery, and multi-task models jointly outputting "
+        "CR and segmentation. Although multi-stage pipelines can benefit from reconstruction"
+    )
+    results = [
+        {
+            "type": "figure_caption",
+            "bbox": [260, 545, 430, 575],
+            "score": 0.8,
+            "res": [{"text": "Fig. 3 visualizes the learned prompt map"}],
+        },
+        {
+            "type": "text",
+            "bbox": [125, 270, 610, 510],
+            "score": 0.96,
+            "res": [{"text": long_text}],
+        },
+    ]
+
+    converted = adapter.convert(results, image)
+    blocks = converted["pages"][0]["blocks"]
+
+    assert [block["category"] for block in blocks].count("figure") == 0
+    assert any(block["category"] == "text" and "segmentation model" in block.get("text", "") for block in blocks)
 
 
 def test_formula_number_category_and_attributes_are_preserved() -> None:
