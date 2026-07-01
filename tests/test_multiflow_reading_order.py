@@ -140,6 +140,53 @@ def test_pipeline_model_order_strategy_preserves_upstream_reading_order():
     assert all((block.attributes or {}).get("reading_order_strategy") == "model_order" for block in blocks)
 
 
+def test_model_order_four_column_magazine_keeps_regular_narrow_tracks():
+    page = {
+        "version": "2.0",
+        "metadata": {},
+        "pages": [
+            {
+                "page_index": 0,
+                "width": 1022,
+                "height": 1344,
+                "blocks": [
+                    _model_order_text_block("header", [732, 39, 976, 57], "The Economist December 9th 2023", 0, category="header"),
+                    _model_order_text_block("masthead", [61, 36, 478, 70], "The world this week Business", 1, category="title"),
+                    _model_order_text_block("c0_a", [58, 107, 274, 396], "ByteDance has offered to buy back stock from investors.\nAnother line in the first column.", 2),
+                    _model_order_text_block("c0_b", [58, 409, 271, 734], "Meanwhile, a federal judge imposed an injunction.\nThe first column continues here.", 3),
+                    _model_order_text_block("c1_a", [287, 107, 496, 306], "The conglomerate is writing off assets acquired almost two decades ago.", 4),
+                    _model_order_text_block("c1_b", [287, 339, 502, 697], "Return to never-ever land Disney was forced to defend its business strategy.", 5),
+                    _model_order_text_block("c2_a", [516, 108, 723, 182], "Gold, another asset that does well when interest rates are lower, hit a record.", 6),
+                    _model_order_text_block("c2_b", [516, 410, 729, 628], "The bullish mood on rate cuts spurred investors to push up stockmarkets.", 7),
+                    _model_order_text_block("c3_a", [745, 107, 919, 145], "Scheme took their toll on personal finances.", 8),
+                    _model_order_text_block("c3_b", [746, 447, 960, 836], "After being warned about greenwashing, companies are now being told not to engage in AI-washing.", 9),
+                    _model_order_figure_block("bottom_fig", [288, 859, 958, 1298], 10),
+                ],
+            }
+        ],
+    }
+
+    document = RecoveryPipeline(
+        config=RecoveryConfig(
+            reading_order_strategy="model_order",
+            font_classification_enabled=False,
+        )
+    ).build_document(page)
+    page_obj = document.pages[0]
+    blocks = [blk for zone in page_obj.zones for blk in zone.blocks]
+    by_id = {blk.block_id: blk for blk in blocks}
+    multicol = next(zone for zone in page_obj.zones if any(block.block_id == "bottom_fig" for block in zone.blocks))
+
+    assert multicol.col_count == 4
+    assert by_id["c0_a"].col_index == 0
+    assert by_id["c1_a"].col_index == 1
+    assert by_id["c2_a"].col_index == 2
+    assert by_id["c3_b"].col_index == 3
+    assert by_id["bottom_fig"].spanned_cols == [1, 2, 3]
+    assert by_id["header"].style.alignment == "right"
+    assert by_id["masthead"].style.alignment == "left"
+
+
 def test_pipeline_repairs_anomalous_model_order_for_two_column_magazine():
     page = {
         "version": "2.0",

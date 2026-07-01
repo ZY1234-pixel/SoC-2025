@@ -446,6 +446,13 @@ def _detect_alignment(
             and getattr(block, "col_count", 1) > 1
             and block_width <= col_w * 1.05
         ):
+            if (
+                len(line_edges) == 1
+                and col_w > block_width * 1.15
+                and block_left_gap <= col_w * 0.05
+                and block_width >= col_w * 0.72
+            ):
+                return "left"
             if block_left_gap <= col_w * 0.04 and block_right_gap >= block_left_gap + col_w * 0.04:
                 return "left"
             if block_right_gap <= col_w * 0.04 and block_left_gap >= block_right_gap + col_w * 0.04:
@@ -487,6 +494,13 @@ def _detect_alignment(
     if not is_short_block:
         if left_hit_ratio >= 0.72 and right_hit_ratio >= 0.72 and ragged_right_ratio <= 0.35:
             return "justify"
+        if left_hit_ratio >= 0.58 and right_hit_ratio < 0.58:
+            return "left"
+        if right_hit_ratio >= 0.82 and left_hit_ratio < 0.45:
+            return "right"
+
+    if left_hit_ratio >= 0.70 and right_hit_ratio < 0.35:
+        return "left"
 
     if center_score >= 0.72 and left_hit_ratio < 0.45 and right_hit_ratio < 0.45:
         return "center"

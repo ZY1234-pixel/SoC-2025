@@ -474,14 +474,19 @@ class RecoveryPipeline:
                 block.spanned_cols = [0]
             return
 
-        col_bounds = self._side_note_three_column_bounds(blocks, page_width)
-        if not col_bounds:
-            _columns, col_bounds = detect_columns(
-                skeleton,
-                page_width,
-                max_cols=self.config.max_cols,
-                cluster_thresh=self.config.column_cluster_thresh,
-            )
+        _columns, detected_bounds = detect_columns(
+            skeleton,
+            page_width,
+            max_cols=self.config.max_cols,
+            cluster_thresh=self.config.column_cluster_thresh,
+        )
+        # Dense magazine/newspaper pages should keep their full narrow-column
+        # skeleton.  The side-note detector is deliberately narrower and must
+        # not reinterpret a regular four-column page as "side rail + body".
+        if len(detected_bounds) >= 4:
+            col_bounds = detected_bounds
+        else:
+            col_bounds = self._side_note_three_column_bounds(blocks, page_width) or detected_bounds
         col_count = len(col_bounds)
         if col_count <= 1:
             for block in blocks:
@@ -493,7 +498,10 @@ class RecoveryPipeline:
         detect_spanned_blocks(blocks, col_bounds)
         for block in blocks:
             block.col_count = col_count
-            self._collapse_weak_title_span_to_anchor_column(block, col_bounds)
+            if block.block_type == BlockType.TITLE:
+                self._collapse_weak_title_span_to_anchor_column(block, col_bounds)
+            else:
+                self._collapse_weak_text_span_to_anchor_column(block, col_bounds)
             if block.block_type in _ZONE_STRIP_TYPES:
                 block.spanned_cols = list(range(col_count))
                 block.col_index = 0
@@ -526,6 +534,46 @@ class RecoveryPipeline:
         if best_overlap / width < 0.55:
             return False
         if second_overlap > max(32.0, width * 0.08):
+            return False
+
+        block.col_index = best_col
+        block.spanned_cols = [best_col]
+        return True
+
+    @staticmethod
+    def _collapse_weak_text_span_to_anchor_column(block: Block, col_bounds: List[tuple[float, float]]) -> bool:
+        """Anchor body text that only grazes a neighbouring column.
+
+        OCR/text detectors often give a paragraph bbox a small horizontal
+        overhang into the next rail.  Treating that as a true cross-column block
+        fragments DOCX grid rendering.  This only collapses text-like body
+        blocks when one column explains almost all of the block width and the
+        second overlap is small; balanced spans such as wide headings/captions
+        are left intact.
+        """
+        if (
+            not isinstance(block, TextBlock)
+            or block.block_type not in {BlockType.TEXT, BlockType.ABSTRACT, BlockType.REFERENCE, BlockType.FOOTNOTE}
+            or len(col_bounds) < 2
+            or len(getattr(block, "spanned_cols", []) or []) <= 1
+        ):
+            return False
+
+        width = max(float(block.bbox.width), 1.0)
+        overlaps: List[tuple[int, float]] = []
+        for col_idx, (cx1, cx2) in enumerate(col_bounds):
+            overlap = max(0.0, min(float(block.bbox.x2), float(cx2)) - max(float(block.bbox.x1), float(cx1)))
+            if overlap > 0:
+                overlaps.append((col_idx, overlap))
+        if len(overlaps) <= 1:
+            return False
+
+        overlaps.sort(key=lambda item: item[1], reverse=True)
+        best_col, best_overlap = overlaps[0]
+        second_overlap = overlaps[1][1]
+        if best_overlap / width < 0.70:
+            return False
+        if second_overlap > max(48.0, width * 0.16):
             return False
 
         block.col_index = best_col

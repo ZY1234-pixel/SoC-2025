@@ -180,6 +180,24 @@ def test_weak_title_span_anchors_to_main_column():
     assert title.spanned_cols == [1]
 
 
+def test_body_text_small_column_overhang_anchors_to_main_column():
+    body = TextBlock(
+        bbox=BBox(265, 449, 1825, 712),
+        block_type=BlockType.TEXT,
+        lines=[TextLine(text="A paragraph box can graze the next column without becoming a span.")],
+        col_count=3,
+        col_index=0,
+        spanned_cols=[0, 1],
+    )
+    col_bounds = [(292.0, 1719.0), (1670.0, 3208.0), (3274.0, 4708.0)]
+
+    changed = RecoveryPipeline._collapse_weak_text_span_to_anchor_column(body, col_bounds)
+
+    assert changed
+    assert body.col_index == 0
+    assert body.spanned_cols == [0]
+
+
 def test_multiline_header_with_stable_wide_lines_is_centered():
     page = Page(index=0, image_width=800, image_height=1132)
     block = TextBlock(

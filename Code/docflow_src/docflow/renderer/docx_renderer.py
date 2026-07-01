@@ -2881,6 +2881,12 @@ class DocxRenderer(BaseRenderer):
         return fallback
 
     def _local_visual_text_alignment(self, block: TextBlock, ctx: RenderContext, fallback):
+        if fallback == WD_ALIGN_PARAGRAPH.JUSTIFY:
+            return fallback
+        text_len = len((block.full_text() or "").strip())
+        if block.count_lines() >= 4 and text_len >= 120:
+            return fallback
+
         edges: List[Tuple[float, float]] = []
         for line in block.lines or []:
             if line.x1 is None or line.x2 is None:
