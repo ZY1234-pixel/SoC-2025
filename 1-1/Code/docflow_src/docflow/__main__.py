@@ -1,7 +1,5 @@
 """DocFlow 命令行接口。"""
 import argparse
-import json
-import sys
 
 from docflow.pipeline import RecoveryPipeline
 from docflow.config import RecoveryConfig

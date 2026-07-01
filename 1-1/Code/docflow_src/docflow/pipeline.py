@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -20,6 +21,7 @@ from docflow.model.blocks.factory import BlockFactory
 from docflow.model.page import Document, Page
 from docflow.model.zone import Zone
 from docflow.layout.sorter import sort_layout
+from docflow.layout.column_detector import detect_columns, detect_spanned_blocks
 from docflow.layout.paragraph_detector import split_into_paragraphs
 from docflow.layout.style_inferrer import infer_block_styles
 from docflow.layout.color_inferrer import infer_text_colors
@@ -32,6 +34,8 @@ from docflow.model.blocks.image_block import ImageBlock
 from docflow.model.blocks.equation_block import EquationBlock
 from docflow.model.blocks.table_block import TableBlock
 from docflow.utils.constants import FIGURE_TYPES
+
+logger = logging.getLogger(__name__)
 
 _ZONE_STRIP_TYPES = {
     BlockType.HEADER,
@@ -66,6 +70,7 @@ _ACADEMIC_FOOTER_NOTE_RE = re.compile(
     r"\b(?:correspondence\s+to|received\s+\d{1,2}\s+\w+\s+\d{4}|accepted\s+\d{1,2}\s+\w+\s+\d{4})\b",
     re.IGNORECASE,
 )
+_FORMULA_NUMBER_TEXT_RE = re.compile(r"^\s*\(?\s*\d{1,3}[a-zA-Z]?\s*\)?\s*$")
 
 
 def _infer_title_heading_level(text: str) -> Optional[int]:
@@ -264,7 +269,21 @@ class RecoveryPipeline:
         page.estimate_margins(blocks)
 
         # -- 需要时执行版面分析 ----------------------------------
-        if self._needs_layout_analysis(raw_blocks) and len(blocks) > 1:
+        used_model_order = self._should_use_model_order(raw_blocks)
+        model_order_repaired = 0
+        if used_model_order:
+            blocks = self._apply_model_order_metadata(blocks)
+            self._assign_model_order_columns(
+                blocks,
+                page_width=page.image_width,
+            )
+            if bool(getattr(self.config, "model_order_geometric_repair_enabled", False)):
+                model_order_repaired, blocks = self._repair_anomalous_model_order(
+                    blocks,
+                    page_width=page.image_width,
+                    page_height=page.image_height,
+                )
+        elif self._needs_layout_analysis(raw_blocks) and len(blocks) > 1:
             blocks = sort_layout(
                 blocks,
                 page.image_width,
@@ -310,6 +329,11 @@ class RecoveryPipeline:
             page_width=page.image_width,
             page_height=page.image_height,
         )
+        formula_number_merges, blocks = self._merge_formula_numbers_into_equations(
+            blocks,
+            page_width=page.image_width,
+            page_height=page.image_height,
+        )
 
         blocks = self._merge_short_continuation_fragments(blocks)
         blocks = self._trim_repeated_prefix_within_flows(blocks)
@@ -345,6 +369,9 @@ class RecoveryPipeline:
         if weak_multicolumn_evidence:
             self._collapse_to_single_column(page, blocks)
 
+        self._annotate_page_profile(page, blocks)
+        render_mode = str((page.attributes or {}).get("render_mode", ""))
+
         # -- 样式推断（字号、对齐、行距、缩进、bold/italic 等）-----------
         # 仅填充 JSON 中未明确提供的字段，已有值不覆盖
         infer_block_styles(
@@ -353,14 +380,14 @@ class RecoveryPipeline:
             justify_min_lines=self.config.align_justify_min_lines,
             page_width_px=page.image_width,
             font_mapper=font_mapper,
+            reflow_title_page_width_px=page.image_width if render_mode == "reflow" else 0.0,
         )
         color_inference_stats = infer_text_colors(page, blocks)
 
-        self._annotate_page_profile(page, blocks)
         if page.attributes is None:
             page.attributes = {}
         strategy_name = str(self.config.reading_order_strategy or "").strip().lower()
-        if strategy_name in {"auto", "xycutpp", "xycutpp_paper", "xycutpp_hybrid", "newspaper_hybrid"}:
+        if strategy_name in {"legacy", "auto", "xycutpp", "xycutpp_paper", "xycutpp_hybrid", "newspaper_hybrid"}:
             page.attributes["xycutpp_debug"] = self._collect_xycutpp_proto_debug(blocks)
         page.attributes["rule_stats"] = {
             "category_fix_count": category_fix_count,
@@ -369,6 +396,8 @@ class RecoveryPipeline:
             "decorative_icon_suppressed": decorative_icon_suppressed,
             "spurious_visual_suppressed": spurious_visual_suppressed,
             "figure_text_dedup_suppressed": figure_text_dedup_suppressed,
+            "formula_number_merges": formula_number_merges,
+            "model_order_geometric_repair": model_order_repaired,
             "zone_count": len(page.zones),
             "weak_multicolumn_collapsed": int(weak_multicolumn_evidence),
         }
@@ -384,6 +413,587 @@ class RecoveryPipeline:
     # 辅助方法
     # ------------------------------------------------------------------
 
+    def _should_use_model_order(self, raw_blocks: List[dict]) -> bool:
+        strategy_name = str(self.config.reading_order_strategy or "").strip().lower()
+        if strategy_name != "model_order":
+            return False
+        return bool(raw_blocks) and all(
+            isinstance(block.get("attributes"), dict)
+            and "model_order" in block["attributes"]
+            for block in raw_blocks
+        )
+
+    @staticmethod
+    def _apply_model_order_metadata(blocks: List[Block]) -> List[Block]:
+        def _model_order(block: Block, fallback: int) -> tuple[float, int]:
+            attrs = getattr(block, "attributes", None) or {}
+            try:
+                return float(attrs.get("model_order")), fallback
+            except (TypeError, ValueError):
+                return float(fallback), fallback
+
+        ordered_blocks = [
+            block for _, block in sorted(
+                enumerate(blocks),
+                key=lambda item: _model_order(item[1], item[0]),
+            )
+        ]
+        for index, block in enumerate(ordered_blocks):
+            block.col_count = int(getattr(block, "col_count", 1) or 1)
+            block.col_index = int(getattr(block, "col_index", 0) or 0)
+            block.spanned_cols = list(getattr(block, "spanned_cols", None) or [block.col_index])
+            if block.attributes is None:
+                block.attributes = {}
+            block.attributes["reading_order_strategy"] = "model_order"
+            block.attributes.setdefault("model_order", index)
+        return ordered_blocks
+
+    def _assign_model_order_columns(self, blocks: List[Block], page_width: int) -> None:
+        if page_width <= 0 or len(blocks) < 2:
+            return
+
+        skeleton = [
+            block for block in blocks
+            if isinstance(block, TextBlock)
+            and block.block_type in {
+                BlockType.TEXT,
+                BlockType.ABSTRACT,
+                BlockType.REFERENCE,
+                BlockType.FIGURE_CAPTION,
+                BlockType.TABLE_CAPTION,
+                BlockType.FOOTNOTE,
+            }
+            and block.block_type not in _ZONE_STRIP_TYPES
+            and float(block.bbox.width) <= float(page_width) * 0.42
+            and (
+                block.count_lines() >= 2
+                or len((block.full_text() or "").strip()) >= 18
+            )
+        ]
+        if len(skeleton) < 2:
+            for block in blocks:
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+            return
+
+        _columns, detected_bounds = detect_columns(
+            skeleton,
+            page_width,
+            max_cols=self.config.max_cols,
+            cluster_thresh=self.config.column_cluster_thresh,
+        )
+        # Dense magazine/newspaper pages should keep their full narrow-column
+        # skeleton.  The side-note detector is deliberately narrower and must
+        # not reinterpret a regular four-column page as "side rail + body".
+        if len(detected_bounds) >= 4:
+            col_bounds = detected_bounds
+        else:
+            col_bounds = self._side_note_three_column_bounds(blocks, page_width) or detected_bounds
+        col_count = len(col_bounds)
+        if col_count <= 1:
+            for block in blocks:
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+            return
+
+        detect_spanned_blocks(blocks, col_bounds)
+        for block in blocks:
+            block.col_count = col_count
+            if block.block_type == BlockType.TITLE:
+                self._collapse_weak_title_span_to_anchor_column(block, col_bounds)
+            else:
+                self._collapse_weak_text_span_to_anchor_column(block, col_bounds)
+            if block.block_type in _ZONE_STRIP_TYPES:
+                block.spanned_cols = list(range(col_count))
+                block.col_index = 0
+            if block.attributes is None:
+                block.attributes = {}
+            block.attributes["column_source"] = "model_order_geometry"
+
+    @staticmethod
+    def _collapse_weak_title_span_to_anchor_column(block: Block, col_bounds: List[tuple[float, float]]) -> bool:
+        if (
+            not isinstance(block, TextBlock)
+            or block.block_type != BlockType.TITLE
+            or len(col_bounds) < 2
+            or len(getattr(block, "spanned_cols", []) or []) <= 1
+        ):
+            return False
+
+        width = max(float(block.bbox.width), 1.0)
+        overlaps: List[tuple[int, float]] = []
+        for col_idx, (cx1, cx2) in enumerate(col_bounds):
+            overlap = max(0.0, min(float(block.bbox.x2), float(cx2)) - max(float(block.bbox.x1), float(cx1)))
+            if overlap > 0:
+                overlaps.append((col_idx, overlap))
+        if len(overlaps) <= 1:
+            return False
+
+        overlaps.sort(key=lambda item: item[1], reverse=True)
+        best_col, best_overlap = overlaps[0]
+        second_overlap = overlaps[1][1]
+        if best_overlap / width < 0.55:
+            return False
+        if second_overlap > max(32.0, width * 0.08):
+            return False
+
+        block.col_index = best_col
+        block.spanned_cols = [best_col]
+        return True
+
+    @staticmethod
+    def _collapse_weak_text_span_to_anchor_column(block: Block, col_bounds: List[tuple[float, float]]) -> bool:
+        """Anchor body text that only grazes a neighbouring column.
+
+        OCR/text detectors often give a paragraph bbox a small horizontal
+        overhang into the next rail.  Treating that as a true cross-column block
+        fragments DOCX grid rendering.  This only collapses text-like body
+        blocks when one column explains almost all of the block width and the
+        second overlap is small; balanced spans such as wide headings/captions
+        are left intact.
+        """
+        if (
+            not isinstance(block, TextBlock)
+            or block.block_type not in {BlockType.TEXT, BlockType.ABSTRACT, BlockType.REFERENCE, BlockType.FOOTNOTE}
+            or len(col_bounds) < 2
+            or len(getattr(block, "spanned_cols", []) or []) <= 1
+        ):
+            return False
+
+        width = max(float(block.bbox.width), 1.0)
+        overlaps: List[tuple[int, float]] = []
+        for col_idx, (cx1, cx2) in enumerate(col_bounds):
+            overlap = max(0.0, min(float(block.bbox.x2), float(cx2)) - max(float(block.bbox.x1), float(cx1)))
+            if overlap > 0:
+                overlaps.append((col_idx, overlap))
+        if len(overlaps) <= 1:
+            return False
+
+        overlaps.sort(key=lambda item: item[1], reverse=True)
+        best_col, best_overlap = overlaps[0]
+        second_overlap = overlaps[1][1]
+        if best_overlap / width < 0.70:
+            return False
+        if second_overlap > max(48.0, width * 0.16):
+            return False
+
+        block.col_index = best_col
+        block.spanned_cols = [best_col]
+        return True
+
+    @classmethod
+    def _repair_anomalous_model_order(
+        cls,
+        blocks: List[Block],
+        *,
+        page_width: int,
+        page_height: int,
+    ) -> tuple[int, List[Block]]:
+        if any(
+            int(getattr(block, "col_count", 1) or 1) > 2
+            for block in blocks
+        ):
+            return 0, blocks
+        if not cls._model_order_needs_geometry_repair(blocks, page_width=page_width, page_height=page_height):
+            return 0, blocks
+
+        cjk_ratio = cls._text_cjk_ratio(blocks)
+        figure_count = sum(1 for b in blocks if b.block_type in FIGURE_TYPES or b.block_type == BlockType.FIGURE)
+        band_major = cjk_ratio >= 0.35 and figure_count >= 1
+        repaired = sorted(
+            blocks,
+            key=lambda block: cls._model_order_geometry_key(
+                block,
+                page_width=page_width,
+                page_height=page_height,
+                band_major=band_major,
+            ),
+        )
+        cls._reassign_repaired_model_order_columns(
+            repaired,
+            page_width=page_width,
+            band_major=band_major,
+        )
+        repaired = sorted(
+            repaired,
+            key=lambda block: cls._model_order_geometry_key(
+                block,
+                page_width=page_width,
+                page_height=page_height,
+                band_major=band_major,
+            ),
+        )
+        for index, block in enumerate(repaired):
+            if block.attributes is None:
+                block.attributes = {}
+            block.attributes["reading_order_strategy"] = "model_order_geometric_repair"
+            block.attributes["model_order_repair_rank"] = index
+        return 1, repaired
+
+    @staticmethod
+    def _reassign_repaired_model_order_columns(
+        blocks: List[Block],
+        *,
+        page_width: int,
+        band_major: bool,
+    ) -> None:
+        if page_width <= 0 or len(blocks) < 2:
+            return
+
+        page_w = max(float(page_width), 1.0)
+        text_skeleton = [
+            block for block in blocks
+            if isinstance(block, TextBlock)
+            and block.block_type in {
+                BlockType.TEXT,
+                BlockType.TITLE,
+                BlockType.ABSTRACT,
+                BlockType.REFERENCE,
+                BlockType.FIGURE_CAPTION,
+                BlockType.TABLE_CAPTION,
+                BlockType.FOOTNOTE,
+            }
+            and block.block_type not in _ZONE_STRIP_TYPES
+            and 0.12 <= float(block.bbox.width) / page_w <= 0.50
+            and (block.count_lines() >= 2 or len((block.full_text() or "").strip()) >= 24)
+        ]
+        column_source = text_skeleton
+        if len(column_source) < 3:
+            column_source = [
+                block for block in blocks
+                if isinstance(block, TextBlock)
+                and block.block_type in {
+                    BlockType.TEXT,
+                    BlockType.ABSTRACT,
+                    BlockType.REFERENCE,
+                    BlockType.FOOTNOTE,
+                }
+                and block.block_type not in _ZONE_STRIP_TYPES
+                and 0.08 <= float(block.bbox.width) / page_w <= 0.58
+            ]
+        if len(column_source) < 3:
+            return
+
+        col_bounds = RecoveryPipeline._side_note_three_column_bounds(blocks, page_width)
+        if col_bounds:
+            columns = []
+        else:
+            columns, col_bounds = detect_columns(
+                column_source,
+                page_width,
+                max_cols=2,
+                cluster_thresh=0.10,
+            )
+        if len(col_bounds) < 2:
+            if band_major:
+                RecoveryPipeline._collapse_repaired_text_flow_columns(blocks)
+                return
+            col_bounds = RecoveryPipeline._fallback_two_column_bounds(column_source, page_width)
+            if len(col_bounds) < 2:
+                return
+
+        col_centers = [(float(x1) + float(x2)) * 0.5 for x1, x2 in col_bounds]
+
+        def _nearest_col(block: Block) -> int:
+            cx = (float(block.bbox.x1) + float(block.bbox.x2)) * 0.5
+            return min(range(len(col_centers)), key=lambda idx: abs(cx - col_centers[idx]))
+
+        for block in blocks:
+            if block.block_type in _ZONE_STRIP_TYPES or block.block_type in {BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER}:
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+                continue
+
+            width_ratio = float(block.bbox.width) / page_w
+            if band_major:
+                if block.block_type in {BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION}:
+                    block.col_count = 1
+                    block.col_index = 0
+                    block.spanned_cols = [0]
+                    continue
+                if block.block_type == BlockType.TITLE:
+                    anchored_col = RecoveryPipeline._anchored_title_column(block, blocks, col_centers, page_width)
+                    if anchored_col is None:
+                        block.col_count = 1
+                        block.col_index = 0
+                        block.spanned_cols = [0]
+                        continue
+                    block.col_count = len(col_bounds)
+                    block.col_index = anchored_col
+                    block.spanned_cols = [anchored_col]
+                    continue
+                col = _nearest_col(block)
+                block.col_count = len(col_bounds)
+                block.col_index = col
+                block.spanned_cols = [col]
+                continue
+
+            cross_page = width_ratio >= 0.58
+            if cross_page and block.block_type in {BlockType.TITLE, BlockType.FOOTNOTE, BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION}:
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+                continue
+
+            col = _nearest_col(block)
+            block.col_count = len(col_bounds)
+            block.col_index = col
+            block.spanned_cols = [col]
+
+    @staticmethod
+    def _collapse_repaired_text_flow_columns(blocks: List[Block]) -> None:
+        for block in blocks:
+            if block.block_type in {BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER}:
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+                continue
+            if isinstance(block, TextBlock):
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+                continue
+            if block.block_type not in {BlockType.FIGURE, BlockType.TABLE, BlockType.FORMULA, BlockType.EQUATION}:
+                block.col_count = 1
+                block.col_index = 0
+                block.spanned_cols = [0]
+
+    @staticmethod
+    def _anchored_title_column(
+        title: Block,
+        blocks: List[Block],
+        col_centers: List[float],
+        page_width: int,
+    ) -> Optional[int]:
+        if not isinstance(title, TextBlock) or not col_centers or page_width <= 0:
+            return None
+        page_w = max(float(page_width), 1.0)
+        if float(title.bbox.width) > page_w * 0.22:
+            return None
+        title_center = (float(title.bbox.x1) + float(title.bbox.x2)) * 0.5
+        body_candidates = [
+            block for block in blocks
+            if isinstance(block, TextBlock)
+            and block is not title
+            and block.block_type in {BlockType.TEXT, BlockType.ABSTRACT, BlockType.REFERENCE}
+            and float(block.bbox.y1) >= float(title.bbox.y2) - max(8.0, float(title.bbox.height) * 0.5)
+            and float(block.bbox.y1) <= float(title.bbox.y2) + max(160.0, float(title.bbox.height) * 5.0)
+        ]
+        if not body_candidates:
+            return None
+        nearest_body = min(
+            body_candidates,
+            key=lambda block: (
+                max(0.0, float(block.bbox.y1) - float(title.bbox.y2)),
+                abs(((float(block.bbox.x1) + float(block.bbox.x2)) * 0.5) - title_center),
+            ),
+        )
+        body_center = (float(nearest_body.bbox.x1) + float(nearest_body.bbox.x2)) * 0.5
+        return min(range(len(col_centers)), key=lambda idx: abs(body_center - col_centers[idx]))
+
+    @staticmethod
+    def _fallback_two_column_bounds(blocks: List[Block], page_width: int) -> List[tuple[float, float]]:
+        if len(blocks) < 4 or page_width <= 0:
+            return []
+        page_w = max(float(page_width), 1.0)
+        centers = sorted((float(block.bbox.x1) + float(block.bbox.x2)) * 0.5 for block in blocks)
+        gaps = [(centers[idx + 1] - centers[idx], idx) for idx in range(len(centers) - 1)]
+        if not gaps:
+            return []
+        max_gap, split_idx = max(gaps, key=lambda item: item[0])
+        if max_gap < page_w * 0.18:
+            return []
+        divider = (centers[split_idx] + centers[split_idx + 1]) * 0.5
+        left = [block for block in blocks if (float(block.bbox.x1) + float(block.bbox.x2)) * 0.5 < divider]
+        right = [block for block in blocks if block not in left]
+        if len(left) < 2 or len(right) < 2:
+            return []
+        return [
+            (min(float(block.bbox.x1) for block in left), max(float(block.bbox.x2) for block in left)),
+            (min(float(block.bbox.x1) for block in right), max(float(block.bbox.x2) for block in right)),
+        ]
+
+    @staticmethod
+    def _side_note_three_column_bounds(blocks: List[Block], page_width: int) -> List[tuple[float, float]]:
+        """Detect textbook pages with a left side-note rail plus two body rails.
+
+        This is a geometric page pattern, not a sample-specific exception: a
+        narrow annotation track on the left coexists with two regular body
+        columns to its right.  Collapsing it to two columns makes the side note
+        and first body column compete for the same Word column.
+        """
+        if page_width <= 0 or len(blocks) < 5:
+            return []
+        page_w = max(float(page_width), 1.0)
+
+        side_notes = [
+            block for block in blocks
+            if isinstance(block, TextBlock)
+            and block.block_type in {BlockType.FOOTNOTE, BlockType.TEXT}
+            and block.block_type not in _ZONE_STRIP_TYPES
+            and float(block.bbox.x1) <= page_w * 0.28
+            and float(block.bbox.x2) <= page_w * 0.42
+            and page_w * 0.10 <= float(block.bbox.width) <= page_w * 0.34
+            and (
+                block.count_lines() >= 3
+                or len((block.full_text() or "").strip()) >= 45
+            )
+        ]
+        if not side_notes:
+            return []
+
+        side_right = max(float(block.bbox.x2) for block in side_notes)
+        body_source = [
+            block for block in blocks
+            if isinstance(block, TextBlock)
+            and block.block_type in {BlockType.TEXT, BlockType.ABSTRACT, BlockType.REFERENCE, BlockType.TITLE}
+            and block.block_type not in _ZONE_STRIP_TYPES
+            and float(block.bbox.x1) >= side_right + page_w * 0.035
+            and page_w * 0.16 <= float(block.bbox.width) <= page_w * 0.42
+            and (
+                block.count_lines() >= 2
+                or len((block.full_text() or "").strip()) >= 24
+            )
+        ]
+        if len(body_source) < 4:
+            return []
+
+        _body_columns, body_bounds = detect_columns(
+            body_source,
+            page_width,
+            max_cols=2,
+            cluster_thresh=0.08,
+        )
+        if len(body_bounds) != 2:
+            return []
+        first_body_left = float(body_bounds[0][0])
+        if first_body_left - side_right < page_w * 0.045:
+            return []
+        if float(body_bounds[1][0]) - float(body_bounds[0][1]) < page_w * 0.012:
+            return []
+
+        side_top = min(float(block.bbox.y1) for block in side_notes)
+        side_bottom = max(float(block.bbox.y2) for block in side_notes)
+        body_overlap = [
+            block for block in body_source
+            if min(side_bottom, float(block.bbox.y2)) - max(side_top, float(block.bbox.y1)) > 0
+        ]
+        if len(body_overlap) < 2:
+            return []
+
+        side_bounds = (
+            min(float(block.bbox.x1) for block in side_notes),
+            max(float(block.bbox.x2) for block in side_notes),
+        )
+        return [side_bounds, *[(float(x1), float(x2)) for x1, x2 in body_bounds]]
+
+    @classmethod
+    def _model_order_needs_geometry_repair(
+        cls,
+        blocks: List[Block],
+        *,
+        page_width: int,
+        page_height: int,
+    ) -> bool:
+        if page_width <= 0 or page_height <= 0 or len(blocks) < 4:
+            return False
+        max_cols = max((int(getattr(block, "col_count", 1) or 1) for block in blocks), default=1)
+        if max_cols > 2:
+            return False
+
+        core = [
+            block for block in blocks
+            if block.block_type not in _ZONE_STRIP_TYPES
+            and block.block_type not in {BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER}
+        ]
+        if len(core) < 4:
+            return False
+
+        cjk_ratio = cls._text_cjk_ratio(core)
+        figure_count = sum(1 for b in core if b.block_type in FIGURE_TYPES or b.block_type == BlockType.FIGURE)
+        band_major = cjk_ratio >= 0.35 and figure_count >= 1
+        geometric = sorted(
+            core,
+            key=lambda block: cls._model_order_geometry_key(
+                block,
+                page_width=page_width,
+                page_height=page_height,
+                band_major=band_major,
+            ),
+        )
+        rank = {id(block): idx for idx, block in enumerate(geometric)}
+        severe_inversions = 0
+        y_backtracks = 0
+        rank_drop_limit = max(2, int(len(core) * 0.18))
+        y_back_limit = max(float(page_height) * 0.08, 90.0)
+        for prev, curr in zip(core, core[1:]):
+            if rank[id(prev)] - rank[id(curr)] >= rank_drop_limit:
+                severe_inversions += 1
+            same_track = (
+                band_major
+                or int(getattr(prev, "col_index", 0) or 0) == int(getattr(curr, "col_index", 0) or 0)
+                or max(0.0, min(float(prev.bbox.x2), float(curr.bbox.x2)) - max(float(prev.bbox.x1), float(curr.bbox.x1)))
+                >= min(float(prev.bbox.width), float(curr.bbox.width)) * 0.35
+            )
+            if same_track and float(curr.bbox.y1) + y_back_limit < float(prev.bbox.y1):
+                y_backtracks += 1
+
+        top_limit = float(page_height) * 0.22
+        late_top_structural = any(
+            idx >= max(3, int(len(core) * 0.45))
+            and float(block.bbox.y1) <= top_limit
+            and block.block_type in {BlockType.TITLE, BlockType.FIGURE_CAPTION, BlockType.TEXT, BlockType.FOOTNOTE}
+            for idx, block in enumerate(core)
+        )
+
+        return severe_inversions >= 2 or y_backtracks >= 2 or (late_top_structural and severe_inversions >= 1)
+
+    @staticmethod
+    def _model_order_geometry_key(
+        block: Block,
+        *,
+        page_width: int,
+        page_height: int,
+        band_major: bool,
+    ) -> tuple:
+        del page_height
+        strip_group = 1
+        if block.block_type in {BlockType.HEADER, BlockType.PAGE_NUMBER}:
+            strip_group = 0
+        elif block.block_type == BlockType.FOOTER:
+            strip_group = 3
+
+        y1 = float(block.bbox.y1)
+        x1 = float(block.bbox.x1)
+        if strip_group != 1:
+            return (strip_group, y1, x1)
+
+        if band_major:
+            return (strip_group, y1, x1)
+
+        page_w = max(float(page_width), 1.0)
+        spanned = (
+            len(getattr(block, "spanned_cols", []) or []) > 1
+            or float(block.bbox.width) >= page_w * 0.52
+        )
+        col = -1 if spanned else int(getattr(block, "col_index", 0) or 0)
+        return (strip_group, col, y1, x1)
+
+    @staticmethod
+    def _text_cjk_ratio(blocks: List[Block]) -> float:
+        cjk_chars = 0
+        total_chars = 0
+        for block in blocks:
+            if not isinstance(block, TextBlock):
+                continue
+            text = block.full_text()
+            total_chars += len(text)
+            cjk_chars += sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff')
+        return (cjk_chars / total_chars) if total_chars else 0.0
+
     def _get_font_classifier(self) -> Optional[FontClassifier]:
         if not bool(getattr(self.config, "font_classification_enabled", True)):
             return None
@@ -391,7 +1001,8 @@ class RecoveryPipeline:
             return self._font_classifier
         try:
             self._font_classifier = FontClassifier.from_config(self.config)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Font classifier initialization failed: %s", exc, exc_info=True)
             self._font_classifier = None
         return self._font_classifier
 
@@ -404,6 +1015,7 @@ class RecoveryPipeline:
         try:
             return classifier.classify_page(page, blocks)
         except Exception as exc:
+            logger.debug("Font classification failed for page %s: %s", getattr(page, "page_num", "?"), exc, exc_info=True)
             return {"enabled": True, "available": False, "reason": str(exc), "applied": 0}
 
     @staticmethod
@@ -485,6 +1097,17 @@ class RecoveryPipeline:
                         block.block_type = BlockType.TITLE
                         changes += 1
             elif block.block_type == BlockType.FOOTER:
+                attrs = getattr(block, "attributes", None) or {}
+                raw_label = str(attrs.get("raw_layout_label", "") or "")
+                if (
+                    raw_label == "vision_footnote"
+                    and not near_bottom
+                    and len(text) >= 24
+                    and float(block.bbox.width) >= max(float(page_width) * 0.58, 1.0)
+                ):
+                    block.block_type = BlockType.TEXT
+                    changes += 1
+                    continue
                 footer_like = bool(_FOOTER_LIKE_RE.search(text))
                 title_like = (
                     near_top
@@ -496,6 +1119,17 @@ class RecoveryPipeline:
                 )
                 if title_like:
                     block.block_type = BlockType.TITLE
+                    changes += 1
+            elif block.block_type == BlockType.FOOTNOTE:
+                attrs = getattr(block, "attributes", None) or {}
+                raw_label = str(attrs.get("raw_layout_label", "") or "")
+                if (
+                    raw_label == "vision_footnote"
+                    and not near_bottom
+                    and len(text) >= 24
+                    and float(block.bbox.width) >= max(float(page_width) * 0.58, 1.0)
+                ):
+                    block.block_type = BlockType.TEXT
                     changes += 1
             elif block.block_type == BlockType.TEXT:
                 footer_like = bool(_FOOTER_LIKE_RE.search(text))
@@ -744,6 +1378,24 @@ class RecoveryPipeline:
             if block.block_type not in {BlockType.FIGURE, BlockType.FORMULA, BlockType.EQUATION}:
                 continue
 
+            attrs = getattr(block, "attributes", None) or {}
+            nested_children = attrs.get("nested_children") if isinstance(attrs, dict) else None
+            if (
+                block.block_type == BlockType.FIGURE
+                and page_height > 0
+                and float(block.bbox.y1) >= float(page_height) * 0.88
+                and float(block.bbox.height) <= max(float(page_height) * 0.08, 120.0)
+                and isinstance(nested_children, list)
+                and nested_children
+                and all(
+                    isinstance(child, dict)
+                    and str(child.get("type") or child.get("category") or "") in {"page_number", "footer"}
+                    for child in nested_children
+                )
+            ):
+                drop_ids.add(id(block))
+                continue
+
             block_area = max(float(block.bbox.area), 1.0)
             covered_text_area = 0.0
             long_text_hits = 0
@@ -850,6 +1502,102 @@ class RecoveryPipeline:
             return 0, blocks
         kept = [blk for blk in blocks if id(blk) not in drop_ids]
         return len(drop_ids), kept
+
+    @staticmethod
+    def _merge_formula_numbers_into_equations(
+        blocks: List[Block],
+        page_width: int = 0,
+        page_height: int = 0,
+    ) -> tuple[int, List[Block]]:
+        """Attach PP-DocLayoutV3 formula_number boxes to the matching formula.
+
+        Formula numbers are semantic text, but the detector also gives us a crop.
+        If left as an independent EquationBlock, the DOCX renderer treats that
+        crop like a formula image and scales "(17)" into a huge object.  Merging
+        preserves the model's reading-order item while making the renderer emit
+        the number as right-aligned text in the formula paragraph.
+        """
+        if len(blocks) < 2:
+            return 0, blocks
+
+        def _attrs(block: Block) -> dict:
+            return getattr(block, "attributes", None) or {}
+
+        def _formula_number_text(block: Block) -> str:
+            value = str(_attrs(block).get("formula_number_text", "") or "").strip()
+            if value and _FORMULA_NUMBER_TEXT_RE.match(value):
+                return value
+            return ""
+
+        def _is_number_block(block: Block) -> bool:
+            attrs = _attrs(block)
+            raw_label = str(attrs.get("raw_layout_label", "") or "")
+            if raw_label != "formula_number":
+                return False
+            if not isinstance(block, EquationBlock):
+                return False
+            text = _formula_number_text(block)
+            if not text:
+                return False
+            if page_width > 0 and float(block.bbox.width) > max(float(page_width) * 0.12, 120.0):
+                return False
+            if page_height > 0 and float(block.bbox.height) > max(float(page_height) * 0.08, 120.0):
+                return False
+            return True
+
+        def _vertical_score(body: Block, num: Block) -> Optional[float]:
+            overlap = min(float(body.bbox.y2), float(num.bbox.y2)) - max(float(body.bbox.y1), float(num.bbox.y1))
+            body_h = max(float(body.bbox.height), 1.0)
+            num_h = max(float(num.bbox.height), 1.0)
+            center_delta = abs((float(body.bbox.y1) + float(body.bbox.y2)) * 0.5 - (float(num.bbox.y1) + float(num.bbox.y2)) * 0.5)
+            if overlap >= min(body_h, num_h) * 0.18:
+                return center_delta
+            if center_delta <= max(body_h, num_h) * 0.75:
+                return center_delta + max(0.0, -overlap)
+            return None
+
+        drop_ids: set[int] = set()
+        merges = 0
+        formula_blocks = [
+            block for block in blocks
+            if isinstance(block, EquationBlock)
+            and block.block_type in {BlockType.FORMULA, BlockType.EQUATION}
+            and not _is_number_block(block)
+        ]
+        for number_block in blocks:
+            if not _is_number_block(number_block):
+                continue
+            number_text = _formula_number_text(number_block)
+            candidates: List[tuple[float, Block]] = []
+            for formula in formula_blocks:
+                score_y = _vertical_score(formula, number_block)
+                if score_y is None:
+                    continue
+                if float(formula.bbox.x1) >= float(number_block.bbox.x2):
+                    continue
+                horizontal_gap = max(0.0, float(number_block.bbox.x1) - float(formula.bbox.x2))
+                if page_width > 0 and horizontal_gap > max(float(page_width) * 0.28, 240.0):
+                    continue
+                same_col_bonus = 0.0 if int(getattr(formula, "col_index", -1) or 0) == int(getattr(number_block, "col_index", -2) or 0) else 20.0
+                candidates.append((score_y + horizontal_gap * 0.08 + same_col_bonus, formula))
+            if not candidates:
+                continue
+            _, target = min(candidates, key=lambda item: item[0])
+            if target.attributes is None:
+                target.attributes = {}
+            target.attributes["formula_number_text"] = number_text
+            target.attributes["formula_number_bbox"] = [
+                float(number_block.bbox.x1),
+                float(number_block.bbox.y1),
+                float(number_block.bbox.x2),
+                float(number_block.bbox.y2),
+            ]
+            drop_ids.add(id(number_block))
+            merges += 1
+
+        if not drop_ids:
+            return 0, blocks
+        return merges, [block for block in blocks if id(block) not in drop_ids]
 
     @staticmethod
     def _merge_short_continuation_fragments(blocks: List[Block]) -> List[Block]:
@@ -1056,7 +1804,7 @@ class RecoveryPipeline:
             prev_flow_id = _flow_id(prev)
             curr_flow_id = _flow_id(curr)
             # 仅对显式 article-flow 内的相邻块做边界拉直。
-            # legacy 路径下 flow_id 为空，若继续按空串相等处理，
+            # 几何兜底路径下 flow_id 可能为空，若继续按空串相等处理，
             # 会把普通相邻块误判为同一 flow，导致 bbox 被大幅裁坏。
             if not prev_flow_id or not curr_flow_id or prev_flow_id != curr_flow_id:
                 continue
@@ -1083,7 +1831,7 @@ class RecoveryPipeline:
 
     @staticmethod
     def _render_mode_for_profile(profile: str) -> str:
-        if profile in {"single_column", "table_heavy"}:
+        if profile in {"single_column", "table_heavy", "textbook_mixed"}:
             return "reflow"
         if profile == "academic_two_col":
             return "native_columns"
@@ -1173,6 +1921,33 @@ class RecoveryPipeline:
         for zone in page.zones:
             zone.col_count = 1
             zone.has_spanned = False
+        page.zones = RecoveryPipeline._merge_adjacent_single_column_zones(page.zones, blocks)
+
+    @staticmethod
+    def _merge_adjacent_single_column_zones(zones: List[Zone], blocks: List[Block]) -> List[Zone]:
+        if not zones:
+            return []
+        order_index = {id(block): idx for idx, block in enumerate(blocks)}
+
+        def _sort_zone(zone: Zone) -> None:
+            zone.blocks.sort(key=lambda block: order_index.get(id(block), 10**9))
+
+        merged: List[Zone] = []
+        for zone in zones:
+            _sort_zone(zone)
+            if (
+                merged
+                and zone.col_count == 1
+                and merged[-1].col_count == 1
+                and zone.rendering_strategy != "strip_row"
+                and merged[-1].rendering_strategy != "strip_row"
+            ):
+                merged[-1].blocks.extend(zone.blocks)
+                _sort_zone(merged[-1])
+                merged[-1].has_spanned = False
+                continue
+            merged.append(zone)
+        return merged
 
     @staticmethod
     def _has_weak_multicolumn_evidence(page: Page, blocks: List[Block]) -> bool:
@@ -1183,11 +1958,6 @@ class RecoveryPipeline:
         """
         max_cols = max((zone.col_count for zone in page.zones), default=1)
         if max_cols <= 1:
-            return False
-
-        figure_count = sum(1 for b in blocks if b.block_type in FIGURE_TYPES or b.block_type == BlockType.FIGURE)
-        table_count = sum(1 for b in blocks if b.block_type == BlockType.TABLE)
-        if figure_count or table_count:
             return False
 
         text_blocks = [
@@ -1265,7 +2035,8 @@ class RecoveryPipeline:
             from PIL import Image
             import io
             page_img = Image.open(image_path)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed to open page image for missing block crops: %s", exc, exc_info=True)
             return
 
         for block in needs_fill:
@@ -1280,8 +2051,13 @@ class RecoveryPipeline:
                 buf = io.BytesIO()
                 crop.save(buf, format='PNG')
                 block.image_data = buf.getvalue()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "Failed to crop image data for block %s: %s",
+                    getattr(block, "block_id", "?"),
+                    exc,
+                    exc_info=True,
+                )
 
     @staticmethod
     def _needs_layout_analysis(raw_blocks: List[dict]) -> bool:
@@ -1359,6 +2135,7 @@ class RecoveryPipeline:
                 return True
             return float(block.bbox.y2) >= max(float(image_height) * 0.82, 1.0)
 
+        source_order_index = {id(block): idx for idx, block in enumerate(blocks)}
         core_blocks = list(blocks)
         prefix_strip_blocks: List[Block] = []
         while core_blocks and _is_top_strip_block(core_blocks[0]):
@@ -1370,7 +2147,7 @@ class RecoveryPipeline:
         if suffix_strip_blocks:
             suffix_ids = {id(block) for block in suffix_strip_blocks}
             core_blocks = [block for block in core_blocks if id(block) not in suffix_ids]
-            suffix_strip_blocks.sort(key=lambda b: (b.bbox.y1, b.bbox.x1))
+            suffix_strip_blocks.sort(key=lambda b: source_order_index.get(id(b), 10**9))
 
         blocks = core_blocks
         if not blocks:
@@ -1383,6 +2160,63 @@ class RecoveryPipeline:
 
         def _preserve_order(items: List[Block]) -> None:
             items.sort(key=lambda b: order_index.get(id(b), 10**9))
+
+        def _nearest_zone_col(block: Block, target: Zone) -> int:
+            col_count = max(int(target.col_count or 1), 1)
+            if image_width <= 0 or col_count <= 1:
+                return 0
+            fallback_w = float(image_width) / float(col_count)
+            centers: List[float] = []
+            for ci in range(col_count):
+                members = [
+                    b for b in target.blocks
+                    if int(getattr(b, "col_index", 0) or 0) == ci
+                    and len(getattr(b, "spanned_cols", []) or []) <= 1
+                ]
+                if members:
+                    centers.append(sum((float(b.bbox.x1) + float(b.bbox.x2)) * 0.5 for b in members) / len(members))
+                else:
+                    centers.append((ci + 0.5) * fallback_w)
+            cx = (float(block.bbox.x1) + float(block.bbox.x2)) * 0.5
+            return min(range(col_count), key=lambda ci: abs(cx - centers[ci]))
+
+        def _continuation_column_for_zone(zone: Zone, target: Zone) -> Optional[int]:
+            if image_width <= 0 or target.col_count <= 1 or not zone.blocks:
+                return None
+            col_count = max(int(target.col_count or 1), 1)
+            col_w = float(image_width) / float(col_count)
+            assigned_cols: List[int] = []
+            for b in zone.blocks:
+                if (
+                    b.block_type not in _MULTICOL_TAIL_ABSORB_TYPES
+                    or b.block_type in _ZONE_STRIP_TYPES
+                    or bool(getattr(b, "attributes", {}) and b.attributes.get("is_byline_row"))
+                    or float(b.bbox.width) > col_w * 0.95
+                ):
+                    return None
+                assigned_cols.append(_nearest_zone_col(b, target))
+            if not assigned_cols or len(set(assigned_cols)) != 1:
+                return None
+
+            col = assigned_cols[0]
+            prior_col_blocks = [
+                b for b in target.blocks
+                if int(getattr(b, "col_index", 0) or 0) == col
+                and len(getattr(b, "spanned_cols", []) or []) <= 1
+            ]
+            if not prior_col_blocks:
+                return None
+
+            first_top = min(float(b.bbox.y1) for b in zone.blocks)
+            target_bottom = max((float(b.bbox.y2) for b in target.blocks), default=0.0)
+            same_col_bottom = max(float(b.bbox.y2) for b in prior_col_blocks)
+            same_col_gap_limit = max(96.0, float(image_height) * 0.025 if image_height > 0 else 0.0)
+            target_gap_limit = max(64.0, float(image_height) * 0.015 if image_height > 0 else 0.0)
+            if first_top - same_col_bottom > same_col_gap_limit:
+                return None
+            if first_top - target_bottom > target_gap_limit:
+                return None
+            return col
 
         zones: List[Zone] = []
         current_blocks: List[Block] = [blocks[0]]
@@ -1451,6 +2285,20 @@ class RecoveryPipeline:
                 zone = zones[idx]
                 if zone.col_count == 1 and merged and merged[-1].col_count > 1 and zone.flow_id == merged[-1].flow_id:
                     target = merged[-1]
+                    continuation_col = _continuation_column_for_zone(zone, target)
+                    if continuation_col is not None:
+                        for b in zone.blocks:
+                            b.col_count = target.col_count
+                            b.col_index = continuation_col
+                            b.spanned_cols = [continuation_col]
+                        target.blocks.extend(zone.blocks)
+                        target.has_spanned = target.has_spanned or any(
+                            len(getattr(b, "spanned_cols", [])) > 1 for b in zone.blocks
+                        )
+                        _preserve_order(target.blocks)
+                        idx += 1
+                        continue
+
                     movable: List[Block] = []
                     remain: List[Block] = []
                     target_bottom = max((b.bbox.y2 for b in target.blocks), default=0.0)
@@ -1609,7 +2457,7 @@ class RecoveryPipeline:
         if prefix_strip_blocks:
             zones.insert(0, Zone(
                 col_count=1,
-                blocks=sorted(prefix_strip_blocks, key=lambda b: b.bbox.x1),
+                blocks=sorted(prefix_strip_blocks, key=lambda b: source_order_index.get(id(b), 10**9)),
                 has_spanned=False,
                 flow_id="",
                 flow_kind="",
@@ -1619,7 +2467,7 @@ class RecoveryPipeline:
         if suffix_strip_blocks:
             zones.append(Zone(
                 col_count=1,
-                blocks=sorted(suffix_strip_blocks, key=lambda b: (b.bbox.y1, b.bbox.x1)),
+                blocks=sorted(suffix_strip_blocks, key=lambda b: source_order_index.get(id(b), 10**9)),
                 has_spanned=False,
                 flow_id="",
                 flow_kind="",
@@ -1628,7 +2476,6 @@ class RecoveryPipeline:
             ))
 
         return zones
-
     def _get_renderer(self, format: str) -> BaseRenderer:
         """返回指定 *format* 的缓存渲染器实例。"""
         fmt = format.lower()

@@ -42,6 +42,18 @@ class RuntimePaths:
             raise ValueError("layout_model_name must not be empty")
 
         specs = {
+            "pp-doclayout-v3": LayoutModelSpec(
+                name="pp-doclayout-v3",
+                model_path=layout_root / "pp-doclayout-v3" / "PP-DocLayoutV3.onnx",
+                use_onnx=True,
+                dict_name="layout_pp_doclayout_v3_dict.txt",
+            ),
+            "PP-DocLayoutV3": LayoutModelSpec(
+                name="pp-doclayout-v3",
+                model_path=layout_root / "pp-doclayout-v3" / "PP-DocLayoutV3.onnx",
+                use_onnx=True,
+                dict_name="layout_pp_doclayout_v3_dict.txt",
+            ),
             "doclayout_yolo": LayoutModelSpec(
                 name="doclayout_yolo",
                 model_path=layout_root / "doclayout_yolo_docstructbench_headfloat100_runtime",
@@ -77,7 +89,7 @@ class RuntimePaths:
         return spec
 
     @classmethod
-    def discover(cls, layout_model_name: str = "doclayout_yolo") -> "RuntimePaths":
+    def discover(cls, layout_model_name: str = "pp-doclayout-v3") -> "RuntimePaths":
         code_root = Path(__file__).resolve().parent
         package_root = code_root.parent
         dataset_root = package_root / "dataset"
@@ -96,7 +108,7 @@ class RuntimePaths:
             models_root=models_root,
             layout_model=layout_model_spec.model_path,
             layout_model_spec=layout_model_spec,
-            det_model=models_root / "det" / "ch" / "PP-OCRv5_mobile_det_infer",
-            rec_model=models_root / "rec" / "ch" / "PP-OCRv5_mobile_rec_infer",
-            table_model=models_root / "table" / "SLANet_plus_infer",
+            det_model=models_root / "det" / "ch" / "PP-OCRv6_small_det" / "PP-OCRv6_small_det.onnx",
+            rec_model=models_root / "rec" / "ch" / "PP-OCRv6_small_rec" / "PP-OCRv6_small_rec.onnx",
+            table_model=models_root / "table" / "SLANet_plus" / "SLANet_plus.onnx",
         )

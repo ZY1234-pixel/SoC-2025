@@ -70,6 +70,7 @@ class TextRecognizer(object):
         self.rec_image_shape = [int(v) for v in args.rec_image_shape.split(",")]
         self.rec_batch_num = args.rec_batch_num
         self.rec_algorithm = args.rec_algorithm
+        args.use_onnx = bool(args.use_onnx) or str(args.rec_model_dir or "").lower().endswith(".onnx")
         postprocess_params = {
             "name": "CTCLabelDecode",
             "character_dict_path": args.rec_char_dict_path,
@@ -181,6 +182,7 @@ class TextRecognizer(object):
         ) = utility.create_predictor(args, "rec", logger)
         self.benchmark = args.benchmark
         self.use_onnx = args.use_onnx
+        args.use_onnx = False
         if args.benchmark:
             import auto_log
 

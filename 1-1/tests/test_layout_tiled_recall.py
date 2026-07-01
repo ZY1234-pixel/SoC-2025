@@ -20,6 +20,7 @@ def _make_predictor_stub() -> LayoutPredictor:
     predictor.tile_max_passes = 16
     predictor.ncnn_input_size = [1024, 1024]
     predictor.use_ncnn = False
+    predictor.is_pp_doclayout_v3 = False
     predictor.postprocess_op = None
     return predictor
 

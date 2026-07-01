@@ -39,6 +39,14 @@ _CAPTION_TYPES: frozenset = frozenset({
 _NUMBERED_TITLE_LEVEL_RE = re.compile(
     r"^\s*(?:(\d+(?:\.\d+)*)(?:[\.、])?|[（(]?([一二三四五六七八九十百]+)[)）\.、])\s*\S"
 )
+_QUESTION_OR_OPTION_RE = re.compile(
+    r"^\s*(?:"
+    r"\d{1,2}\s*[A-Z][a-z]"
+    r"|\d{1,2}[\.\)．、]\s*\S"
+    r"|[A-H][\.\)]\s*\S"
+    r"|[•●]\s*\S"
+    r")"
+)
 
 
 def _numbered_title_level(text: str) -> Optional[int]:
@@ -61,6 +69,7 @@ def infer_block_styles(
     justify_min_lines: int = 3,
     page_width_px: float = 0.0,
     font_mapper: Optional["CoordMapper"] = None,
+    reflow_title_page_width_px: float = 0.0,
 ) -> None:
     """推断并填充所有 TextBlock 的 block.style。
 
@@ -75,6 +84,9 @@ def infer_block_styles(
         坐标映射器，用于 px → pt 转换。
     font_mapper:
         字号/行高换算使用的坐标映射器。未提供时回退为 *mapper*。
+    reflow_title_page_width_px:
+        当页面最终以 reflow 渲染时，标题对齐使用整页正文容器作为参考，
+        避免已弃用的多栏元数据把居中标题误判为局部左对齐。
     """
     all_text_blocks: List[TextBlock] = []
     font_mapper = font_mapper or mapper
@@ -119,12 +131,15 @@ def infer_block_styles(
                     mapper=mapper,
                     font_mapper=font_mapper,
                     justify_min_lines=justify_min_lines,
+                    page_width_px=page_width_px,
+                    reflow_title_page_width_px=reflow_title_page_width_px,
                 )
                 all_text_blocks.append(block)
 
     # 对同类别区块的字号离群值归一化
     _normalize_category_styles(all_text_blocks)
     _normalize_numbered_heading_styles(all_text_blocks)
+    _smooth_page_body_fonts(all_text_blocks)
 
     # 使用推断出的行距修正字号（设计文档 §4.1：字号应在源页面坐标系中推断）
     # 初始估算假设 line_spacing ≈ 1.15，现用实际推断值修正
@@ -142,6 +157,8 @@ def _infer_text_block(
     mapper: "CoordMapper",
     font_mapper: "CoordMapper",
     justify_min_lines: int,
+    page_width_px: float = 0.0,
+    reflow_title_page_width_px: float = 0.0,
 ) -> None:
     """对单个 TextBlock 推断并填充缺失的 style 字段。
 
@@ -173,6 +190,31 @@ def _infer_text_block(
         ci = block.col_index
         fallback = [block.bbox.x1, block.bbox.x2]
         col_left, col_right = col_px_text.get(ci, col_px_all.get(ci, fallback))
+        span_cols = [
+            int(sci)
+            for sci in (getattr(block, "spanned_cols", []) or [])
+            if int(sci) in col_px_text or int(sci) in col_px_all
+        ]
+        if len(span_cols) > 1:
+            span_bounds = [
+                col_px_text.get(sci, col_px_all.get(sci))
+                for sci in span_cols
+                if col_px_text.get(sci, col_px_all.get(sci)) is not None
+            ]
+            if span_bounds:
+                col_left = min(float(bound[0]) for bound in span_bounds)
+                col_right = max(float(bound[1]) for bound in span_bounds)
+        if block.block_type in {BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER} and page_width_px > 0:
+            col_left, col_right = 0.0, float(page_width_px)
+        elif (
+            is_title
+            and reflow_title_page_width_px > 0
+            and (
+                block.col_count <= 1
+                or float(block.bbox.width) >= float(reflow_title_page_width_px) * 0.55
+            )
+        ):
+            col_left, col_right = 0.0, float(reflow_title_page_width_px)
         bs.alignment = _detect_alignment(
             block=block,
             col_left=float(col_left),
@@ -191,6 +233,9 @@ def _infer_text_block(
     # ── 段后间距默认值 ────────────────────────────────────────────────
     if bs.space_after_pt is None:
         bs.space_after_pt = 4.0 if is_title else 1.0
+
+    if is_title:
+        bs.first_line_indent_pt = None
 
     # ── 首行缩进（单段落情形） ─────────────────────────────────────────
     if (bs.first_line_indent_pt is None
@@ -247,6 +292,30 @@ def _infer_paragraph_indents(block: TextBlock) -> None:
         if fx is None:
             continue
         para.first_line_indent_px = max(0.0, fx - baseline_x)
+
+
+def _smooth_page_body_fonts(blocks: List[TextBlock]) -> None:
+    """用页面主字体平滑正文中的 'other' 字体预测。"""
+    body_types = {BlockType.TEXT, BlockType.REFERENCE, BlockType.ABSTRACT}
+    font_votes: List[str] = []
+    for block in blocks:
+        if not isinstance(block, TextBlock) or block.style is None:
+            continue
+        family = getattr(block.style, "font_family", None)
+        if family and family != "其他" and block.block_type in body_types:
+            font_votes.extend([family] * max(1, len(block.full_text().strip()) // 20))
+    if not font_votes:
+        return
+    from collections import Counter
+
+    dominant = Counter(font_votes).most_common(1)[0][0]
+    for block in blocks:
+        if not isinstance(block, TextBlock) or block.style is None:
+            continue
+        if block.block_type not in body_types:
+            continue
+        if getattr(block.style, "font_family", None) in {None, "其他"}:
+            block.style.font_family = dominant
 
 
 # ---------------------------------------------------------------------------
@@ -358,12 +427,41 @@ def _detect_alignment(
         BlockType.REFERENCE,
     }
 
+    if block.block_type == BlockType.HEADER and _multi_line_center_evidence(block, col_left, col_right):
+        return "center"
+
     if is_title:
         if _title_level() is not None:
             return "left"
+        if _multi_line_center_evidence(block, col_left, col_right):
+            return "center"
         title_text = (block.full_text() or "").strip()
         if title_text[:1] in {"“", "\"", "‘", "'"} and len(title_text) <= 42:
             return "center"
+        block_left_gap = max(0.0, float(block.bbox.x1) - col_left)
+        block_right_gap = max(0.0, col_right - float(block.bbox.x2))
+        block_width = max(1.0, float(block.bbox.x2) - float(block.bbox.x1))
+        if (
+            len(line_edges) <= 2
+            and getattr(block, "col_count", 1) > 1
+            and block_width <= col_w * 1.05
+        ):
+            if (
+                len(line_edges) == 1
+                and col_w > block_width * 1.15
+                and block_left_gap <= col_w * 0.05
+                and block_width >= col_w * 0.72
+            ):
+                return "left"
+            if block_left_gap <= col_w * 0.04 and block_right_gap >= block_left_gap + col_w * 0.04:
+                return "left"
+            if block_right_gap <= col_w * 0.04 and block_left_gap >= block_right_gap + col_w * 0.04:
+                return "right"
+        if len(line_edges) >= 2:
+            first_width = line_edges[0][1] - line_edges[0][0]
+            second_width = line_edges[1][1] - line_edges[1][0]
+            if first_width >= col_w * 0.82 and second_width <= col_w * 0.72:
+                return "center"
         if center_score >= 0.52:
             return "center"
         if left_hit_ratio >= 0.58 and right_hit_ratio >= 0.58:
@@ -375,21 +473,99 @@ def _detect_alignment(
         return "left"
 
     if non_justify_type:
+        if block.block_type in {BlockType.HEADER, BlockType.FOOTER} and len(line_edges) <= 3:
+            block_left_gap = max(0.0, float(block.bbox.x1) - col_left)
+            block_right_gap = max(0.0, col_right - float(block.bbox.x2))
+            block_center = (float(block.bbox.x1) + float(block.bbox.x2)) * 0.5
+            col_center = (col_left + col_right) * 0.5
+            if block_center >= col_center and block_right_gap <= block_left_gap * 0.45:
+                return "right"
+            if block_center <= col_center and block_left_gap <= block_right_gap * 0.45:
+                return "left"
         if center_score >= 0.72 and left_hit_ratio < 0.45 and right_hit_ratio < 0.45:
             return "center"
         if right_hit_ratio >= 0.85 and left_hit_ratio < 0.35:
             return "right"
         return "left"
 
+    if _looks_like_question_or_option_block(block):
+        return "left"
+
     if not is_short_block:
         if left_hit_ratio >= 0.72 and right_hit_ratio >= 0.72 and ragged_right_ratio <= 0.35:
             return "justify"
+        if left_hit_ratio >= 0.58 and right_hit_ratio < 0.58:
+            return "left"
+        if right_hit_ratio >= 0.82 and left_hit_ratio < 0.45:
+            return "right"
+
+    if left_hit_ratio >= 0.70 and right_hit_ratio < 0.35:
+        return "left"
 
     if center_score >= 0.72 and left_hit_ratio < 0.45 and right_hit_ratio < 0.45:
         return "center"
     if right_hit_ratio >= 0.82 and left_hit_ratio < 0.45:
         return "right"
     return "left"
+
+
+def _looks_like_question_or_option_block(block: TextBlock) -> bool:
+    """Detect exercise/list bodies whose short lines can look centered.
+
+    OCR often emits a whole exercise as one text box whose visual center is
+    close to the column center because option lines are short.  Alignment should
+    follow the semantic left rail when the block contains numbered prompts,
+    bullets, or multiple answer options.
+    """
+    if block.block_type != BlockType.TEXT:
+        return False
+    lines = [(getattr(line, "text", "") or "").strip() for line in block.lines or []]
+    lines = [line for line in lines if line]
+    if not lines:
+        return False
+    hits = sum(1 for line in lines if _QUESTION_OR_OPTION_RE.match(line))
+    if hits >= 2:
+        return True
+    text = re.sub(r"\s+", " ", block.full_text() or "").strip()
+    if not text:
+        return False
+    option_hits = len(re.findall(r"(?:^|\s)[A-H][\.\)]\s*\S", text))
+    numbered_prompt = bool(re.match(r"^\s*\d{1,2}\s*[A-Z][a-z]", text))
+    return numbered_prompt and option_hits >= 2
+
+
+def _multi_line_center_evidence(block: TextBlock, col_left: float, col_right: float) -> bool:
+    lines = [
+        (float(ln.x1), float(ln.x2), (ln.text or "").strip())
+        for ln in block.lines
+        if ln.x1 is not None and ln.x2 is not None and (ln.text or "").strip()
+    ]
+    if len(lines) < 2:
+        return False
+
+    block_left = min(float(block.bbox.x1), min(x1 for x1, _, _ in lines))
+    block_right = max(float(block.bbox.x2), max(x2 for _, x2, _ in lines))
+    col_left = block_left
+    col_right = block_right
+    col_w = max(float(col_right) - float(col_left), 1.0)
+    wide_lines = [
+        (x1, x2, text)
+        for x1, x2, text in lines
+        if (x2 - x1) >= col_w * 0.45
+    ]
+    if len(wide_lines) < 2:
+        return False
+
+    left_span = max(x1 for x1, _, _ in wide_lines) - min(x1 for x1, _, _ in wide_lines)
+    right_span = max(x2 for _, x2, _ in wide_lines) - min(x2 for _, x2, _ in wide_lines)
+    wide_center = sum((x1 + x2) * 0.5 for x1, x2, _ in wide_lines) / len(wide_lines)
+    col_center = (float(col_left) + float(col_right)) * 0.5
+    if left_span > col_w * 0.06 or right_span > col_w * 0.06:
+        return False
+    if abs(wide_center - col_center) > col_w * 0.10:
+        return False
+
+    return True
 
 
 # ---------------------------------------------------------------------------
