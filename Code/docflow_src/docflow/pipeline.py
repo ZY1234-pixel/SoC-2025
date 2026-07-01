@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -33,6 +34,8 @@ from docflow.model.blocks.image_block import ImageBlock
 from docflow.model.blocks.equation_block import EquationBlock
 from docflow.model.blocks.table_block import TableBlock
 from docflow.utils.constants import FIGURE_TYPES
+
+logger = logging.getLogger(__name__)
 
 _ZONE_STRIP_TYPES = {
     BlockType.HEADER,
@@ -998,7 +1001,8 @@ class RecoveryPipeline:
             return self._font_classifier
         try:
             self._font_classifier = FontClassifier.from_config(self.config)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Font classifier initialization failed: %s", exc, exc_info=True)
             self._font_classifier = None
         return self._font_classifier
 
@@ -1011,6 +1015,7 @@ class RecoveryPipeline:
         try:
             return classifier.classify_page(page, blocks)
         except Exception as exc:
+            logger.debug("Font classification failed for page %s: %s", getattr(page, "page_num", "?"), exc, exc_info=True)
             return {"enabled": True, "available": False, "reason": str(exc), "applied": 0}
 
     @staticmethod
@@ -2030,7 +2035,8 @@ class RecoveryPipeline:
             from PIL import Image
             import io
             page_img = Image.open(image_path)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed to open page image for missing block crops: %s", exc, exc_info=True)
             return
 
         for block in needs_fill:
@@ -2045,8 +2051,13 @@ class RecoveryPipeline:
                 buf = io.BytesIO()
                 crop.save(buf, format='PNG')
                 block.image_data = buf.getvalue()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "Failed to crop image data for block %s: %s",
+                    getattr(block, "block_id", "?"),
+                    exc,
+                    exc_info=True,
+                )
 
     @staticmethod
     def _needs_layout_analysis(raw_blocks: List[dict]) -> bool:

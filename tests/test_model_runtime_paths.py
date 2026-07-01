@@ -20,6 +20,14 @@ def test_runtime_paths_default_models_point_to_pp_doclayout_v3_and_ppocr_v6() ->
     assert paths.layout_model_spec.use_onnx is True
     assert paths.det_model.name == "PP-OCRv6_small_det.onnx"
     assert paths.rec_model.name == "PP-OCRv6_small_rec.onnx"
+    assert paths.table_model == (
+        Path(__file__).resolve().parents[1]
+        / "Code"
+        / "models"
+        / "table"
+        / "SLANet_plus"
+        / "SLANet_plus.onnx"
+    )
 
 
 def test_runtime_paths_can_switch_to_picodet_onnx_layout_model() -> None:

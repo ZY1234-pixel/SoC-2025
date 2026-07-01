@@ -1,5 +1,5 @@
 """版面恢复管线的配置项。"""
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 

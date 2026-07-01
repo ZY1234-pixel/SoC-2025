@@ -71,7 +71,8 @@ def build_pre_process_list(args):
 class TableStructurer(object):
     def __init__(self, args):
         self.args = args
-        self.use_onnx = args.use_onnx
+        self.use_onnx = bool(args.use_onnx) or str(args.table_model_dir or "").lower().endswith(".onnx")
+        args.use_onnx = self.use_onnx
         pre_process_list = build_pre_process_list(args)
         if args.table_algorithm not in ["TableMaster"]:
             postprocess_params = {

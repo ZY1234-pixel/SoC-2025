@@ -6,7 +6,7 @@ import io
 import logging
 
 from docx.shared import Pt
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from docflow.renderer.docx_utils.paragraph_fmt import reset_paragraph_format
 

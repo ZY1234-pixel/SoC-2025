@@ -110,5 +110,5 @@ class RuntimePaths:
             layout_model_spec=layout_model_spec,
             det_model=models_root / "det" / "ch" / "PP-OCRv6_small_det" / "PP-OCRv6_small_det.onnx",
             rec_model=models_root / "rec" / "ch" / "PP-OCRv6_small_rec" / "PP-OCRv6_small_rec.onnx",
-            table_model=models_root / "table" / "SLANet_plus_infer",
+            table_model=models_root / "table" / "SLANet_plus" / "SLANet_plus.onnx",
         )
