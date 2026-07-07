@@ -6,11 +6,19 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+from inference_config import (
+    BLEND_ALPHA,
+    BOOK_THRESHOLD,
+    DOWNSAMPLE_FACTOR,
+    EDGE_WIDTH,
+    INPUT_SHAPE,
+    MIX_TYPE,
+    MODEL_PATH,
+    NUM_CLASSES,
+    OUTPUT_TYPE,
+)
 from nets.deeplabv3_plus import DeepLab
 from utils.utils import cvtColor, preprocess_input, resize_image
-
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def mask_to_edge(mask, edge_width=2):
@@ -25,16 +33,16 @@ def mask_to_edge(mask, edge_width=2):
 class DeeplabV3:
     def __init__(
         self,
-        model_path=os.path.join(BASE_DIR, "best_epoch_weights.pth"),
-        input_shape=(1024, 1024),
-        downsample_factor=8,
-        book_threshold=0.60,
-        blend_alpha=0.7,
-        # 0: blend output, 1: 0-255 mask output.
-        mix_type=1,
+        model_path=MODEL_PATH,
+        input_shape=INPUT_SHAPE,
+        downsample_factor=DOWNSAMPLE_FACTOR,
+        book_threshold=BOOK_THRESHOLD,
+        blend_alpha=BLEND_ALPHA,
+        mix_type=MIX_TYPE,
+        num_classes=NUM_CLASSES,
     ):
         self.model_path = model_path
-        self.num_classes = 2
+        self.num_classes = num_classes
         self.input_shape = input_shape
         self.downsample_factor = downsample_factor
         self.book_threshold = book_threshold
@@ -83,7 +91,10 @@ class DeeplabV3:
         mask = (prediction[..., 1] >= self.book_threshold).astype(np.uint8)
         return mask
 
-    def detect_image(self, image, output_type="mask", edge_width=2):
+    def detect_image(self, image, output_type=None, edge_width=None):
+        output_type = OUTPUT_TYPE if output_type is None else output_type
+        edge_width = EDGE_WIDTH if edge_width is None else edge_width
+
         image = cvtColor(image)
         mask = self._predict_mask(image)
         if output_type == "edge":

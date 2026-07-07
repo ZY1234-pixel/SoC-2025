@@ -10,6 +10,7 @@
 Cloud-side/
 ├── predict.py              # 批量推理入口
 ├── deeplab.py              # 模型加载、分割、mask/edge 输出逻辑
+├── inference_config.py     # 推理路径、模型参数和输出开关
 ├── best_epoch_weights.pth  # 云端分割模型权重
 ├── nets/                   # DeepLabV3+ 网络结构
 ├── utils/                  # 图像预处理和通用工具
@@ -38,12 +39,12 @@ best_epoch_weights.pth
 
 ## 输出开关
 
-推理输出在 `predict.py` 顶部配置：
+推理路径、模型参数和输出开关统一在 `inference_config.py` 中配置。`predict.py` 和 `deeplab.py` 都从这里读取默认值：
 
 ```python
 OUTPUT_TYPE = "mask"
 EDGE_WIDTH = 2
-MIX_TYPE = 1
+MIX_TYPE = 0
 ```
 
 取值说明：
@@ -58,7 +59,7 @@ MIX_TYPE = 0          原图和 mask 混合显示，仅 mask 模式使用
 MIX_TYPE = 1          输出 0-255 黑白 mask/edge
 ```
 
-当 `OUTPUT_TYPE = "edge"` 时，程序直接输出轮廓边缘图，不使用混合显示。
+当 `OUTPUT_TYPE = "edge"` 时，程序直接输出轮廓边缘图，不使用混合显示，所以 `MIX_TYPE` 不生效。
 
 ## 输入输出路径
 
@@ -93,6 +94,7 @@ python predict.py
 ```text
 predict.py
 deeplab.py
+inference_config.py
 nets/
 utils/
 requirements.txt
