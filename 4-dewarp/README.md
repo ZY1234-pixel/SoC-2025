@@ -1,16 +1,17 @@
 # Document Dewarp Segmentation Delivery
 
-本目录中包含三套分割推理交付代码：`Cloud-side`、`Device-side` 和 `instance-seg`，以及汤、赵维护的相关代码。这几部分分割代码是当前交付和维护的重点，分别对应云端推理、端侧推理和 YOLO 实例分割推理。
+本目录中包含四套分割推理交付代码：`Cloud-side`、`Test_InternImage-L`、`Device-side` 和 `instance-seg`，以及汤、赵维护的相关代码。这几部分分割代码是当前交付和维护的重点，分别对应云端 DeepLab 推理、云端 InternImage-L 推理、端侧推理和 YOLO 实例分割推理。
 
-除这三部分外，`4-dewarp` 下如果还有其他目录或文件夹更新，不属于当前说明和维护范围。
+除这四部分外，`4-dewarp` 下如果还有其他目录或文件夹更新，不属于当前说明和维护范围。
 
 ## 目录说明
 
 ```text
 4-dewarp/
-├── Cloud-side/      # 云端 Python 语义分割推理交付
-├── Device-side/     # 端侧 C++/NCNN 推理交付
-└── instance-seg/    # YOLO 实例分割推理交付
+├── Cloud-side/          # 云端 Python DeepLab 语义分割推理交付
+├── Test_InternImage-L/  # 云端 Python InternImage-L 文档分割推理交付
+├── Device-side/         # 端侧 C++/NCNN 推理交付
+└── instance-seg/        # YOLO 实例分割推理交付
 ```
 
 ## Cloud-side
@@ -45,6 +46,57 @@ mix     # 原图和 mask 的混合可视化，仅 mask 模式使用
 ├── img/
 └── img_out/
 ```
+
+## Test_InternImage-L
+
+`Test_InternImage-L` 用于云端 InternImage-L 文档前景分割推理。它是新的服务器 GPU 推理包，和训练侧保持一致：输入图像先按比例 letterbox 到 `1024x1024`，RGB 归一化到 `[0, 1]`，模型输出单通道 logit，经 sigmoid 后按默认阈值 `0.60` 二值化。
+
+这一侧的定位是：
+
+```text
+云端运行
+Python / PyTorch / MMCV / MMSeg 推理
+InternImage-L + UPerHead
+输入统一为 1024x1024 letterbox
+输出文档前景 mask
+更关注文档边界和几何形状质量
+```
+
+对应交付目录：
+
+```text
+4-dewarp/Test_InternImage-L/
+├── infer.py
+├── configs/
+│   └── docseg_internimage_l_1024.py
+├── checkpoints/
+│   └── best_hd95_epoch_45.pth
+├── segmentation/
+│   ├── mmseg_custom/
+│   └── ops_dcnv3/
+├── img/
+└── README.md
+```
+
+推理方式：
+
+```bash
+cd 4-dewarp/Test_InternImage-L
+python infer.py
+```
+
+默认会递归读取 `img/` 下的图片，包括 `img/book/` 和 `img/comic/`，并自动使用 `checkpoints/` 下最新的 `best_hd95_epoch_*.pth` 权重。
+
+推理结果输出到：
+
+```text
+outputs/
+├── masks/       # 放回原图尺寸的 0-255 mask
+├── masks_1024/  # 1024 letterbox 坐标下的 mask
+└── overlays/    # 原图叠加 mask 的可视化
+```
+
+提交到 GitHub 时，`infer.py`、`configs/`、`segmentation/` 和 `README.md` 是推理必需文件；`img/` 是示例输入，`outputs/` 是本地推理结果，通常不需要提交。权重文件较大，如果不随仓库提交，需要单独提供并放到 `checkpoints/` 下。
 
 ## Instance-seg
 
