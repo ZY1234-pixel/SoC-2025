@@ -83,15 +83,8 @@ class ReflowPlanner:
             )
             for element in page.elements
         )
-        estimated_height = sum(
-            max(
-                self._section_height(section, planned, role_by_id, usable_width),
-                self._source_section_height(section, planned, scale),
-            )
-            for section in sections
-        )
         usable_height = geometry.height_pt - geometry.margin_top_pt - geometry.margin_bottom_pt
-        fit_scale = min(1.0, usable_height * self.word_safety_factor / max(estimated_height, 1.0))
+        fit_scale = self._fit_scale(sections, planned, role_by_id, usable_width, usable_height)
         header_ids = tuple(
             element.element_id
             for element in furniture
@@ -226,25 +219,22 @@ class ReflowPlanner:
             if item.kind == "paragraph_group"
             and item.bbox.width >= page_width * 0.20
         ]
-        typical_width = median(item.bbox.width for item in candidates) if candidates else 0.0
-        anchors = [item for item in candidates if item.bbox.width <= typical_width * 1.35]
-        if len(anchors) < 2:
+        if len(candidates) < 4:
             return []
         lanes = []
-        for item in sorted(anchors, key=lambda element: (element.bbox.x1, element.bbox.x2)):
-            best = None
-            best_overlap = 0.0
-            for index, lane in enumerate(lanes):
-                left = median(member.bbox.x1 for member in lane)
-                right = median(member.bbox.x2 for member in lane)
-                overlap = max(0.0, min(right, item.bbox.x2) - max(left, item.bbox.x1))
-                ratio = overlap / max(min(right - left, item.bbox.width), 1.0)
-                if ratio > best_overlap:
-                    best, best_overlap = index, ratio
-            if best is not None and best_overlap >= 0.35:
+        tolerance = page_width * 0.10
+        for item in sorted(candidates, key=lambda element: (element.bbox.x1 + element.bbox.x2) / 2.0):
+            center = (item.bbox.x1 + item.bbox.x2) / 2.0
+            best = min(
+                range(len(lanes)),
+                key=lambda index: abs(center - median((member.bbox.x1 + member.bbox.x2) / 2.0 for member in lanes[index])),
+                default=None,
+            )
+            if best is not None and abs(center - median((member.bbox.x1 + member.bbox.x2) / 2.0 for member in lanes[best])) <= tolerance:
                 lanes[best].append(item)
             else:
                 lanes.append([item])
+        lanes = [lane for lane in lanes if len(lane) >= 2]
         lanes.sort(key=lambda lane: min(item.bbox.x1 for item in lane))
         return lanes if 2 <= len(lanes) <= 4 else []
 
@@ -286,36 +276,45 @@ class ReflowPlanner:
             result[item.element_id] = row
         return result
 
-    def _section_height(self, section, elements, roles, usable_width: float) -> float:
+    def _fit_scale(self, sections, elements, roles, usable_width: float, usable_height: float) -> float:
+        target = usable_height * self.word_safety_factor
+
+        def content_height(scale: float) -> float:
+            return sum(self._section_height(section, elements, roles, usable_width, scale) for section in sections)
+
+        upper = self.word_safety_factor
+        if content_height(upper) <= target:
+            return upper
+        lower = 0.0
+        for _ in range(12):
+            middle = (lower + upper) / 2.0
+            if content_height(middle) <= target:
+                lower = middle
+            else:
+                upper = middle
+        return max(lower, 0.001)
+
+    def _section_height(self, section, elements, roles, usable_width: float, fit_scale: float) -> float:
         by_id = {element.element_id: element for element in elements}
         if section.kind == FlowKind.SINGLE:
-            return sum(self._element_height(by_id[item], roles, usable_width) for item in section.element_ids)
+            return sum(self._element_height(by_id[item], roles, usable_width, fit_scale) for item in section.element_ids)
         widths = section.column_widths_pt
         if section.kind == FlowKind.SEQUENTIAL_COLUMNS:
             totals = [0.0] * len(widths)
             for identifier in section.element_ids:
                 element = by_id[identifier]
                 column = int(element.payload.get("column", 0))
-                totals[column] += self._element_height(element, roles, widths[column])
+                totals[column] += self._element_height(element, roles, widths[column], fit_scale)
             return max(totals, default=0.0)
         row_heights = defaultdict(float)
         for cell in section.grid_cells:
             width = widths[cell.column]
-            height = sum(self._element_height(by_id[identifier], roles, width) for identifier in cell.element_ids)
+            height = sum(self._element_height(by_id[identifier], roles, width, fit_scale) for identifier in cell.element_ids)
             row_heights[cell.row] = max(row_heights[cell.row], height)
         return sum(row_heights.values())
 
     @staticmethod
-    def _source_section_height(section, elements, source_scale: float) -> float:
-        by_id = {element.element_id: element for element in elements}
-        boxes = [by_id[identifier].payload.get("source_bbox") for identifier in section.element_ids]
-        boxes = [box for box in boxes if box]
-        if not boxes:
-            return 0.0
-        return (max(float(box[3]) for box in boxes) - min(float(box[1]) for box in boxes)) * source_scale
-
-    @staticmethod
-    def _element_height(element, roles, width: float) -> float:
+    def _element_height(element, roles, width: float, fit_scale: float) -> float:
         role = roles.get(element.role_id)
         if element.kind == "table_group" and element.payload.get("html"):
             soup = BeautifulSoup(str(element.payload["html"]), "html.parser")
@@ -324,7 +323,8 @@ class ReflowPlanner:
                 (sum(max(int(cell.get("colspan", 1)), 1) for cell in row.find_all(["td", "th"], recursive=False)) for row in rows),
                 default=1,
             )
-            font_size = float(element.payload.get("table_font_size_pt") or (role.font_size_pt if role else 10.5))
+            base_size = float(element.payload.get("table_font_size_pt") or (role.font_size_pt if role else 10.5))
+            font_size = max(round(base_size * fit_scale * 2) / 2.0, 0.5)
             height = 0.0
             for row in rows:
                 row_height = font_size * 1.2
@@ -335,16 +335,17 @@ class ReflowPlanner:
                     lines = max(1, math.ceil(units * font_size / max(cell_width, 1.0)))
                     row_height = max(row_height, lines * font_size * 1.2)
                 height += row_height + 2.0
-            return height + (10.0 if element.payload.get("caption") else 0.0)
+            return height + (10.0 * fit_scale if element.payload.get("caption") else 0.0)
         if role is not None and element.text:
+            font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
             units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in element.text)
-            lines = max(1, math.ceil(units * role.font_size_pt / max(width, 1.0)))
-            return lines * role.font_size_pt * role.line_spacing + role.space_before_pt + role.space_after_pt
+            lines = max(1, math.ceil(units * font_size / max(width, 1.0)))
+            return lines * font_size * role.line_spacing
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
         aspect = max(float(bbox[3]) - float(bbox[1]), 1.0) / max(float(bbox[2]) - float(bbox[0]), 1.0)
-        visual_width = width * float(element.payload.get("width_fraction", 1.0))
+        visual_width = width * float(element.payload.get("width_fraction", 1.0)) * fit_scale
         caption_lines = 1 if element.payload.get("caption") else 0
-        return visual_width * aspect + caption_lines * 10.0
+        return visual_width * aspect + caption_lines * 10.0 * fit_scale
 
     @staticmethod
     def _alignment(element, bounds: Rect) -> str:

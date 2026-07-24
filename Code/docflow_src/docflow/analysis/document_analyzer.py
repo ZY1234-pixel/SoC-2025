@@ -179,7 +179,7 @@ class DocumentAnalyzer:
         page_index: int,
     ) -> SemanticElement:
         kind = self._kind(primary)
-        text = "" if primary.category in {"figure", "table", "formula"} else self._text(primary)
+        text = "" if kind in {"figure_group", "table_group", "equation_group"} else self._text(primary)
         if kind == "heading":
             text = self._normalize_heading(text)
         payload = {
@@ -276,6 +276,13 @@ class DocumentAnalyzer:
         if item.raw_type == "footer_image":
             return "footer"
         category = item.category
+        text = DocumentAnalyzer._text(item)
+        if (
+            category == "text"
+            and item.bbox.height >= item.bbox.width * 2.5
+            and sum("\u4e00" <= char <= "\u9fff" for char in text) >= 3
+        ):
+            return "figure_group"
         if category == "title":
             return "heading"
         if category == "figure":

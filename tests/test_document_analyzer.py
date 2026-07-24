@@ -97,3 +97,14 @@ def test_duplicate_semantic_element_keeps_all_evidence_provenance() -> None:
     assert len(page.elements) == 1
     assert set(page.elements[0].source_ids) == {"short", "long"}
     assert page.diagnostics[0].code == "duplicate_evidence_merged"
+
+
+def test_vertical_cjk_sidebar_keeps_visual_orientation() -> None:
+    evidence = RecognitionEvidence(
+        (RecognitionPage(0, 1000, 1400, (_item("aside", "text", (20, 100, 60, 700), 1, "公司证券研究报告"),)),)
+    )
+
+    element = DocumentAnalyzer().analyze(evidence).pages[0].elements[0]
+
+    assert element.kind == "figure_group"
+    assert element.text == ""

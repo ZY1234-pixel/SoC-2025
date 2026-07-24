@@ -86,7 +86,7 @@ def test_visual_width_uses_primary_bbox_instead_of_grouped_number_bbox() -> None
     assert planned.payload["width_fraction"] == pytest.approx(0.25)
 
 
-def test_single_row_table_uses_body_font_and_contributes_wrapped_height() -> None:
+def test_single_row_table_uses_body_font_and_wrap_aware_fit() -> None:
     table = _element(
         "table",
         (100, 100, 900, 1300),
@@ -99,17 +99,34 @@ def test_single_row_table_uses_body_font_and_contributes_wrapped_height() -> Non
     page = ReflowPlanner().plan(_analysis((table,))).pages[0]
 
     assert page.elements[0].payload["table_font_size_pt"] == pytest.approx(10.5)
-    assert page.fit_scale < 0.5
+    assert 0.5 < page.fit_scale < 0.8
+
+
+def test_page_geometry_floor_is_counted_once_across_model_order_sections() -> None:
+    elements = (
+        _element("late-first", (100, 1000, 400, 1050), 1),
+        _element("early-second", (100, 100, 400, 150), 2),
+        _element("separator", (100, 300, 900, 350), 3, kind="heading"),
+        _element("middle-last", (100, 500, 400, 550), 4),
+    )
+
+    page = ReflowPlanner(word_safety_factor=0.8).plan(_analysis(elements)).pages[0]
+
+    assert page.fit_scale == pytest.approx(0.8)
 
 
 def test_cross_column_paragraphs_do_not_merge_stable_lane_anchors() -> None:
     elements = (
         _element("c1", (0, 200, 220, 500), 1),
+        _element("c1-more", (0, 600, 220, 800), 2),
         _element("bridge-middle", (180, 100, 620, 150), 2),
         _element("c2", (250, 200, 470, 500), 3),
+        _element("c2-more", (250, 600, 470, 800), 4),
         _element("c3", (500, 200, 720, 500), 4),
+        _element("c3-more", (500, 600, 720, 800), 5),
         _element("bridge-right", (510, 520, 980, 570), 5),
         _element("c4", (750, 200, 970, 500), 6),
+        _element("c4-more", (750, 600, 970, 800), 7),
     )
 
     lanes = ReflowPlanner._anchor_lanes(elements, 1000)
