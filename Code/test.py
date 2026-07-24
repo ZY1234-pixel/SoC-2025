@@ -25,6 +25,7 @@ from model import LayoutModelSpec, RuntimePaths
 from preprocess import expand_to_pages
 from utils import ensure_runtime_paths, find_libreoffice, parse_formats, print_list
 from docflow.adapters.paddle_adapter import PaddleAdapter
+from docflow.model.stages import RecognitionEvidence
 from docflow.pipeline import RecoveryPipeline
 from docflow.utils.result_layout import (
     ResultRunLayout,
@@ -651,14 +652,15 @@ def recheck_text_ocr_with_preprocessing(engine, image, result: list) -> int:
     return changed
 
 
-def analyze_page(engine, adapter: PaddleAdapter, image, page_index: int, source_path: str) -> tuple[dict, list, float]:
+def analyze_page(engine, adapter: PaddleAdapter, image, page_index: int, source_path: str) -> tuple[dict, RecognitionEvidence, list, float]:
     started_at = time.time()
     result, _ = engine(image, img_idx=page_index)
     recheck_text_ocr_with_preprocessing(engine, image, result)
     elapsed = time.time() - started_at
+    evidence = adapter.collect_evidence(result, image, img_idx=page_index, source_file=source_path)
     page_document = adapter.convert(result, image, img_idx=page_index)
     page_document["pages"][0]["image_path"] = source_path
-    return page_document, result, elapsed
+    return page_document, evidence, result, elapsed
 
 
 def save_debug_images(
@@ -770,17 +772,21 @@ def run_sample(
 ) -> int:
     pages = expand_to_pages(sample_path, dpi=pdf_dpi) if is_pdf_file(sample_path) else expand_to_pages(sample_path)
     page_documents = []
+    evidence_pages = []
     for page_index, image in [(idx, img) for idx, (_page_name, img) in enumerate(pages)]:
         height, width = image.shape[:2]
         print(f"[页面] {sample_path.name} p{page_index + 1} ({width}x{height})")
-        page_document, result, elapsed = analyze_page(engine, adapter, image, page_index, str(sample_path))
+        page_document, evidence, result, elapsed = analyze_page(engine, adapter, image, page_index, str(sample_path))
         print(f"[分析] {sample_path.name} p{page_index + 1}: 检测到 {len(result)} 个区域，耗时 {elapsed:.2f}s")
         print_regions(result)
         if save_debug_vis:
             write_json(sample_layout.sample_dir / "raw_result.json", summarize_raw_result(result))
             save_debug_images(pipeline, image, result, page_document, sample_layout, page_index)
         page_documents.append(page_document)
+        evidence_pages.extend(evidence.pages)
 
+    evidence = RecognitionEvidence(tuple(evidence_pages), source_file=str(sample_path))
+    write_json(sample_layout.recognition_path, evidence.to_dict())
     merged_document = merge_page_documents(page_documents, source_path=str(sample_path))
     document = pipeline.build_document(merged_document)
     render_plan = build_render_plan(document, output_format="docx")

@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 
 from docflow.adapters.base_adapter import BaseAdapter
+from docflow.model.stages import RecognitionEvidence, RecognitionItem, RecognitionPage, Rect, TextEvidence
 
 
 class PaddleAdapter(BaseAdapter):
@@ -167,6 +168,67 @@ class PaddleAdapter(BaseAdapter):
         r"^\s*(?:图|fig(?:ure)?\.?)\s*[\d一二三四五六七八九十]+(?:[-－—]\d+)?\s*\S*",
         re.IGNORECASE,
     )
+
+    def collect_evidence(
+        self,
+        results: list,
+        image: np.ndarray,
+        img_idx: int = 0,
+        source_file: Optional[str] = None,
+    ) -> RecognitionEvidence:
+        """Capture upstream regions before semantic cleanup changes them."""
+        height, width = image.shape[:2]
+        items = []
+        for source_index, region in enumerate(self._attach_model_order(results)):
+            if not isinstance(region, dict):
+                continue
+            raw_type = str(region.get("raw_type") or region.get("type") or "text").lower()
+            type_name = str(region.get("type") or "text").lower()
+            bbox = region.get("bbox")
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                bbox = [0, 0, width, height]
+            text_lines = tuple(
+                TextEvidence(
+                    text=str(line.get("text") or ""),
+                    confidence=float(line.get("confidence", 1.0)),
+                    polygon=tuple(
+                        (float(point[0]), float(point[1]))
+                        for point in (line.get("poly") or [])
+                        if isinstance(point, (list, tuple)) and len(point) >= 2
+                    ),
+                )
+                for line in self._convert_text_lines(region.get("res"))
+            )
+            res = region.get("res")
+            html = res.get("html") if isinstance(res, dict) else None
+            latex = res.get("latex") if isinstance(res, dict) else None
+            roi = region.get("img")
+            attributes = {
+                "source_index": source_index,
+                "source_type": type_name,
+                "source_attributes": region.get("attributes") or {},
+            }
+            if isinstance(res, dict) and "cells" in res:
+                attributes["table_cells"] = res["cells"]
+            items.append(
+                RecognitionItem(
+                    evidence_id=f"p{img_idx:04d}_r{source_index:04d}",
+                    category=self._CATEGORY_MAP.get(type_name, type_name),
+                    bbox=Rect.from_sequence(bbox),
+                    model_order=self._region_model_order(region, source_index),
+                    confidence=float(region.get("score", 1.0)),
+                    text_lines=text_lines,
+                    image_base64=self._encode_image(roi) if isinstance(roi, np.ndarray) else None,
+                    html=html,
+                    latex=latex,
+                    raw_type=raw_type,
+                    layout_model=region.get("layout_model"),
+                    attributes=attributes,
+                )
+            )
+        items.sort(key=lambda item: (item.model_order, item.attributes["source_index"]))
+        page = RecognitionPage(img_idx, width, height, tuple(items), image_path=source_file)
+        return RecognitionEvidence((page,), source_file=source_file)
 
     def convert(
         self,

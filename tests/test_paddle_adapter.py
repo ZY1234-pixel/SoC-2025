@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from docflow.adapters.paddle_adapter import PaddleAdapter
+from docflow.model.stages import Rect
 
 
 def test_nested_same_category_figure_is_suppressed() -> None:
@@ -612,3 +613,36 @@ def test_formula_number_category_and_attributes_are_preserved() -> None:
 
     assert block["category"] == "formula"
     assert block["attributes"]["formula_number_text"] == "(1)"
+
+
+def test_collect_evidence_preserves_raw_regions_bbox_and_model_order() -> None:
+    adapter = PaddleAdapter()
+    image = np.zeros((200, 300, 3), dtype=np.uint8)
+    results = [
+        {
+            "type": "figure",
+            "bbox": [20, 20, 280, 180],
+            "model_order": 2,
+            "score": 0.9,
+        },
+        {
+            "type": "text",
+            "bbox": [40, 40, 260, 80],
+            "model_order": 1,
+            "score": 0.8,
+            "res": [
+                {
+                    "text": "kept as independent evidence",
+                    "text_region": [[10, 10], [290, 10], [290, 90], [10, 90]],
+                }
+            ],
+        },
+    ]
+
+    evidence = adapter.collect_evidence(results, image, img_idx=3, source_file="sample.jpg")
+    items = evidence.pages[0].items
+
+    assert [item.category for item in items] == ["text", "figure"]
+    assert items[0].bbox == Rect(40, 40, 260, 80)
+    assert items[0].evidence_id == "p0003_r0001"
+    assert evidence.to_dict()["pages"][0]["image_path"] == "sample.jpg"
