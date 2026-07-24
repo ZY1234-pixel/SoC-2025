@@ -132,3 +132,17 @@ def test_cross_column_paragraphs_do_not_merge_stable_lane_anchors() -> None:
     lanes = ReflowPlanner._anchor_lanes(elements, 1000)
 
     assert len(lanes) == 4
+
+
+def test_repeated_visual_blocks_form_a_grid_without_text_anchors() -> None:
+    elements = (
+        _element("top-left", (50, 100, 450, 400), 1, text="", kind="figure_group"),
+        _element("top-right", (550, 100, 950, 400), 2, text="", kind="figure_group"),
+        _element("bottom-left", (50, 500, 450, 800), 3, text="", kind="figure_group"),
+        _element("bottom-right", (550, 500, 950, 800), 4, text="", kind="figure_group"),
+    )
+
+    section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
+
+    assert section.kind.value == "grid_flow"
+    assert len(section.grid_cells) == 4

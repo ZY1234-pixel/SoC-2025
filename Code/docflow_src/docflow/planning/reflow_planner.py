@@ -213,30 +213,32 @@ class ReflowPlanner:
 
     @staticmethod
     def _anchor_lanes(elements, page_width: float):
-        candidates = [
-            item
-            for item in elements
-            if item.kind == "paragraph_group"
-            and item.bbox.width >= page_width * 0.20
-        ]
-        if len(candidates) < 4:
-            return []
-        lanes = []
         tolerance = page_width * 0.10
-        for item in sorted(candidates, key=lambda element: (element.bbox.x1 + element.bbox.x2) / 2.0):
-            center = (item.bbox.x1 + item.bbox.x2) / 2.0
-            best = min(
-                range(len(lanes)),
-                key=lambda index: abs(center - median((member.bbox.x1 + member.bbox.x2) / 2.0 for member in lanes[index])),
-                default=None,
-            )
-            if best is not None and abs(center - median((member.bbox.x1 + member.bbox.x2) / 2.0 for member in lanes[best])) <= tolerance:
-                lanes[best].append(item)
-            else:
-                lanes.append([item])
-        lanes = [lane for lane in lanes if len(lane) >= 2]
-        lanes.sort(key=lambda lane: min(item.bbox.x1 for item in lane))
-        return lanes if 2 <= len(lanes) <= 4 else []
+        for kinds in ({"paragraph_group"}, {"figure_group", "table_group"}):
+            candidates = [
+                item
+                for item in elements
+                if item.kind in kinds and item.bbox.width >= page_width * 0.20
+            ]
+            if len(candidates) < 4:
+                continue
+            lanes = []
+            for item in sorted(candidates, key=lambda element: (element.bbox.x1 + element.bbox.x2) / 2.0):
+                center = (item.bbox.x1 + item.bbox.x2) / 2.0
+                best = min(
+                    range(len(lanes)),
+                    key=lambda index: abs(center - median((member.bbox.x1 + member.bbox.x2) / 2.0 for member in lanes[index])),
+                    default=None,
+                )
+                if best is not None and abs(center - median((member.bbox.x1 + member.bbox.x2) / 2.0 for member in lanes[best])) <= tolerance:
+                    lanes[best].append(item)
+                else:
+                    lanes.append([item])
+            lanes = [lane for lane in lanes if len(lane) >= 2]
+            lanes.sort(key=lambda lane: min(item.bbox.x1 for item in lane))
+            if 2 <= len(lanes) <= 4:
+                return lanes
+        return []
 
     @classmethod
     def _lanes(cls, elements, page_width: float):
