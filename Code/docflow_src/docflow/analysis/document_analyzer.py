@@ -168,6 +168,11 @@ class DocumentAnalyzer:
                 if line.polygon
             ),
             "caption": " ".join(filter(None, (self._text(item) for item in captions))),
+            "caption_position": (
+                "before"
+                if captions and min(item.bbox.y1 for item in captions) < primary.bbox.y1
+                else "after"
+            ),
             "embedded_source_ids": tuple(
                 item.evidence_id
                 for item in related[1:]
@@ -175,11 +180,20 @@ class DocumentAnalyzer:
             ),
         }
         if primary.category == "formula":
-            detected_number = next(
-                (line.text.strip() for line in primary.text_lines if _FORMULA_NUMBER_RE.match(line.text or "")),
-                "",
+            number_item = next((item for item in related[1:] if self._is_formula_number(item)), None)
+            detected_line = next(
+                (line for line in primary.text_lines if _FORMULA_NUMBER_RE.match(line.text or "")),
+                None,
             )
+            detected_number = detected_line.text.strip() if detected_line else ""
             payload["number"] = formula_number or detected_number
+            number_bbox = number_item.bbox if number_item else self._polygon_rect(detected_line.polygon if detected_line else ())
+            payload["number_bbox"] = (
+                (number_bbox.x1, number_bbox.y1, number_bbox.x2, number_bbox.y2)
+                if number_bbox
+                else None
+            )
+        payload["primary_bbox"] = (primary.bbox.x1, primary.bbox.y1, primary.bbox.x2, primary.bbox.y2)
         if primary.category == "table" and not primary.html and not primary.attributes.get("table_cells"):
             payload["structure_missing"] = True
         return SemanticElement(
@@ -354,6 +368,17 @@ class DocumentAnalyzer:
         dx = max(left.x1 - right.x2, right.x1 - left.x2, 0.0)
         dy = max(left.y1 - right.y2, right.y1 - left.y2, 0.0)
         return (dx * dx + dy * dy) ** 0.5
+
+    @staticmethod
+    def _polygon_rect(polygon) -> Optional[Rect]:
+        if not polygon:
+            return None
+        return Rect(
+            min(point[0] for point in polygon),
+            min(point[1] for point in polygon),
+            max(point[0] for point in polygon),
+            max(point[1] for point in polygon),
+        )
 
     @staticmethod
     def _union(rectangles: Iterable[Rect]) -> Rect:

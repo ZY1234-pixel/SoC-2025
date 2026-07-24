@@ -43,32 +43,6 @@ def resolve_run_dir(path: Path) -> Path:
     return path
 
 
-def merge_page_documents(page_documents: Sequence[dict], source_path: Optional[str] = None) -> dict:
-    if not page_documents:
-        raise ValueError("page_documents must not be empty")
-
-    merged_pages: List[dict] = []
-    base_metadata = dict(page_documents[0].get("metadata") or {})
-    if source_path:
-        base_metadata["source_file"] = source_path
-
-    for page_index, page_document in enumerate(page_documents):
-        pages = page_document.get("pages") or []
-        if len(pages) != 1:
-            raise ValueError("each page document must contain exactly one page")
-        page = dict(pages[0])
-        page["page_index"] = page_index
-        if source_path:
-            page["image_path"] = source_path
-        merged_pages.append(page)
-
-    return {
-        "version": str(page_documents[0].get("version") or "2.0"),
-        "metadata": base_metadata,
-        "pages": merged_pages,
-    }
-
-
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.tmp")
@@ -83,7 +57,6 @@ class SampleResultLayout:
     sample_dir: Path
     json_path: Path
     recognition_path: Path
-    analysis_path: Path
     render_plan_path: Path
     docx_path: Path
     markdown_path: Path
@@ -136,7 +109,6 @@ class ResultRunLayout:
             sample_dir=sample_dir,
             json_path=sample_dir / f"{sample_key}.json",
             recognition_path=sample_dir / f"{sample_key}.recognition.json",
-            analysis_path=sample_dir / f"{sample_key}.analysis.json",
             render_plan_path=sample_dir / f"{sample_key}.render_plan.json",
             docx_path=sample_dir / f"{sample_key}.docx",
             markdown_path=sample_dir / f"{sample_key}.md",

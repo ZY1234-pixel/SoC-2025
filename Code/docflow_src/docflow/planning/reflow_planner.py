@@ -62,6 +62,7 @@ class ReflowPlanner:
                     "source_bbox": (element.bbox.x1, element.bbox.y1, element.bbox.x2, element.bbox.y2),
                     "width_fraction": min(element.bbox.width / max(bounds.width, 1.0), 1.0),
                     "column": placement.get(element.element_id, 0),
+                    "alignment": self._alignment(element, bounds),
                 },
             )
             for element in page.elements
@@ -232,6 +233,17 @@ class ReflowPlanner:
         visual_width = width * float(element.payload.get("width_fraction", 1.0))
         caption_lines = 1 if element.payload.get("caption") else 0
         return visual_width * aspect + caption_lines * 10.0
+
+    @staticmethod
+    def _alignment(element, bounds: Rect) -> str:
+        if element.kind in {"figure_group", "equation_group", "caption"}:
+            return "center"
+        if element.kind == "heading":
+            element_center = (element.bbox.x1 + element.bbox.x2) / 2.0
+            bounds_center = (bounds.x1 + bounds.x2) / 2.0
+            if abs(element_center - bounds_center) <= bounds.width * 0.08:
+                return "center"
+        return "justify" if element.kind == "paragraph_group" and len(element.text) >= 40 else "left"
 
     @staticmethod
     def _union(rectangles):

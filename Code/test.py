@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
 from difflib import SequenceMatcher
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -28,14 +28,13 @@ from docflow.adapters.paddle_adapter import PaddleAdapter
 from docflow.analysis import DocumentAnalyzer
 from docflow.model.stages import RecognitionEvidence
 from docflow.planning import ReflowPlanner
-from docflow.pipeline import RecoveryPipeline
+from docflow.renderer.reflow_docx_renderer import ReflowDocxRenderer
+from docflow.renderer.reflow_markdown_renderer import ReflowMarkdownRenderer
 from docflow.utils.result_layout import (
     ResultRunLayout,
     build_main_run_manifest,
-    merge_page_documents,
     write_json,
 )
-from docflow.utils.render_plan import build_render_plan
 
 
 TEXT_TYPES = {
@@ -379,40 +378,6 @@ def summarize_raw_result(result: list) -> dict:
     return {"regions": regions}
 
 
-def _converted_blocks_to_debug_regions(page_document: dict) -> list[dict]:
-    pages = page_document.get("pages") if isinstance(page_document, dict) else None
-    if not pages:
-        return []
-    page = pages[0] or {}
-    regions: list[dict] = []
-    for block in page.get("blocks") or []:
-        if not isinstance(block, dict):
-            continue
-        region: dict = {
-            "type": block.get("category", block.get("type", "?")),
-            "bbox": block.get("bbox", [0, 0, 0, 0]),
-            "score": float(block.get("confidence", block.get("score", 0.0)) or 0.0),
-            "res": [],
-        }
-        if block.get("text_lines"):
-            converted_lines = []
-            for line in block.get("text_lines") or []:
-                if not isinstance(line, dict):
-                    continue
-                converted_lines.append(
-                    {
-                        "text": line.get("text", ""),
-                        "confidence": line.get("confidence", 1.0),
-                        "text_region": line.get("poly"),
-                    }
-                )
-            region["res"] = converted_lines
-        elif block.get("text"):
-            region["res"] = [{"text": block.get("text", "")}]
-        regions.append(region)
-    return regions
-
-
 def _line_texts(region: dict) -> list[str]:
     texts: list[str] = []
     for item in region.get("res") or []:
@@ -654,102 +619,50 @@ def recheck_text_ocr_with_preprocessing(engine, image, result: list) -> int:
     return changed
 
 
-def analyze_page(engine, adapter: PaddleAdapter, image, page_index: int, source_path: str) -> tuple[dict, RecognitionEvidence, list, float]:
+def analyze_page(engine, adapter: PaddleAdapter, image, page_index: int, source_path: str) -> tuple[RecognitionEvidence, list, float]:
     started_at = time.time()
     result, _ = engine(image, img_idx=page_index)
     recheck_text_ocr_with_preprocessing(engine, image, result)
     elapsed = time.time() - started_at
     evidence = adapter.collect_evidence(result, image, img_idx=page_index, source_file=source_path)
-    page_document = adapter.convert(result, image, img_idx=page_index)
-    page_document["pages"][0]["image_path"] = source_path
-    return page_document, evidence, result, elapsed
+    return evidence, result, elapsed
 
 
 def save_debug_images(
-    pipeline: RecoveryPipeline,
     image,
     result: list,
-    page_document: dict,
     sample_layout,
     page_index: int,
 ) -> None:
     from docflow.utils.visualization import (
         draw_layout_ocr,
         draw_sorted_layout,
-        extract_sorted_blocks,
     )
-
-    def _remap_to_source_bboxes(ordered_blocks: list[dict], source_page: dict) -> list[dict]:
-        def _should_use_source_bbox(current_bbox: list[float], source_bbox: list[float]) -> bool:
-            if len(current_bbox) != 4 or len(source_bbox) != 4:
-                return False
-            curr_w = max(0.0, float(current_bbox[2]) - float(current_bbox[0]))
-            curr_h = max(0.0, float(current_bbox[3]) - float(current_bbox[1]))
-            src_w = max(0.0, float(source_bbox[2]) - float(source_bbox[0]))
-            src_h = max(0.0, float(source_bbox[3]) - float(source_bbox[1]))
-            curr_area = curr_w * curr_h
-            src_area = src_w * src_h
-            if curr_area <= 1.0 or src_area <= 1.0:
-                return True
-
-            edge_delta = max(
-                abs(float(current_bbox[0]) - float(source_bbox[0])),
-                abs(float(current_bbox[1]) - float(source_bbox[1])),
-                abs(float(current_bbox[2]) - float(source_bbox[2])),
-                abs(float(current_bbox[3]) - float(source_bbox[3])),
-            )
-            area_ratio = curr_area / src_area
-            # 仅在 bbox 基本一致时回写 source 坐标，避免把 flow 内合并/裁剪后的
-            # 最终几何退回到原始 OCR 框，导致调试图“最后一行掉出框外”。
-            return edge_delta <= 12.0 and 0.85 <= area_ratio <= 1.15
-
-        source_by_id = {
-            str(block.get("id", "")): block
-            for block in source_page.get("blocks", [])
-        }
-        remapped: list[dict] = []
-        for block in ordered_blocks:
-            source = source_by_id.get(str(block.get("id", "")))
-            remapped_block = dict(block)
-            if (
-                source
-                and isinstance(source.get("bbox"), list)
-                and len(source["bbox"]) == 4
-                and _should_use_source_bbox(
-                    list(remapped_block.get("bbox", []) or []),
-                    source["bbox"],
-                )
-            ):
-                remapped_block["bbox"] = [float(v) for v in source["bbox"]]
-            remapped.append(remapped_block)
-        return remapped
 
     sample_layout.debug_dir.mkdir(parents=True, exist_ok=True)
     layout_path = sample_layout.debug_image_path(page_index, "layout_ocr")
     order_columns_path = sample_layout.debug_image_path(page_index, "reading_order_columns")
-    clean_regions = _converted_blocks_to_debug_regions(page_document)
     vis_layout = draw_layout_ocr(
         image,
-        clean_regions or result,
+        result,
         font_path=None,
         show_text_preview=True,
     )
     cv2.imwrite(str(layout_path), vis_layout)
-
-    actual_document = pipeline.build_document(deepcopy(page_document))
-    source_page = (page_document.get("pages") or [{}])[0]
-
-    ordered_blocks = _remap_to_source_bboxes(extract_sorted_blocks(actual_document, page_index=0), source_page)
+    ordered_blocks = [
+        {
+            "bbox": region.get("bbox", [0, 0, 0, 0]),
+            "col_index": 0,
+            "col_count": 1,
+            "spanned_cols": [0],
+        }
+        for region in sorted(
+            (item for item in result if isinstance(item, dict)),
+            key=lambda item: float(item.get("model_order", 0.0)),
+        )
+    ]
     vis_order_columns = draw_sorted_layout(image, ordered_blocks)
     cv2.imwrite(str(order_columns_path), vis_order_columns)
-
-
-def _sample_cleanup_removed_count(merged_document: dict) -> int:
-    total = 0
-    for page in merged_document.get("pages") or []:
-        attrs = page.get("attributes") or {}
-        total += int(attrs.get("cleanup_removed_count") or 0)
-    return total
 
 
 def _native_docx_table_count(path: Path) -> int:
@@ -765,7 +678,6 @@ def _native_docx_table_count(path: Path) -> int:
 def run_sample(
     engine,
     adapter: PaddleAdapter,
-    pipeline: RecoveryPipeline,
     sample_path: Path,
     sample_layout,
     formats: list[str],
@@ -773,71 +685,49 @@ def run_sample(
     save_debug_vis: bool,
 ) -> int:
     pages = expand_to_pages(sample_path, dpi=pdf_dpi) if is_pdf_file(sample_path) else expand_to_pages(sample_path)
-    page_documents = []
     evidence_pages = []
     for page_index, image in [(idx, img) for idx, (_page_name, img) in enumerate(pages)]:
         height, width = image.shape[:2]
         print(f"[页面] {sample_path.name} p{page_index + 1} ({width}x{height})")
-        page_document, evidence, result, elapsed = analyze_page(engine, adapter, image, page_index, str(sample_path))
+        evidence, result, elapsed = analyze_page(engine, adapter, image, page_index, str(sample_path))
         print(f"[分析] {sample_path.name} p{page_index + 1}: 检测到 {len(result)} 个区域，耗时 {elapsed:.2f}s")
         print_regions(result)
         if save_debug_vis:
             write_json(sample_layout.sample_dir / "raw_result.json", summarize_raw_result(result))
-            save_debug_images(pipeline, image, result, page_document, sample_layout, page_index)
-        page_documents.append(page_document)
+            save_debug_images(image, result, sample_layout, page_index)
         evidence_pages.extend(evidence.pages)
 
     evidence = RecognitionEvidence(tuple(evidence_pages), source_file=str(sample_path))
     write_json(sample_layout.recognition_path, evidence.to_dict())
     analysis = DocumentAnalyzer().analyze(evidence)
-    write_json(sample_layout.analysis_path, analysis.to_dict())
+    write_json(sample_layout.json_path, analysis.to_dict())
     reflow_plan = ReflowPlanner().plan(analysis)
     write_json(sample_layout.render_plan_path, reflow_plan.to_dict())
-    merged_document = merge_page_documents(page_documents, source_path=str(sample_path))
-    document = pipeline.build_document(merged_document)
-    legacy_render_plan = build_render_plan(document, output_format="docx")
-
-    # 将 RenderPlan 的 per-page render_mode 注入 document 和 merged_document，
-    # 使 docx renderer 和 pipeline.recover() 中的 renderer 都可以消费该提示。
-    for page_info in legacy_render_plan.get("pages", []):
-        idx = page_info["page_index"]
-        render_mode = page_info.get("render_mode", "")
-        # 注入到 merged_document（供 pipeline.recover 使用）
-        if idx < len(merged_document["pages"]):
-            page_entry = merged_document["pages"][idx]
-            if page_entry.get("attributes") is None:
-                page_entry["attributes"] = {}
-            page_entry["attributes"]["render_mode"] = render_mode
-        # 注入到 document（供 docx renderer 使用）
-        if idx < len(document.pages):
-            if document.pages[idx].attributes is None:
-                document.pages[idx].attributes = {}
-            document.pages[idx].attributes["render_mode"] = render_mode
 
     native_docx_table_count = 0
-    if "docx" in formats:
-        renderer = pipeline._get_renderer("docx")
-        renderer.render(document, str(sample_layout.docx_path))
-        # 将 build/render 阶段写入 page.attributes 的信息回写到 JSON
-        # （如字体分类统计、render_fit 与 style_inferred）。
-        for page_index, page in enumerate(document.pages):
-            if page_index >= len(merged_document["pages"]):
-                continue
-            page_entry = merged_document["pages"][page_index]
-            if page_entry.get("attributes") is None:
-                page_entry["attributes"] = {}
-            attrs = page_entry["attributes"]
-            if page.attributes:
-                attrs.update(page.attributes)
-        write_json(sample_layout.json_path, merged_document)
+    if "docx" in formats or "pdf" in formats:
+        ReflowDocxRenderer().render(reflow_plan, str(sample_layout.docx_path))
         native_docx_table_count = _native_docx_table_count(sample_layout.docx_path)
-    else:
-        write_json(sample_layout.json_path, merged_document)
     if "markdown" in formats:
-        pipeline.recover(merged_document, str(sample_layout.markdown_path), format="markdown")
+        ReflowMarkdownRenderer().render(analysis, str(sample_layout.markdown_path))
     if "pdf" in formats:
-        pipeline.recover(merged_document, str(sample_layout.pdf_path), format="pdf")
-    return len(page_documents), native_docx_table_count
+        subprocess.run(
+            [
+                find_libreoffice(),
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(sample_layout.sample_dir),
+                str(sample_layout.docx_path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+        if not sample_layout.pdf_path.exists():
+            raise RuntimeError("LibreOffice conversion completed without producing the PDF")
+    return len(evidence_pages), native_docx_table_count
 
 
 def main() -> int:
@@ -877,18 +767,16 @@ def main() -> int:
     print(f"版面模型：{paths.layout_model_spec.name} -> {paths.layout_model}")
     engine = make_engine(paths, run_layout.runtime_dir)
     adapter = PaddleAdapter()
-    pipeline = RecoveryPipeline()
-
     failures: list[str] = []
     sample_records = []
     total_pages = 0
     quality_summary = {
-        "layout_profiles": {},
         "native_docx_table_count": 0,
-        "cleanup_removed_total": 0,
+        "analysis_diagnostics_total": 0,
+        "fit_scaled_pages": 0,
     }
     strategy_stats = {
-        "rendering_strategies": {},
+        "flow_kinds": {},
     }
     for sample_path in samples:
         sample_layout = run_layout.create_sample(sample_path)
@@ -896,7 +784,6 @@ def main() -> int:
             page_count = run_sample(
                 engine=engine,
                 adapter=adapter,
-                pipeline=pipeline,
                 sample_path=sample_path,
                 sample_layout=sample_layout,
                 formats=formats,
@@ -908,23 +795,23 @@ def main() -> int:
             else:
                 native_docx_table_count = 0
             total_pages += page_count
-            cleanup_removed = _sample_cleanup_removed_count(
-                json.loads(sample_layout.json_path.read_text(encoding="utf-8"))
-            )
-            quality_summary["cleanup_removed_total"] += cleanup_removed
             quality_summary["native_docx_table_count"] += native_docx_table_count
-            render_plan = json.loads(sample_layout.render_plan_path.read_text(encoding="utf-8"))
-            for key, value in render_plan["summary"]["layout_profiles"].items():
-                quality_summary["layout_profiles"][key] = quality_summary["layout_profiles"].get(key, 0) + value
-            for key, value in render_plan["summary"]["rendering_strategies"].items():
-                strategy_stats["rendering_strategies"][key] = strategy_stats["rendering_strategies"].get(key, 0) + value
+            analysis_payload = json.loads(sample_layout.json_path.read_text(encoding="utf-8"))
+            diagnostic_count = sum(len(page.get("diagnostics") or []) for page in analysis_payload.get("pages") or [])
+            quality_summary["analysis_diagnostics_total"] += diagnostic_count
+            plan_payload = json.loads(sample_layout.render_plan_path.read_text(encoding="utf-8"))
+            for page in plan_payload.get("pages") or []:
+                quality_summary["fit_scaled_pages"] += int(float(page.get("fit_scale", 1.0)) < 1.0)
+                for section in page.get("sections") or []:
+                    key = section.get("kind", "unknown")
+                    strategy_stats["flow_kinds"][key] = strategy_stats["flow_kinds"].get(key, 0) + 1
             sample_records.append(
                 {
                     "sample_key": sample_layout.sample_key,
                     "source_path": str(sample_path),
                     "sample_dir": str(sample_layout.sample_dir),
                     "page_count": page_count,
-                    "cleanup_removed_count": cleanup_removed,
+                    "analysis_diagnostic_count": diagnostic_count,
                     "native_docx_table_count": native_docx_table_count,
                     "render_plan_path": str(sample_layout.render_plan_path),
                     "status": "ok",
@@ -938,7 +825,7 @@ def main() -> int:
                     "source_path": str(sample_path),
                     "sample_dir": str(sample_layout.sample_dir),
                     "page_count": 0,
-                    "cleanup_removed_count": 0,
+                    "analysis_diagnostic_count": 0,
                     "native_docx_table_count": 0,
                     "render_plan_path": str(sample_layout.render_plan_path),
                     "status": "failed",
