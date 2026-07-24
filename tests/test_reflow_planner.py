@@ -84,3 +84,34 @@ def test_visual_width_uses_primary_bbox_instead_of_grouped_number_bbox() -> None
     planned = ReflowPlanner().plan(_analysis((formula,))).pages[0].elements[0]
 
     assert planned.payload["width_fraction"] == pytest.approx(0.25)
+
+
+def test_single_row_table_uses_body_font_and_contributes_wrapped_height() -> None:
+    table = _element(
+        "table",
+        (100, 100, 900, 1300),
+        1,
+        text="",
+        kind="table_group",
+        payload={"html": f"<table><tr><td>{'long table content ' * 500}</td></tr></table>"},
+    )
+
+    page = ReflowPlanner().plan(_analysis((table,))).pages[0]
+
+    assert page.elements[0].payload["table_font_size_pt"] == pytest.approx(10.5)
+    assert page.fit_scale < 0.5
+
+
+def test_cross_column_paragraphs_do_not_merge_stable_lane_anchors() -> None:
+    elements = (
+        _element("c1", (0, 200, 220, 500), 1),
+        _element("bridge-middle", (180, 100, 620, 150), 2),
+        _element("c2", (250, 200, 470, 500), 3),
+        _element("c3", (500, 200, 720, 500), 4),
+        _element("bridge-right", (510, 520, 980, 570), 5),
+        _element("c4", (750, 200, 970, 500), 6),
+    )
+
+    lanes = ReflowPlanner._anchor_lanes(elements, 1000)
+
+    assert len(lanes) == 4

@@ -60,6 +60,7 @@ class ReflowPlanner:
         usable_width = geometry.width_pt - geometry.margin_left_pt - geometry.margin_right_pt
         sections, placement = self._build_sections(body, bounds, usable_width)
         container_widths = self._container_widths(body, sections, placement, bounds.width)
+        body_font_size = role_by_id[default_body_role].font_size_pt if default_body_role in role_by_id else 10.5
         planned = tuple(
             PlannedElement(
                 element.element_id,
@@ -77,7 +78,7 @@ class ReflowPlanner:
                     "alignment": self._alignment(element, bounds),
                     "first_line_indent_pt": self._first_line_indent(element, scale),
                     "page_width_px": page.width_px,
-                    "table_font_size_pt": self._table_font_size(element, scale),
+                    "table_font_size_pt": self._table_font_size(element, scale, body_font_size),
                 },
             )
             for element in page.elements
@@ -219,12 +220,14 @@ class ReflowPlanner:
 
     @staticmethod
     def _anchor_lanes(elements, page_width: float):
-        anchors = [
+        candidates = [
             item
             for item in elements
             if item.kind == "paragraph_group"
             and item.bbox.width >= page_width * 0.20
         ]
+        typical_width = median(item.bbox.width for item in candidates) if candidates else 0.0
+        anchors = [item for item in candidates if item.bbox.width <= typical_width * 1.35]
         if len(anchors) < 2:
             return []
         lanes = []
@@ -232,8 +235,8 @@ class ReflowPlanner:
             best = None
             best_overlap = 0.0
             for index, lane in enumerate(lanes):
-                left = min(member.bbox.x1 for member in lane)
-                right = max(member.bbox.x2 for member in lane)
+                left = median(member.bbox.x1 for member in lane)
+                right = median(member.bbox.x2 for member in lane)
                 overlap = max(0.0, min(right, item.bbox.x2) - max(left, item.bbox.x1))
                 ratio = overlap / max(min(right - left, item.bbox.width), 1.0)
                 if ratio > best_overlap:
@@ -314,6 +317,25 @@ class ReflowPlanner:
     @staticmethod
     def _element_height(element, roles, width: float) -> float:
         role = roles.get(element.role_id)
+        if element.kind == "table_group" and element.payload.get("html"):
+            soup = BeautifulSoup(str(element.payload["html"]), "html.parser")
+            rows = soup.find_all("tr")
+            columns = max(
+                (sum(max(int(cell.get("colspan", 1)), 1) for cell in row.find_all(["td", "th"], recursive=False)) for row in rows),
+                default=1,
+            )
+            font_size = float(element.payload.get("table_font_size_pt") or (role.font_size_pt if role else 10.5))
+            height = 0.0
+            for row in rows:
+                row_height = font_size * 1.2
+                for cell in row.find_all(["td", "th"], recursive=False):
+                    span = max(int(cell.get("colspan", 1)), 1)
+                    cell_width = width * span / columns
+                    units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in cell.get_text(" ", strip=True))
+                    lines = max(1, math.ceil(units * font_size / max(cell_width, 1.0)))
+                    row_height = max(row_height, lines * font_size * 1.2)
+                height += row_height + 2.0
+            return height + (10.0 if element.payload.get("caption") else 0.0)
         if role is not None and element.text:
             units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in element.text)
             lines = max(1, math.ceil(units * role.font_size_pt / max(width, 1.0)))
@@ -344,14 +366,14 @@ class ReflowPlanner:
         return max(indent * source_scale, 0.0)
 
     @staticmethod
-    def _table_font_size(element, source_scale: float):
+    def _table_font_size(element, source_scale: float, body_font_size: float):
         if element.kind != "table_group" or not element.payload.get("html"):
             return None
         table = BeautifulSoup(str(element.payload["html"]), "html.parser").find("table")
         row_count = len(table.find_all("tr")) if table else 0
         if row_count == 0:
             return None
-        return element.bbox.height * source_scale / row_count / 1.45
+        return min(element.bbox.height * source_scale / row_count / 1.45, body_font_size)
 
     @staticmethod
     def _union(rectangles):
