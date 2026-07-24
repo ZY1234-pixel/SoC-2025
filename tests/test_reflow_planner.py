@@ -58,3 +58,5 @@ def test_planner_uses_grid_when_model_order_alternates_parallel_lanes() -> None:
     assert page.sections[0].kind.value == "grid_flow"
     assert page.fit_scale <= 1.0
     assert [element.element_id for element in page.elements] == [element.element_id for element in elements]
+    planned = {element.element_id: element for element in page.elements}
+    assert planned["left-1"].payload["width_fraction"] == pytest.approx(1.0)

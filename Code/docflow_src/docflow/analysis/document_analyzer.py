@@ -71,6 +71,20 @@ class DocumentAnalyzer:
         }
 
         for child in items:
+            if child.raw_type != "inline_formula":
+                continue
+            parents = [
+                parent
+                for parent in items
+                if parent.category in {"text", "abstract", "reference"}
+                and self._coverage(parent.bbox, child.bbox) >= 0.80
+            ]
+            if parents:
+                parent = min(parents, key=lambda item: self._area(item.bbox))
+                children[parent.evidence_id].append(child.evidence_id)
+                consumed.add(child.evidence_id)
+
+        for child in items:
             parents = [
                 parent
                 for parent in items
@@ -89,7 +103,7 @@ class DocumentAnalyzer:
 
         captions: dict[str, list[str]] = {item.evidence_id: [] for item in items}
         for caption in items:
-            target_category = _CAPTION_TARGET.get(caption.category)
+            target_category = self._caption_target(caption)
             if not target_category or caption.evidence_id in consumed:
                 continue
             target = self._nearest_relation(caption, items, target_category, page.width_px, page.height_px)
@@ -110,8 +124,8 @@ class DocumentAnalyzer:
         for number in items:
             if number.evidence_id in consumed or not self._is_formula_number(number):
                 continue
-            target = self._nearest_relation(number, items, "formula", page.width_px, page.height_px)
-            if target is None or target.evidence_id == number.evidence_id:
+            target = self._formula_for_number(number, items, page.width_px)
+            if target is None:
                 continue
             formula_numbers[target.evidence_id] = self._text(number)
             children[target.evidence_id].append(number.evidence_id)
@@ -154,8 +168,10 @@ class DocumentAnalyzer:
         formula_number: Optional[str],
         page_index: int,
     ) -> SemanticElement:
-        kind = self._kind(primary.category)
-        text = self._text(primary)
+        kind = self._kind(primary)
+        text = "" if primary.category in {"figure", "table", "formula"} else self._text(primary)
+        if kind == "heading":
+            text = self._normalize_heading(text)
         payload = {
             "confidence": primary.confidence,
             "image_base64": primary.image_base64,
@@ -164,6 +180,11 @@ class DocumentAnalyzer:
             "lines": tuple(line.text for line in primary.text_lines),
             "line_heights_px": tuple(
                 max(point[1] for point in line.polygon) - min(point[1] for point in line.polygon)
+                for line in primary.text_lines
+                if line.polygon
+            ),
+            "line_lefts_px": tuple(
+                min(point[0] for point in line.polygon)
                 for line in primary.text_lines
                 if line.polygon
             ),
@@ -207,7 +228,12 @@ class DocumentAnalyzer:
         )
 
     @staticmethod
-    def _kind(category: str) -> str:
+    def _kind(item: RecognitionItem) -> str:
+        if item.raw_type == "header_image":
+            return "header"
+        if item.raw_type == "footer_image":
+            return "footer"
+        category = item.category
         if category == "title":
             return "heading"
         if category == "figure":
@@ -221,6 +247,15 @@ class DocumentAnalyzer:
         if category.endswith("caption") or category == "table_footnote":
             return "caption"
         return "paragraph_group"
+
+    @staticmethod
+    def _caption_target(item: RecognitionItem) -> Optional[str]:
+        text = DocumentAnalyzer._text(item).strip().lower()
+        if re.match(r"^(?:table|表)\s*\w", text):
+            return "table"
+        if re.match(r"^(?:fig(?:ure)?\.?|图)\s*\w", text):
+            return "figure"
+        return _CAPTION_TARGET.get(item.category)
 
     def _merge_duplicates(
         self, items: Iterable[RecognitionItem]
@@ -283,7 +318,19 @@ class DocumentAnalyzer:
 
     @staticmethod
     def _text(item: RecognitionItem) -> str:
-        return join_text_segments([line.text.strip() for line in item.text_lines if line.text.strip()])
+        parts = [line.text.strip() for line in item.text_lines if line.text.strip()]
+        output = ""
+        for part in parts:
+            if output.endswith("-") and part[:1].islower():
+                output = output[:-1] + part
+            else:
+                output = join_text_segments([output, part])
+        return output
+
+    @staticmethod
+    def _normalize_heading(text: str) -> str:
+        normalized = re.sub(r"^\s*[)）]\s*", "", text or "")
+        return re.sub(r"^(\d+(?:\.\d+)*)(?=[A-Za-z\u4e00-\u9fff])", r"\1 ", normalized)
 
     @classmethod
     def _nearest_relation(
@@ -307,6 +354,30 @@ class DocumentAnalyzer:
             return None
         score, target = min(candidates, key=lambda item: item[0])
         return target if score <= 0.12 else None
+
+    @classmethod
+    def _formula_for_number(
+        cls,
+        number: RecognitionItem,
+        items: Iterable[RecognitionItem],
+        page_width: int,
+    ) -> Optional[RecognitionItem]:
+        candidates = []
+        for formula in items:
+            if formula.category != "formula" or cls._is_formula_number(formula):
+                continue
+            vertical_overlap = max(0.0, min(number.bbox.y2, formula.bbox.y2) - max(number.bbox.y1, formula.bbox.y1))
+            if vertical_overlap / max(min(number.bbox.height, formula.bbox.height), 1.0) < 0.40:
+                continue
+            if formula.bbox.x1 >= number.bbox.x1:
+                continue
+            horizontal_gap = max(number.bbox.x1 - formula.bbox.x2, 0.0) / max(page_width, 1)
+            order_gap = abs(number.model_order - formula.model_order) * 0.005
+            candidates.append((horizontal_gap + order_gap, formula))
+        if not candidates:
+            return None
+        score, target = min(candidates, key=lambda item: item[0])
+        return target if score <= 0.25 else None
 
     def _infer_roles(
         self, pages: tuple[AnalysisPage, ...]

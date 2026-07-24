@@ -6,6 +6,8 @@ import math
 from collections import defaultdict
 from statistics import median
 
+from bs4 import BeautifulSoup
+
 from docflow.model.stages import (
     DocumentAnalysis,
     FlowKind,
@@ -26,7 +28,13 @@ class ReflowPlanner:
 
     def plan(self, analysis: DocumentAnalysis) -> ReflowLayoutPlan:
         role_by_id = {role.role_id: role for role in analysis.roles}
-        pages = tuple(self._plan_page(page, role_by_id) for page in analysis.pages)
+        role_counts = defaultdict(int)
+        for page in analysis.pages:
+            for element in page.elements:
+                if element.role_id and element.role_id.startswith("body_"):
+                    role_counts[element.role_id] += 1
+        default_body_role = max(role_counts, key=role_counts.get, default=None)
+        pages = tuple(self._plan_page(page, role_by_id, default_body_role) for page in analysis.pages)
         return ReflowLayoutPlan(
             pages,
             analysis.roles,
@@ -34,7 +42,7 @@ class ReflowPlanner:
             word_safety_factor=self.word_safety_factor,
         )
 
-    def _plan_page(self, page, role_by_id) -> ReflowPagePlan:
+    def _plan_page(self, page, role_by_id, default_body_role) -> ReflowPagePlan:
         scale = self.page_long_edge_pt / max(page.width_px, page.height_px)
         width_pt = page.width_px * scale
         height_pt = page.height_px * scale
@@ -51,24 +59,34 @@ class ReflowPlanner:
         )
         usable_width = geometry.width_pt - geometry.margin_left_pt - geometry.margin_right_pt
         sections, placement = self._build_sections(body, bounds, usable_width)
+        container_widths = self._container_widths(body, sections, placement, bounds.width)
         planned = tuple(
             PlannedElement(
                 element.element_id,
                 element.kind,
-                role_id=element.role_id,
+                role_id=element.role_id or default_body_role,
                 text=element.text,
                 payload={
                     **dict(element.payload),
                     "source_bbox": (element.bbox.x1, element.bbox.y1, element.bbox.x2, element.bbox.y2),
-                    "width_fraction": min(element.bbox.width / max(bounds.width, 1.0), 1.0),
+                    "width_fraction": min(
+                        element.bbox.width / container_widths.get(element.element_id, max(bounds.width, 1.0)),
+                        1.0,
+                    ),
                     "column": placement.get(element.element_id, 0),
                     "alignment": self._alignment(element, bounds),
+                    "first_line_indent_pt": self._first_line_indent(element, scale),
+                    "page_width_px": page.width_px,
+                    "table_font_size_pt": self._table_font_size(element, scale),
                 },
             )
             for element in page.elements
         )
         estimated_height = sum(
-            self._section_height(section, planned, role_by_id, usable_width)
+            max(
+                self._section_height(section, planned, role_by_id, usable_width),
+                self._source_section_height(section, planned, scale),
+            )
             for section in sections
         )
         usable_height = geometry.height_pt - geometry.margin_top_pt - geometry.margin_bottom_pt
@@ -93,6 +111,11 @@ class ReflowPlanner:
         sections = []
         placement = {}
         run = []
+        anchor_lanes = self._anchor_lanes(elements, bounds.width)
+        lane_bounds = [
+            (min(item.bbox.x1 for item in lane), max(item.bbox.x2 for item in lane))
+            for lane in anchor_lanes
+        ]
 
         def flush() -> None:
             if not run:
@@ -103,7 +126,15 @@ class ReflowPlanner:
             run.clear()
 
         for element in elements:
-            if element.bbox.width / max(bounds.width, 1.0) >= 0.72:
+            overlap_count = sum(
+                1
+                for left, right in lane_bounds
+                if max(0.0, min(element.bbox.x2, right) - max(element.bbox.x1, left))
+                / max(right - left, 1.0)
+                >= 0.30
+            )
+            is_spanning = overlap_count >= 2 if len(lane_bounds) >= 2 else element.bbox.width / max(bounds.width, 1.0) >= 0.72
+            if is_spanning:
                 flush()
                 section_id = f"section_{len(sections)}"
                 sections.append(FlowSection(section_id, FlowKind.SINGLE, (element.element_id,)))
@@ -112,6 +143,22 @@ class ReflowPlanner:
                 run.append(element)
         flush()
         return tuple(sections), placement
+
+    @staticmethod
+    def _container_widths(elements, sections, placement, body_width: float):
+        by_id = {element.element_id: element for element in elements}
+        widths = {element.element_id: max(body_width, 1.0) for element in elements}
+        for section in sections:
+            if section.kind == FlowKind.SINGLE:
+                continue
+            by_column = defaultdict(list)
+            for identifier in section.element_ids:
+                by_column[placement[identifier]].append(by_id[identifier])
+            for members in by_column.values():
+                lane_width = max(item.bbox.x2 for item in members) - min(item.bbox.x1 for item in members)
+                for item in members:
+                    widths[item.element_id] = max(lane_width, 1.0)
+        return widths
 
     def _narrow_section(self, elements, bounds: Rect, usable_width: float, section_index: int):
         lanes = self._lanes(elements, bounds.width)
@@ -166,9 +213,17 @@ class ReflowPlanner:
         ), lane_by_id
 
     @staticmethod
-    def _lanes(elements, page_width: float):
+    def _anchor_lanes(elements, page_width: float):
+        anchors = [
+            item
+            for item in elements
+            if item.kind == "paragraph_group"
+            and item.bbox.width >= page_width * 0.20
+        ]
+        if len(anchors) < 2:
+            return []
         lanes = []
-        for item in sorted(elements, key=lambda element: (element.bbox.x1, element.bbox.x2)):
+        for item in sorted(anchors, key=lambda element: (element.bbox.x1, element.bbox.x2)):
             best = None
             best_overlap = 0.0
             for index, lane in enumerate(lanes):
@@ -183,7 +238,28 @@ class ReflowPlanner:
             else:
                 lanes.append([item])
         lanes.sort(key=lambda lane: min(item.bbox.x1 for item in lane))
-        return lanes if len(lanes) <= 4 else [list(elements)]
+        return lanes if 2 <= len(lanes) <= 4 else []
+
+    @classmethod
+    def _lanes(cls, elements, page_width: float):
+        lanes = cls._anchor_lanes(elements, page_width)
+        if not lanes:
+            return [list(elements)]
+        anchored = {item.element_id for lane in lanes for item in lane}
+        for item in elements:
+            if item.element_id in anchored:
+                continue
+            center = (item.bbox.x1 + item.bbox.x2) / 2.0
+            lane = min(
+                lanes,
+                key=lambda members: abs(
+                    center
+                    - median([(member.bbox.x1 + member.bbox.x2) / 2.0 for member in members])
+                ),
+            )
+            lane.append(item)
+        lanes.sort(key=lambda lane: min(item.bbox.x1 for item in lane))
+        return lanes
 
     @staticmethod
     def _grid_rows(elements):
@@ -222,6 +298,15 @@ class ReflowPlanner:
         return sum(row_heights.values())
 
     @staticmethod
+    def _source_section_height(section, elements, source_scale: float) -> float:
+        by_id = {element.element_id: element for element in elements}
+        boxes = [by_id[identifier].payload.get("source_bbox") for identifier in section.element_ids]
+        boxes = [box for box in boxes if box]
+        if not boxes:
+            return 0.0
+        return (max(float(box[3]) for box in boxes) - min(float(box[1]) for box in boxes)) * source_scale
+
+    @staticmethod
     def _element_height(element, roles, width: float) -> float:
         role = roles.get(element.role_id)
         if role is not None and element.text:
@@ -244,6 +329,24 @@ class ReflowPlanner:
             if abs(element_center - bounds_center) <= bounds.width * 0.08:
                 return "center"
         return "justify" if element.kind == "paragraph_group" and len(element.text) >= 40 else "left"
+
+    @staticmethod
+    def _first_line_indent(element, source_scale: float) -> float:
+        lefts = element.payload.get("line_lefts_px") or ()
+        if len(lefts) < 2:
+            return 0.0
+        indent = float(lefts[0]) - median(float(value) for value in lefts[1:])
+        return max(indent * source_scale, 0.0)
+
+    @staticmethod
+    def _table_font_size(element, source_scale: float):
+        if element.kind != "table_group" or not element.payload.get("html"):
+            return None
+        table = BeautifulSoup(str(element.payload["html"]), "html.parser").find("table")
+        row_count = len(table.find_all("tr")) if table else 0
+        if row_count == 0:
+            return None
+        return element.bbox.height * source_scale / row_count / 1.45
 
     @staticmethod
     def _union(rectangles):

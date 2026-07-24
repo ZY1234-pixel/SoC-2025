@@ -77,6 +77,8 @@ def test_reflow_docx_creates_one_unlinked_section_per_source_page(tmp_path) -> N
     document = Document(output)
 
     assert len(document.sections) == 2
-    assert document.sections[0].header.paragraphs[0].text == "H0"
-    assert document.sections[1].header.paragraphs[0].text == "H1"
+    first_header = " ".join(cell.text for table in document.sections[0].header.tables for row in table.rows for cell in row.cells)
+    second_header = " ".join(cell.text for table in document.sections[1].header.tables for row in table.rows for cell in row.cells)
+    assert "H0" in first_header
+    assert "H1" in second_header
     assert not document.sections[1].header.is_linked_to_previous

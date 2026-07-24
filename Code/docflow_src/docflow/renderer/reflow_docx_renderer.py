@@ -44,8 +44,9 @@ class ReflowDocxRenderer:
             section = document.sections[0] if page_number == 0 else document.add_section(WD_SECTION.NEW_PAGE)
             self._set_page_geometry(section, page.geometry)
             elements = {element.element_id: element for element in page.elements}
-            self._render_furniture(section.header, page.header_element_ids, elements, roles, page.fit_scale)
-            self._render_furniture(section.footer, page.footer_element_ids, elements, roles, page.fit_scale)
+            usable_width = self._usable_width(page.geometry)
+            self._render_furniture(section.header, page.header_element_ids, elements, roles, page.fit_scale, usable_width)
+            self._render_furniture(section.footer, page.footer_element_ids, elements, roles, page.fit_scale, usable_width)
             for flow in page.sections:
                 if flow.kind == FlowKind.SINGLE:
                     for identifier in flow.element_ids:
@@ -67,16 +68,34 @@ class ReflowDocxRenderer:
         section.header.is_linked_to_previous = False
         section.footer.is_linked_to_previous = False
 
-    def _render_furniture(self, container, identifiers, elements, roles, fit_scale) -> None:
+    def _render_furniture(self, container, identifiers, elements, roles, fit_scale, usable_width) -> None:
         self._clear_container(container)
+        if not identifiers:
+            return
+        table = container.add_table(rows=1, cols=3, width=Pt(usable_width))
+        self._format_layout_table(table, (usable_width / 3,) * 3)
+        for cell in table.rows[0].cells:
+            self._clear_container(cell)
         for identifier in identifiers:
             element = elements[identifier]
-            paragraph = container.paragraphs[0] if container.paragraphs else container.add_paragraph()
+            bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
+            page_width_px = max(float(element.payload.get("page_width_px", 1.0)), 1.0)
+            column = min(int(((float(bbox[0]) + float(bbox[2])) / 2.0) / page_width_px * 3), 2)
+            cell = table.cell(0, column)
+            paragraph = cell.paragraphs[-1] if cell.paragraphs else cell.add_paragraph()
+            paragraph.alignment = (WD_ALIGN_PARAGRAPH.LEFT, WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.RIGHT)[column]
+            if element.payload.get("image_base64"):
+                data = self._decode_image(element.payload.get("image_base64"))
+                if data:
+                    width = (float(bbox[2]) - float(bbox[0])) / page_width_px * usable_width * fit_scale
+                    paragraph.add_run().add_picture(io.BytesIO(data), width=Pt(max(width, 0.5)))
+                continue
             self._write_text(paragraph, element, roles, fit_scale)
+            paragraph.alignment = (WD_ALIGN_PARAGRAPH.LEFT, WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.RIGHT)[column]
 
     def _render_columns(self, container, flow, elements, roles, fit_scale) -> None:
         table = container.add_table(rows=1, cols=len(flow.column_widths_pt))
-        self._format_layout_table(table, flow.column_widths_pt)
+        self._format_layout_table(table, flow.column_widths_pt, flow.gutter_pt)
         for column, cell in enumerate(table.rows[0].cells):
             self._clear_container(cell)
             for identifier in flow.element_ids:
@@ -88,7 +107,7 @@ class ReflowDocxRenderer:
         row_count = max(cell.row for cell in flow.grid_cells) + 1
         column_count = len(flow.column_widths_pt)
         table = container.add_table(rows=row_count, cols=column_count)
-        self._format_layout_table(table, flow.column_widths_pt)
+        self._format_layout_table(table, flow.column_widths_pt, flow.gutter_pt)
         for row in table.rows:
             for cell in row.cells:
                 self._clear_container(cell)
@@ -122,6 +141,7 @@ class ReflowDocxRenderer:
     def _write_text(self, paragraph, element, roles, fit_scale: float) -> None:
         paragraph.paragraph_format.space_before = Pt(0)
         paragraph.paragraph_format.space_after = Pt(0)
+        paragraph.paragraph_format.first_line_indent = Pt(float(element.payload.get("first_line_indent_pt", 0.0)) * fit_scale)
         paragraph.alignment = _ALIGNMENT.get(element.payload.get("alignment"), WD_ALIGN_PARAGRAPH.LEFT)
         role = roles.get(element.role_id) or self._body_role(roles)
         if role:
@@ -177,7 +197,7 @@ class ReflowDocxRenderer:
         number_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
         paragraph = number_cell.paragraphs[0]
         paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        role = self._body_role(roles)
+        role = roles.get(element.role_id) or self._body_role(roles)
         self._style_run(paragraph.add_run(number), role, fit_scale)
 
     def _write_native_table(self, container, element, roles, fit_scale: float, container_width: float) -> None:
@@ -193,7 +213,7 @@ class ReflowDocxRenderer:
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         set_table_col_widths(table, [container_width / columns] * columns)
         occupied = [[False] * columns for _ in range(rows)]
-        role = self._body_role(roles)
+        role = roles.get(element.role_id) or self._body_role(roles)
         for row_index, row_source in enumerate(get_table_rows(source)):
             column_index = 0
             for cell_source in get_table_columns(row_source):
@@ -212,11 +232,17 @@ class ReflowDocxRenderer:
                 paragraph = cell.paragraphs[0]
                 paragraph.paragraph_format.space_before = Pt(0)
                 paragraph.paragraph_format.space_after = Pt(0)
-                self._style_run(paragraph.add_run(cell_source.get_text(" ", strip=True)), role, fit_scale)
+                set_cell_margins(cell, top=0, bottom=0, start=40, end=40)
+                self._style_run(
+                    paragraph.add_run(cell_source.get_text(" ", strip=True)),
+                    role,
+                    fit_scale,
+                    font_size_pt=element.payload.get("table_font_size_pt"),
+                )
                 column_index += column_span
 
     @staticmethod
-    def _format_layout_table(table, widths) -> None:
+    def _format_layout_table(table, widths, gutter_pt: float = 0.0) -> None:
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         table.autofit = False
         clear_table_borders(table)
@@ -225,15 +251,23 @@ class ReflowDocxRenderer:
             tr_pr = row._tr.get_or_add_trPr()
             cant_split = OxmlElement("w:cantSplit")
             tr_pr.append(cant_split)
-            for cell in row.cells:
-                set_cell_margins(cell, top=0, bottom=0, start=0, end=0)
+            for column, cell in enumerate(row.cells):
+                half_gutter_twips = int(max(gutter_pt, 0.0) * 10)
+                set_cell_margins(
+                    cell,
+                    top=0,
+                    bottom=0,
+                    start=half_gutter_twips if column > 0 else 0,
+                    end=half_gutter_twips if column < len(row.cells) - 1 else 0,
+                )
 
     @staticmethod
-    def _style_run(run, role, fit_scale: float) -> None:
+    def _style_run(run, role, fit_scale: float, font_size_pt=None) -> None:
         if role is None:
             return
         run.font.name = role.western_font_family
-        run.font.size = Pt(max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5))
+        size = float(font_size_pt) if font_size_pt is not None else role.font_size_pt
+        run.font.size = Pt(max(round(size * fit_scale * 2) / 2.0, 0.5))
         run.bold = role.bold
         run.italic = role.italic
         run.font.color.rgb = RGBColor.from_string(role.color.lstrip("#"))
