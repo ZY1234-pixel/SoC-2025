@@ -82,3 +82,11 @@ def test_reflow_docx_creates_one_unlinked_section_per_source_page(tmp_path) -> N
     assert "H0" in first_header
     assert "H1" in second_header
     assert not document.sections[1].header.is_linked_to_previous
+
+
+def test_layout_table_gutter_preserves_planned_content_width() -> None:
+    table = Document().add_table(rows=1, cols=3)
+
+    ReflowDocxRenderer._format_layout_table(table, (100, 100, 100), 20)
+
+    assert [cell.width.pt for cell in table.rows[0].cells] == [110, 120, 110]

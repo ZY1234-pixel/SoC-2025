@@ -256,7 +256,12 @@ class ReflowDocxRenderer:
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         table.autofit = False
         clear_table_borders(table)
-        set_table_col_widths(table, widths)
+        column_count = len(widths)
+        layout_widths = tuple(
+            width + gutter_pt * ((column > 0) + (column < column_count - 1)) / 2.0
+            for column, width in enumerate(widths)
+        )
+        set_table_col_widths(table, layout_widths)
         for row in table.rows:
             tr_pr = row._tr.get_or_add_trPr()
             cant_split = OxmlElement("w:cantSplit")

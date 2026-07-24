@@ -340,7 +340,7 @@ class ReflowPlanner:
             font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
             units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in element.text)
             lines = max(1, math.ceil(units * font_size / max(width, 1.0)))
-            return lines * font_size * role.line_spacing
+            return lines * font_size * role.line_spacing * 1.2
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
         aspect = max(float(bbox[3]) - float(bbox[1]), 1.0) / max(float(bbox[2]) - float(bbox[0]), 1.0)
         visual_width = width * float(element.payload.get("width_fraction", 1.0)) * fit_scale
