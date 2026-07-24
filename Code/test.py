@@ -25,6 +25,7 @@ from model import LayoutModelSpec, RuntimePaths
 from preprocess import expand_to_pages
 from utils import ensure_runtime_paths, find_libreoffice, parse_formats, print_list
 from docflow.adapters.paddle_adapter import PaddleAdapter
+from docflow.analysis import DocumentAnalyzer
 from docflow.model.stages import RecognitionEvidence
 from docflow.pipeline import RecoveryPipeline
 from docflow.utils.result_layout import (
@@ -787,6 +788,8 @@ def run_sample(
 
     evidence = RecognitionEvidence(tuple(evidence_pages), source_file=str(sample_path))
     write_json(sample_layout.recognition_path, evidence.to_dict())
+    analysis = DocumentAnalyzer().analyze(evidence)
+    write_json(sample_layout.analysis_path, analysis.to_dict())
     merged_document = merge_page_documents(page_documents, source_path=str(sample_path))
     document = pipeline.build_document(merged_document)
     render_plan = build_render_plan(document, output_format="docx")

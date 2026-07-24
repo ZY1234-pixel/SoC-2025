@@ -83,6 +83,7 @@ class SampleResultLayout:
     sample_dir: Path
     json_path: Path
     recognition_path: Path
+    analysis_path: Path
     render_plan_path: Path
     docx_path: Path
     markdown_path: Path
@@ -135,6 +136,7 @@ class ResultRunLayout:
             sample_dir=sample_dir,
             json_path=sample_dir / f"{sample_key}.json",
             recognition_path=sample_dir / f"{sample_key}.recognition.json",
+            analysis_path=sample_dir / f"{sample_key}.analysis.json",
             render_plan_path=sample_dir / f"{sample_key}.render_plan.json",
             docx_path=sample_dir / f"{sample_key}.docx",
             markdown_path=sample_dir / f"{sample_key}.md",
