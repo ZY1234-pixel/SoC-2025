@@ -306,12 +306,18 @@ class FontClassifier:
         }
 
     def predict_block(self, page_image: Image.Image, block: TextBlock) -> Optional[FontPrediction]:
-        import torch
-
-        model = self._ensure_model()
         crops = self._line_crops(page_image, block)
         if not crops:
             return None
+        return self._predict_crops(crops)
+
+    def predict_image(self, image: Image.Image) -> FontPrediction:
+        return self._predict_crops([image])
+
+    def _predict_crops(self, crops: Sequence[Image.Image]) -> FontPrediction:
+        import torch
+
+        model = self._ensure_model()
         tensors = [self.transform(self._preprocess_crop(crop)) for crop in crops]
         batch = torch.stack(tensors).to(self._device or self._select_device())
         with torch.inference_mode():

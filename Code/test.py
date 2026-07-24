@@ -26,6 +26,7 @@ from preprocess import expand_to_pages
 from utils import ensure_runtime_paths, find_libreoffice, parse_formats, print_list
 from docflow.adapters.paddle_adapter import PaddleAdapter
 from docflow.analysis import DocumentAnalyzer
+from docflow.layout.font_classifier import FontClassifier
 from docflow.model.stages import RecognitionEvidence
 from docflow.planning import ReflowPlanner
 from docflow.renderer.reflow_docx_renderer import ReflowDocxRenderer
@@ -658,7 +659,7 @@ def save_debug_images(
         }
         for region in sorted(
             (item for item in result if isinstance(item, dict)),
-            key=lambda item: float(item.get("model_order", 0.0)),
+            key=lambda item: float(item.get("model_order") or 0.0),
         )
     ]
     vis_order_columns = draw_sorted_layout(image, ordered_blocks)
@@ -678,6 +679,7 @@ def _native_docx_table_count(path: Path) -> int:
 def run_sample(
     engine,
     adapter: PaddleAdapter,
+    analyzer: DocumentAnalyzer,
     sample_path: Path,
     sample_layout,
     formats: list[str],
@@ -699,7 +701,7 @@ def run_sample(
 
     evidence = RecognitionEvidence(tuple(evidence_pages), source_file=str(sample_path))
     write_json(sample_layout.recognition_path, evidence.to_dict())
-    analysis = DocumentAnalyzer().analyze(evidence)
+    analysis = analyzer.analyze(evidence)
     write_json(sample_layout.json_path, analysis.to_dict())
     reflow_plan = ReflowPlanner().plan(analysis)
     write_json(sample_layout.render_plan_path, reflow_plan.to_dict())
@@ -767,6 +769,7 @@ def main() -> int:
     print(f"版面模型：{paths.layout_model_spec.name} -> {paths.layout_model}")
     engine = make_engine(paths, run_layout.runtime_dir)
     adapter = PaddleAdapter()
+    analyzer = DocumentAnalyzer(FontClassifier(str(paths.models_root / "font" / "mobilenetv3.ckpt")))
     failures: list[str] = []
     sample_records = []
     total_pages = 0
@@ -784,6 +787,7 @@ def main() -> int:
             page_count = run_sample(
                 engine=engine,
                 adapter=adapter,
+                analyzer=analyzer,
                 sample_path=sample_path,
                 sample_layout=sample_layout,
                 formats=formats,

@@ -22,7 +22,7 @@ from docflow.model.stages import (
 
 
 class ReflowPlanner:
-    def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.93) -> None:
+    def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.80) -> None:
         self.page_long_edge_pt = float(page_long_edge_pt)
         self.word_safety_factor = float(word_safety_factor)
 
@@ -70,7 +70,7 @@ class ReflowPlanner:
                     **dict(element.payload),
                     "source_bbox": (element.bbox.x1, element.bbox.y1, element.bbox.x2, element.bbox.y2),
                     "width_fraction": min(
-                        element.bbox.width / container_widths.get(element.element_id, max(bounds.width, 1.0)),
+                        self._visual_width(element) / container_widths.get(element.element_id, max(bounds.width, 1.0)),
                         1.0,
                     ),
                     "column": placement.get(element.element_id, 0),
@@ -159,6 +159,11 @@ class ReflowPlanner:
                 for item in members:
                     widths[item.element_id] = max(lane_width, 1.0)
         return widths
+
+    @staticmethod
+    def _visual_width(element) -> float:
+        bbox = element.payload.get("primary_bbox")
+        return max(float(bbox[2]) - float(bbox[0]), 1.0) if bbox else element.bbox.width
 
     def _narrow_section(self, elements, bounds: Rect, usable_width: float, section_index: int):
         lanes = self._lanes(elements, bounds.width)
@@ -313,7 +318,7 @@ class ReflowPlanner:
             units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in element.text)
             lines = max(1, math.ceil(units * role.font_size_pt / max(width, 1.0)))
             return lines * role.font_size_pt * role.line_spacing + role.space_before_pt + role.space_after_pt
-        bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
+        bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
         aspect = max(float(bbox[3]) - float(bbox[1]), 1.0) / max(float(bbox[2]) - float(bbox[0]), 1.0)
         visual_width = width * float(element.payload.get("width_fraction", 1.0))
         caption_lines = 1 if element.payload.get("caption") else 0

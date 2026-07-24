@@ -60,7 +60,7 @@ def test_analyzer_joins_visual_lines_and_groups_editable_formula_number() -> Non
                 1400,
                 (
                     paragraph,
-                    _item("formula", "formula", (200, 300, 800, 360), 2),
+                    _item("formula", "formula", (200, 300, 400, 360), 2),
                     _item("number", "formula", (850, 300, 900, 360), 3, "(7)", raw_type="formula_number"),
                 ),
             ),

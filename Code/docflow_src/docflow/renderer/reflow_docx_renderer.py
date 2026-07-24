@@ -148,6 +148,7 @@ class ReflowDocxRenderer:
             paragraph.paragraph_format.line_spacing = role.line_spacing
         run = paragraph.add_run(element.text)
         self._style_run(run, role, fit_scale)
+        self._shade(run._element.get_or_add_rPr(), element.payload.get("background_color"))
         if element.kind == "heading":
             paragraph.paragraph_format.keep_with_next = True
 
@@ -214,6 +215,10 @@ class ReflowDocxRenderer:
         set_table_col_widths(table, [container_width / columns] * columns)
         occupied = [[False] * columns for _ in range(rows)]
         role = roles.get(element.role_id) or self._body_role(roles)
+        row_styles = {
+            int(row): (fill, text_color)
+            for row, fill, text_color in element.payload.get("table_row_styles", ())
+        }
         for row_index, row_source in enumerate(get_table_rows(source)):
             column_index = 0
             for cell_source in get_table_columns(row_source):
@@ -233,12 +238,17 @@ class ReflowDocxRenderer:
                 paragraph.paragraph_format.space_before = Pt(0)
                 paragraph.paragraph_format.space_after = Pt(0)
                 set_cell_margins(cell, top=0, bottom=0, start=40, end=40)
+                run = paragraph.add_run(cell_source.get_text(" ", strip=True))
                 self._style_run(
-                    paragraph.add_run(cell_source.get_text(" ", strip=True)),
+                    run,
                     role,
                     fit_scale,
                     font_size_pt=element.payload.get("table_font_size_pt"),
                 )
+                if row_index in row_styles:
+                    fill, text_color = row_styles[row_index]
+                    self._shade(cell._tc.get_or_add_tcPr(), fill)
+                    run.font.color.rgb = RGBColor.from_string(text_color.lstrip("#"))
                 column_index += column_span
 
     @staticmethod
@@ -276,6 +286,16 @@ class ReflowDocxRenderer:
             fonts = OxmlElement("w:rFonts")
             run._element.get_or_add_rPr().insert(0, fonts)
         fonts.set(qn("w:eastAsia"), role.font_family)
+
+    @staticmethod
+    def _shade(properties, color) -> None:
+        if not color:
+            return
+        shading = properties.find(qn("w:shd"))
+        if shading is None:
+            shading = OxmlElement("w:shd")
+            properties.append(shading)
+        shading.set(qn("w:fill"), str(color).lstrip("#"))
 
     @staticmethod
     def _body_role(roles):

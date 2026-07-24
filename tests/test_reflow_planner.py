@@ -6,8 +6,17 @@ from docflow.model.stages import AnalysisPage, DocumentAnalysis, Rect, SemanticE
 from docflow.planning import ReflowPlanner
 
 
-def _element(identifier, bbox, order, text="text", kind="paragraph_group", role="body"):
-    return SemanticElement(identifier, kind, Rect(*bbox), order, (f"raw-{identifier}",), text=text, role_id=role)
+def _element(identifier, bbox, order, text="text", kind="paragraph_group", role="body", payload=None):
+    return SemanticElement(
+        identifier,
+        kind,
+        Rect(*bbox),
+        order,
+        (f"raw-{identifier}",),
+        text=text,
+        role_id=role,
+        payload=payload or {},
+    )
 
 
 def _analysis(elements):
@@ -60,3 +69,18 @@ def test_planner_uses_grid_when_model_order_alternates_parallel_lanes() -> None:
     assert [element.element_id for element in page.elements] == [element.element_id for element in elements]
     planned = {element.element_id: element for element in page.elements}
     assert planned["left-1"].payload["width_fraction"] == pytest.approx(1.0)
+
+
+def test_visual_width_uses_primary_bbox_instead_of_grouped_number_bbox() -> None:
+    formula = _element(
+        "formula",
+        (100, 200, 900, 300),
+        1,
+        text="",
+        kind="equation_group",
+        payload={"primary_bbox": (300, 200, 500, 300), "number": "(1)"},
+    )
+
+    planned = ReflowPlanner().plan(_analysis((formula,))).pages[0].elements[0]
+
+    assert planned.payload["width_fraction"] == pytest.approx(0.25)

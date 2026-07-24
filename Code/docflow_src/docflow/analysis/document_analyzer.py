@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import re
 from dataclasses import replace
 from statistics import median
 from typing import Iterable, Optional
 
+from bs4 import BeautifulSoup
+from PIL import Image
+
+from docflow.layout.color_inferrer import infer_crop_style, infer_table_row_fills
+from docflow.layout.font_classifier import FONT_FAMILY_BY_LABEL
 from docflow.model.blocks.text_block import join_text_segments
 from docflow.model.stages import (
     AnalysisDiagnostic,
@@ -45,6 +52,9 @@ _FURNITURE = {"header", "footer", "page_number"}
 
 class DocumentAnalyzer:
     """Build semantic groups without changing PP-DocLayoutV3 Model Order."""
+
+    def __init__(self, font_classifier=None) -> None:
+        self.font_classifier = font_classifier
 
     def analyze(self, evidence: RecognitionEvidence) -> DocumentAnalysis:
         pages = tuple(self._analyze_page(page) for page in evidence.pages)
@@ -200,6 +210,7 @@ class DocumentAnalyzer:
                 if item not in captions and not self._is_formula_number(item)
             ),
         }
+        payload.update(self._infer_visual_style(primary))
         if primary.category == "formula":
             number_item = next((item for item in related[1:] if self._is_formula_number(item)), None)
             detected_line = next(
@@ -217,6 +228,9 @@ class DocumentAnalyzer:
         payload["primary_bbox"] = (primary.bbox.x1, primary.bbox.y1, primary.bbox.x2, primary.bbox.y2)
         if primary.category == "table" and not primary.html and not primary.attributes.get("table_cells"):
             payload["structure_missing"] = True
+        if primary.category == "table" and primary.html:
+            row_count = len(BeautifulSoup(primary.html, "html.parser").find_all("tr"))
+            payload["table_row_styles"] = infer_table_row_fills(primary.image_base64, row_count)
         return SemanticElement(
             element_id=f"p{page_index:04d}_{kind}_{primary.evidence_id}",
             kind=kind,
@@ -226,6 +240,34 @@ class DocumentAnalyzer:
             text=text,
             payload=payload,
         )
+
+    def _infer_visual_style(self, item: RecognitionItem) -> dict:
+        if item.category not in _TEXT_CATEGORIES or not item.image_base64:
+            return {}
+        style = infer_crop_style(item.image_base64)
+        result = {}
+        if style is not None:
+            result["text_color"] = style.text_color
+            if style.background_color:
+                result["background_color"] = style.background_color
+        if self.font_classifier is None or not any("\u4e00" <= char <= "\u9fff" for char in self._text(item)):
+            return result
+        try:
+            image = Image.open(io.BytesIO(base64.b64decode(item.image_base64))).convert("RGB")
+            prediction = self.font_classifier.predict_image(image)
+        except Exception:
+            self.font_classifier = None
+            return result
+        family = FONT_FAMILY_BY_LABEL.get(prediction.label)
+        if prediction.accepted and family:
+            result["font_family"] = family
+        result["font_prediction"] = {
+            "label": prediction.label,
+            "confidence": prediction.confidence,
+            "margin": prediction.margin,
+            "accepted": prediction.accepted,
+        }
+        return result
 
     @staticmethod
     def _kind(item: RecognitionItem) -> str:
@@ -377,12 +419,12 @@ class DocumentAnalyzer:
         if not candidates:
             return None
         score, target = min(candidates, key=lambda item: item[0])
-        return target if score <= 0.25 else None
+        return target if score <= 0.50 else None
 
     def _infer_roles(
         self, pages: tuple[AnalysisPage, ...]
     ) -> tuple[tuple[TypographicRole, ...], dict[str, str]]:
-        samples: list[tuple[SemanticElement, float, str]] = []
+        samples = []
         for page in pages:
             scale = 841.89 / max(page.width_px, page.height_px)
             for element in page.elements:
@@ -394,34 +436,39 @@ class DocumentAnalyzer:
                 raw_size = source_height * scale / 1.05
                 raw_size = round(max(raw_size, 1.0) * 2.0) / 2.0
                 base = "heading" if element.kind == "heading" else "caption" if element.kind == "caption" else "body"
-                samples.append((element, raw_size, base))
+                font = element.payload.get("font_family") or ("黑体" if base == "heading" else "宋体")
+                color = element.payload.get("text_color") or "#000000"
+                samples.append((element, raw_size, base, font, color))
 
-        clusters: dict[str, list[list[float]]] = {}
+        clusters = {}
         assignments: dict[str, str] = {}
-        for _element, size, base in sorted(samples, key=lambda item: (item[2], item[1])):
-            groups = clusters.setdefault(base, [])
-            if not groups or abs(size - median(groups[-1])) > max(1.25, median(groups[-1]) * 0.15):
-                groups.append([size])
+        for element, size, base, font, color in sorted(samples, key=lambda item: (item[2], item[3], item[4], item[1])):
+            groups = clusters.setdefault((base, font, color), [])
+            if not groups or abs(size - median(groups[-1]["sizes"])) > max(1.25, median(groups[-1]["sizes"]) * 0.15):
+                groups.append({"sizes": [size], "elements": [element]})
             else:
-                groups[-1].append(size)
+                groups[-1]["sizes"].append(size)
+                groups[-1]["elements"].append(element)
 
         roles = []
-        for base, groups in clusters.items():
-            for index, sizes in enumerate(groups, 1):
-                role_id = f"{base}_{index}"
+        role_counts = {}
+        for (base, font, color), groups in clusters.items():
+            for group in groups:
+                role_counts[base] = role_counts.get(base, 0) + 1
+                role_id = f"{base}_{role_counts[base]}"
                 roles.append(
                     TypographicRole(
                         role_id,
-                        "黑体" if base == "heading" else "宋体",
+                        font,
                         "Times New Roman",
-                        median(sizes),
+                        median(group["sizes"]),
                         1.0,
                         bold=base == "heading",
+                        color=color,
                     )
                 )
-                for element, size, sample_base in samples:
-                    if sample_base == base and size in sizes and element.element_id not in assignments:
-                        assignments[element.element_id] = role_id
+                for element in group["elements"]:
+                    assignments[element.element_id] = role_id
         return tuple(roles), assignments
 
     @staticmethod
