@@ -27,6 +27,7 @@ from utils import ensure_runtime_paths, find_libreoffice, parse_formats, print_l
 from docflow.adapters.paddle_adapter import PaddleAdapter
 from docflow.analysis import DocumentAnalyzer
 from docflow.model.stages import RecognitionEvidence
+from docflow.planning import ReflowPlanner
 from docflow.pipeline import RecoveryPipeline
 from docflow.utils.result_layout import (
     ResultRunLayout,
@@ -790,14 +791,15 @@ def run_sample(
     write_json(sample_layout.recognition_path, evidence.to_dict())
     analysis = DocumentAnalyzer().analyze(evidence)
     write_json(sample_layout.analysis_path, analysis.to_dict())
+    reflow_plan = ReflowPlanner().plan(analysis)
+    write_json(sample_layout.render_plan_path, reflow_plan.to_dict())
     merged_document = merge_page_documents(page_documents, source_path=str(sample_path))
     document = pipeline.build_document(merged_document)
-    render_plan = build_render_plan(document, output_format="docx")
-    write_json(sample_layout.render_plan_path, render_plan)
+    legacy_render_plan = build_render_plan(document, output_format="docx")
 
     # 将 RenderPlan 的 per-page render_mode 注入 document 和 merged_document，
     # 使 docx renderer 和 pipeline.recover() 中的 renderer 都可以消费该提示。
-    for page_info in render_plan.get("pages", []):
+    for page_info in legacy_render_plan.get("pages", []):
         idx = page_info["page_index"]
         render_mode = page_info.get("render_mode", "")
         # 注入到 merged_document（供 pipeline.recover 使用）

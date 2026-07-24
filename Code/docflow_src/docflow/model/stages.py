@@ -298,6 +298,11 @@ class ReflowPagePlan:
             raise ValueError("an element may appear in only one flow section")
         if not set(self.header_element_ids + self.footer_element_ids).issubset(known):
             raise ValueError("page furniture references an unknown element")
+        furniture = self.header_element_ids + self.footer_element_ids
+        if len(furniture) != len(set(furniture)) or set(placed) & set(furniture):
+            raise ValueError("page furniture and body placement must be disjoint")
+        if set(placed) | set(furniture) != known:
+            raise ValueError("every planned element must be placed exactly once")
 
 
 @dataclass(frozen=True)
