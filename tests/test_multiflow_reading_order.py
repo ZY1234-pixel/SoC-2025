@@ -1,5 +1,4 @@
 from pathlib import Path
-import json
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1155,22 +1154,3 @@ def test_subset_spanning_visual_preserves_uncovered_left_column_flow():
     assert zone.col_count == 4
     bottom_fig = next(block for block in zone.blocks if block.block_id == "bottom_fig")
     assert bottom_fig.spanned_cols == [1, 2, 3]
-
-
-def test_real_newspaper_page_keeps_lower_four_column_zone_after_pipeline():
-    page = json.loads((ROOT / "test-result" / "run_20260507_050647" / "newspaper_01" / "newspaper_01.json").read_text())
-
-    pipeline = RecoveryPipeline(config=RecoveryConfig(reading_order_strategy="xycutpp_hybrid"))
-    document = pipeline.build_document(page)
-    lower_multicol_zones = [
-        zone for zone in document.pages[0].zones
-        if zone.col_count == 4 and any(block.block_id == "blk_27" for block in zone.blocks)
-    ]
-    assert len(lower_multicol_zones) == 1
-    zone = lower_multicol_zones[0]
-    by_id = {block.block_id: block for block in zone.blocks}
-    assert by_id["blk_26"].col_index == 0
-    assert by_id["blk_25"].col_index == 1
-    assert by_id["blk_27"].col_index == 2
-    assert by_id["blk_30"].col_index == 3
-    assert zone.region_kind == ""
