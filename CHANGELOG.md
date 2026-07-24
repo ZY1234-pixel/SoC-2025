@@ -1,5 +1,13 @@
 # 更新日志
 
+## v0.6.0 — 2026-07-25
+
+- 流式还原重构为 Recognition Evidence → Document Analysis → Reflow Layout Plan → Mechanical Render 四阶段
+- PP-DocLayoutV3 Model Order 成为唯一阅读顺序，删除旧 Block、Zone、profile、repair 与策略切换链路
+- 每个源页严格映射为一个 Word 页，使用单次预渲染 Page Fit，不做生成—检测—重生成闭环
+- 原生可编辑表格、公式图像与可编辑编号、Single / Sequential Columns / Grid Flow 纳入统一规划
+- 全量验收增加内容来源完整性、DOCX 可打开、语义表格原生化和 PDF Page Budget 检查
+
 ## v0.5.0 — 2026-04-23
 
 - 版面还原与渲染管线全面改进：多列布局检测、页边距估算、全局缩放适配

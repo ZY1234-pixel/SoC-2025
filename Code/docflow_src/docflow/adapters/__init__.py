@@ -1,10 +1,5 @@
 """Recognition-engine adapters."""
 
-from docflow.adapters.base_adapter import BaseAdapter
+from docflow.adapters.paddle_adapter import PaddleAdapter
 
-try:
-    from docflow.adapters.paddle_adapter import PaddleAdapter
-except ImportError:
-    PaddleAdapter = None  # type: ignore[assignment,misc]
-
-__all__ = ["BaseAdapter", "PaddleAdapter"]
+__all__ = ["PaddleAdapter"]

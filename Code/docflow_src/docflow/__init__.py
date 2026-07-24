@@ -1,6 +1,14 @@
-"""DocFlow —— 版面恢复工具：将版面分析结果转换为格式化文档。"""
-from docflow.pipeline import RecoveryPipeline
-from docflow.config import RecoveryConfig
+"""Page-constrained document reflow from immutable recognition evidence."""
 
-__version__ = "0.3.0"
-__all__ = ["RecoveryPipeline", "RecoveryConfig", "__version__"]
+from docflow.analysis import DocumentAnalyzer
+from docflow.planning import ReflowPlanner
+from docflow.renderer import ReflowDocxRenderer, ReflowMarkdownRenderer
+
+__version__ = "0.6.0"
+__all__ = [
+    "DocumentAnalyzer",
+    "ReflowPlanner",
+    "ReflowDocxRenderer",
+    "ReflowMarkdownRenderer",
+    "__version__",
+]

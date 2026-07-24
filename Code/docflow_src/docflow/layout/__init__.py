@@ -1,7 +1,11 @@
-"""版面分析层：坐标映射、区域拆分、列检测、
-paragraph detection, reading-order sorting, and style inference."""
+"""Pixel-level style evidence used by document analysis."""
 
-from docflow.model.page import CoordMapper
-from docflow.layout.sorter import sort_layout
-from docflow.layout.paragraph_detector import split_into_paragraphs, detect_first_line_indent
-from docflow.layout.style_inferrer import infer_block_styles
+from docflow.layout.color_inferrer import infer_crop_style, infer_table_row_fills
+from docflow.layout.font_classifier import FONT_FAMILY_BY_LABEL, FontClassifier
+
+__all__ = [
+    "FONT_FAMILY_BY_LABEL",
+    "FontClassifier",
+    "infer_crop_style",
+    "infer_table_row_fills",
+]

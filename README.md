@@ -60,15 +60,14 @@ python test.py -i ../dataset -o ../test-result -f docx,markdown
 
 ```
 图片 / PDF
-  → 版面检测（DocLayout-YOLO）
-  → OCR 文字识别（PaddleOCR v5）
-  → 表格结构识别
-  → 版面排序与分栏分析
-  → 样式推断（字号 / 对齐 / 行距 / 缩进）
-  → DOCX / Markdown / PDF 还原
+  → PP-DocLayoutV3 + PP-OCRv6（保留 Model Order 与原始识别证据）
+  → Document Analysis（语义组合、来源追踪、文档级样式角色）
+  → Reflow Layout Plan（Single / Sequential Columns / Grid + 单次 Page Fit）
+  → 机械生成 DOCX / Markdown
+  → LibreOffice 从最终 DOCX 导出 PDF
 ```
 
-每一步的中间结果都会写入 JSON，可以单独拿出来做二次处理。
+每个源页面严格对应一个输出页面。规划阶段只做一次静态缩放计算，生成后只验收、不重新生成；中间 Evidence、Analysis 和 Plan 均写入 JSON。
 
 ## 输出格式
 

@@ -14,7 +14,6 @@ from PIL import Image
 
 from docflow.layout.color_inferrer import infer_crop_style, infer_table_row_fills
 from docflow.layout.font_classifier import FONT_FAMILY_BY_LABEL
-from docflow.model.blocks.text_block import join_text_segments
 from docflow.model.stages import (
     AnalysisDiagnostic,
     AnalysisPage,
@@ -48,6 +47,19 @@ _TEXT_CATEGORIES = {
     "title",
 }
 _FURNITURE = {"header", "footer", "page_number"}
+
+
+def _join_text_segments(left: str, right: str) -> str:
+    if not left or not right:
+        return left or right
+    previous = left.rstrip()[-1]
+    current = right.lstrip()[0]
+    cjk = lambda char: "\u3400" <= char <= "\u9fff" or "\uf900" <= char <= "\ufaff"
+    separator = " " if not cjk(previous) and not cjk(current) and (
+        previous.isalnum() and current.isalnum()
+        or previous in ",.;:!?)%]”’" and current.isalnum()
+    ) else ""
+    return left + separator + right
 
 
 class DocumentAnalyzer:
@@ -373,7 +385,7 @@ class DocumentAnalyzer:
             if output.endswith("-") and part[:1].islower():
                 output = output[:-1] + part
             else:
-                output = join_text_segments([output, part])
+                output = _join_text_segments(output, part)
         return output
 
     @staticmethod

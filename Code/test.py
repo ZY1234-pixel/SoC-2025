@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import os
 import subprocess
@@ -11,6 +12,7 @@ import time
 from pathlib import Path
 
 import cv2
+import fitz
 from docx import Document as DocxDocument
 
 CODE_ROOT = Path(__file__).resolve().parent
@@ -424,12 +426,29 @@ def save_debug_images(
 
 def _native_docx_table_count(path: Path) -> int:
     if not path.exists():
-        return 0
-    try:
-        document = DocxDocument(path)
-        return len(document.tables)
-    except Exception:
-        return 0
+        raise RuntimeError(f"DOCX was not produced: {path}")
+    document = DocxDocument(path)
+    return len(document.element.body.xpath('.//w:tbl[w:tblPr/w:tblStyle[@w:val="TableGrid"]]'))
+
+
+def _validate_content_integrity(evidence, analysis) -> None:
+    source_ids = Counter(
+        item.evidence_id
+        for page in evidence.pages
+        for item in page.items
+    )
+    resolved_ids = Counter(
+        source_id
+        for page in analysis.pages
+        for element in page.elements
+        for source_id in element.source_ids
+    )
+    if source_ids != resolved_ids:
+        missing = sorted((source_ids - resolved_ids).elements())
+        duplicated = sorted((resolved_ids - source_ids).elements())
+        raise RuntimeError(
+            f"Document Analysis provenance mismatch: missing={missing}, duplicated={duplicated}"
+        )
 
 
 def run_sample(
@@ -458,6 +477,7 @@ def run_sample(
     evidence = RecognitionEvidence(tuple(evidence_pages), source_file=str(sample_path))
     write_json(sample_layout.recognition_path, evidence.to_dict())
     analysis = analyzer.analyze(evidence)
+    _validate_content_integrity(evidence, analysis)
     write_json(sample_layout.json_path, analysis.to_dict())
     reflow_plan = ReflowPlanner().plan(analysis)
     write_json(sample_layout.render_plan_path, reflow_plan.to_dict())
@@ -466,6 +486,15 @@ def run_sample(
     if "docx" in formats or "pdf" in formats:
         ReflowDocxRenderer().render(reflow_plan, str(sample_layout.docx_path))
         native_docx_table_count = _native_docx_table_count(sample_layout.docx_path)
+        semantic_table_count = sum(
+            element.kind == "table_group"
+            for page in analysis.pages
+            for element in page.elements
+        )
+        if native_docx_table_count < semantic_table_count:
+            raise RuntimeError(
+                f"native table loss: expected at least {semantic_table_count}, got {native_docx_table_count}"
+            )
     if "markdown" in formats:
         ReflowMarkdownRenderer().render(analysis, str(sample_layout.markdown_path))
     if "pdf" in formats:
@@ -485,6 +514,11 @@ def run_sample(
         )
         if not sample_layout.pdf_path.exists():
             raise RuntimeError("LibreOffice conversion completed without producing the PDF")
+        with fitz.open(sample_layout.pdf_path) as pdf:
+            if len(pdf) != len(evidence_pages):
+                raise RuntimeError(
+                    f"Page Budget exceeded: source={len(evidence_pages)}, rendered={len(pdf)}"
+                )
     return len(evidence_pages), native_docx_table_count
 
 
