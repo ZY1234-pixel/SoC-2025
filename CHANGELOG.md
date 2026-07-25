@@ -6,6 +6,7 @@
 - PP-DocLayoutV3 Model Order 成为唯一阅读顺序，删除旧 Block、Zone、profile、repair 与策略切换链路
 - 每个源页严格映射为一个 Word 页，使用单次预渲染 Page Fit，不做生成—检测—重生成闭环
 - Word Safety Factor 只缩减页面高度预算，不再强制缩小本来已满足安全预算的页面
+- Word Safety Factor 由 0.80 校准为 0.85，并按文本框累计 1/8 行换行误差，减少统一过缩放
 - 原生可编辑表格、公式图像与可编辑编号、Single / Sequential Columns / Grid Flow 纳入统一规划
 - Reflow Planner 先按源图几何划分稳定分栏容器，再在容器内保持 PP-DocLayoutV3 Model Order
 - 全量验收增加内容来源完整性、DOCX 可打开、语义表格原生化和 PDF Page Budget 检查

@@ -99,7 +99,16 @@ def test_single_row_table_uses_body_font_and_wrap_aware_fit() -> None:
     page = ReflowPlanner().plan(_analysis((table,))).pages[0]
 
     assert page.elements[0].payload["table_font_size_pt"] == pytest.approx(10.5)
-    assert 0.5 < page.fit_scale < 0.8
+    assert 0.5 < page.fit_scale < 0.85
+
+
+def test_default_page_budget_reserves_incremental_text_box_wrap_error() -> None:
+    compact = ReflowPlanner().plan(_analysis((_element("compact", (100, 100, 900, 500), 1, "x" * 1760),))).pages[0]
+    fragmented = ReflowPlanner().plan(
+        _analysis(tuple(_element(f"part-{index}", (100, 100, 900, 500), index, "x" * 88) for index in range(20)))
+    ).pages[0]
+
+    assert compact.fit_scale > fragmented.fit_scale
 
 
 def test_page_geometry_floor_is_counted_once_across_model_order_sections() -> None:

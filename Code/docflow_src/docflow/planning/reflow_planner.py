@@ -23,7 +23,7 @@ from docflow.model.stages import (
 
 
 class ReflowPlanner:
-    def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.80) -> None:
+    def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.85) -> None:
         self.page_long_edge_pt = float(page_long_edge_pt)
         self.word_safety_factor = float(word_safety_factor)
 
@@ -372,7 +372,8 @@ class ReflowPlanner:
             font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
             units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in element.text)
             lines = max(1, math.ceil(units * font_size / max(width, 1.0)))
-            return lines * font_size * role.line_spacing * 1.2
+            # Font metrics and Word wrapping accumulate a small error per text box.
+            return lines * font_size * role.line_spacing * 1.2 + font_size / 8.0
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
         aspect = max(float(bbox[3]) - float(bbox[1]), 1.0) / max(float(bbox[2]) - float(bbox[0]), 1.0)
         visual_width = width * float(element.payload.get("width_fraction", 1.0)) * fit_scale
