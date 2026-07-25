@@ -5,7 +5,7 @@ import io
 
 import pytest
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from PIL import Image
 
 from docflow.model.stages import AnalysisPage, DocumentAnalysis, Rect, SemanticElement, TypographicRole
@@ -143,3 +143,29 @@ def test_reflow_docx_writes_source_bbox_paragraph_indents(tmp_path) -> None:
 
     assert paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER
     assert paragraph.paragraph_format.left_indent.pt == pytest.approx(paragraph.paragraph_format.right_indent.pt, abs=0.1)
+
+
+def test_reflow_docx_uses_deterministic_line_height(tmp_path) -> None:
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+    element = SemanticElement(
+        "body",
+        "paragraph_group",
+        Rect(100, 100, 900, 200),
+        1,
+        ("r1",),
+        text="First line Second line",
+        role_id="body",
+        payload={"lines": ("First line", "Second line"), "line_heights_px": (20, 20)},
+    )
+    plan = ReflowPlanner().plan(DocumentAnalysis((AnalysisPage(0, 1000, 1400, (element,)),), (role,)))
+    output = tmp_path / "source-lines.docx"
+
+    ReflowDocxRenderer().render(plan, str(output))
+    paragraph = next(item for item in Document(output).paragraphs if "First line" in item.text)
+
+    assert plan.pages[0].elements[0].payload["line_height_pt"] == pytest.approx(20 * 841.89 / 1400)
+    assert paragraph.text == "First line Second line"
+    assert paragraph.paragraph_format.line_spacing_rule == WD_LINE_SPACING.EXACTLY
+    assert paragraph.paragraph_format.widow_control is False
+    assert paragraph.paragraph_format.keep_together is False
+    assert paragraph.paragraph_format.keep_with_next is False

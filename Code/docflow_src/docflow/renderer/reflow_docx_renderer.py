@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from docx import Document
 from docx.enum.section import WD_SECTION
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
@@ -158,13 +158,19 @@ class ReflowDocxRenderer:
     def _write_text(self, paragraph, element, roles, fit_scale: float) -> None:
         self._write_paragraph_geometry(paragraph, element, fit_scale)
         role = roles.get(element.role_id) or self._body_role(roles)
-        if role:
+        line_height = element.payload.get("line_height_pt")
+        if role and line_height:
+            font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
+            paragraph.paragraph_format.line_spacing = Pt(max(float(line_height) * fit_scale, font_size * 1.05))
+            paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+        elif role:
             paragraph.paragraph_format.line_spacing = role.line_spacing
         run = paragraph.add_run(element.text)
         self._style_run(run, role, fit_scale)
         self._shade(run._element.get_or_add_rPr(), element.payload.get("background_color"))
-        if element.kind == "heading":
-            paragraph.paragraph_format.keep_with_next = True
+        paragraph.paragraph_format.widow_control = False
+        paragraph.paragraph_format.keep_together = False
+        paragraph.paragraph_format.keep_with_next = False
 
     @staticmethod
     def _write_paragraph_geometry(paragraph, element, fit_scale: float) -> None:

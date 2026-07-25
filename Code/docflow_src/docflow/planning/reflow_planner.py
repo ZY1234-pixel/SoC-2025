@@ -93,6 +93,11 @@ class ReflowPlanner:
                         (0.0, max((page.width_px - element.bbox.x2) * scale - geometry.margin_right_pt, 0.0)),
                     )[1],
                     "space_before_pt": vertical_spacing.get(element.element_id, 0.0),
+                    "line_height_pt": self._source_line_height(
+                        element,
+                        role_by_id.get(element.role_id or default_body_role),
+                        scale,
+                    ),
                     "source_scale": scale,
                     "page_width_px": page.width_px,
                     "page_height_px": page.height_px,
@@ -455,6 +460,7 @@ class ReflowPlanner:
             )
             font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
             source_lines = element.payload.get("lines") or ()
+            line_height = element.payload.get("line_height_pt")
             cjk_count = sum(1 for char in element.text if ord(char) >= 0x2E80)
             units = cjk_count + (len(element.text) - cjk_count) * 0.52
             content_lines = max(1, math.ceil(units * font_size / max(width, 1.0)))
@@ -462,9 +468,11 @@ class ReflowPlanner:
                 source_bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
                 source_width = (float(source_bbox[2]) - float(source_bbox[0])) * float(element.payload["source_scale"])
                 observed_lines = max(1, math.ceil(len(source_lines) * source_width / max(width, 1.0) * fit_scale))
-                lines = max(observed_lines, content_lines) if cjk_count else observed_lines
+                lines = observed_lines
             else:
                 lines = content_lines
+            if source_lines and line_height:
+                return spacing + lines * max(float(line_height) * fit_scale, font_size * 1.05)
             paragraph_boundary = font_size if cjk_count else font_size / 4.0
             return spacing + lines * font_size * role.line_spacing * 1.05 + paragraph_boundary
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
@@ -495,6 +503,15 @@ class ReflowPlanner:
             return 0.0
         indent = float(lefts[0]) - median(float(value) for value in lefts[1:])
         return max(indent * source_scale, 0.0)
+
+    @staticmethod
+    def _source_line_height(element, role, source_scale: float):
+        lines = element.payload.get("lines") or ()
+        if not lines or role is None:
+            return None
+        line_heights = element.payload.get("line_heights_px") or ()
+        observed = median(line_heights) * source_scale if line_heights else element.bbox.height * source_scale / len(lines)
+        return min(max(observed, role.font_size_pt * 1.05), role.font_size_pt * 1.5)
 
     @staticmethod
     def _table_font_size(element, source_scale: float, body_font_size: float):
