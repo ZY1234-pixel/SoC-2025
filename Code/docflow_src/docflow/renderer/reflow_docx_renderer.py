@@ -121,6 +121,7 @@ class ReflowDocxRenderer:
             paragraph = container.add_paragraph()
             self._write_text(paragraph, element, roles, fit_scale)
             return
+        self._write_block_spacing(container, element, fit_scale)
         if element.kind == "figure_group":
             if element.payload.get("caption_position") == "before":
                 self._write_caption(container, element.payload.get("caption"), roles, fit_scale)
@@ -139,7 +140,7 @@ class ReflowDocxRenderer:
                 self._write_caption(container, element.payload.get("caption"), roles, fit_scale)
 
     def _write_text(self, paragraph, element, roles, fit_scale: float) -> None:
-        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_before = Pt(float(element.payload.get("space_before_pt", 0.0)) * fit_scale)
         paragraph.paragraph_format.space_after = Pt(0)
         paragraph.paragraph_format.first_line_indent = Pt(float(element.payload.get("first_line_indent_pt", 0.0)) * fit_scale)
         paragraph.alignment = _ALIGNMENT.get(element.payload.get("alignment"), WD_ALIGN_PARAGRAPH.LEFT)
@@ -151,6 +152,16 @@ class ReflowDocxRenderer:
         self._shade(run._element.get_or_add_rPr(), element.payload.get("background_color"))
         if element.kind == "heading":
             paragraph.paragraph_format.keep_with_next = True
+
+    @staticmethod
+    def _write_block_spacing(container, element, fit_scale: float) -> None:
+        spacing = float(element.payload.get("space_before_pt", 0.0)) * fit_scale
+        if spacing <= 0:
+            return
+        paragraph = container.add_paragraph()
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(max(spacing - 1.0, 0.0))
+        paragraph.paragraph_format.line_spacing = Pt(1)
 
     def _write_caption(self, container, text, roles, fit_scale: float) -> None:
         if not text:

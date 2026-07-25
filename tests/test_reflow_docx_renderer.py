@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 
+import pytest
 from docx import Document
 from PIL import Image
 
@@ -90,3 +91,22 @@ def test_layout_table_gutter_preserves_planned_content_width() -> None:
     ReflowDocxRenderer._format_layout_table(table, (100, 100, 100), 20)
 
     assert [cell.width.pt for cell in table.rows[0].cells] == [110, 120, 110]
+
+
+def test_reflow_docx_writes_planned_vertical_spacing(tmp_path) -> None:
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+    elements = (
+        SemanticElement("first", "heading", Rect(100, 100, 900, 200), 1, ("r1",), text="First", role_id="body"),
+        SemanticElement("second", "paragraph_group", Rect(100, 300, 900, 400), 2, ("r2",), text="Second", role_id="body"),
+    )
+    plan = ReflowPlanner().plan(DocumentAnalysis((AnalysisPage(0, 1000, 1400, elements),), (role,)))
+    output = tmp_path / "spacing.docx"
+
+    ReflowDocxRenderer().render(plan, str(output))
+    paragraph = next(item for item in Document(output).paragraphs if item.text == "Second")
+
+    assert plan.pages[0].elements[1].payload["space_before_pt"] > 0
+    assert paragraph.paragraph_format.space_before.pt == pytest.approx(
+        plan.pages[0].elements[1].payload["space_before_pt"] * plan.pages[0].fit_scale,
+        abs=0.1,
+    )

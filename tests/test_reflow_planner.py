@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import pytest
 
-from docflow.model.stages import AnalysisPage, DocumentAnalysis, Rect, SemanticElement, TypographicRole
+from docflow.model.stages import (
+    AnalysisPage,
+    DocumentAnalysis,
+    FlowKind,
+    FlowSection,
+    PlannedElement,
+    Rect,
+    SemanticElement,
+    TypographicRole,
+)
 from docflow.planning import ReflowPlanner
 
 
@@ -109,6 +118,40 @@ def test_default_page_budget_reserves_incremental_text_box_wrap_error() -> None:
     ).pages[0]
 
     assert compact.fit_scale > fragmented.fit_scale
+
+
+def test_planner_preserves_vertical_gap_from_nearest_overlapping_predecessor() -> None:
+    elements = (
+        _element("left-heading", (100, 100, 450, 150), 1, kind="heading"),
+        _element("right", (550, 120, 900, 180), 2),
+        _element("left-body", (100, 250, 450, 350), 3),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+    planned = {element.element_id: element for element in page.elements}
+
+    assert planned["left-body"].payload["space_before_pt"] == pytest.approx(100 * 841.89 / 1400)
+
+
+def test_page_fit_uses_observed_source_lines_when_available() -> None:
+    text = "word " * 1200
+    observed = ReflowPlanner().plan(
+        _analysis((_element("observed", (100, 100, 900, 1200), 1, text, payload={"lines": ("a", "b", "c")}),))
+    ).pages[0]
+    estimated = ReflowPlanner().plan(_analysis((_element("estimated", (100, 100, 900, 1200), 1, text),))).pages[0]
+
+    assert observed.fit_scale > estimated.fit_scale
+
+
+def test_page_fit_reserves_word_flow_section_boundaries() -> None:
+    planner = ReflowPlanner()
+    elements = tuple(PlannedElement(str(index), "paragraph_group", "body", "x" * 50) for index in range(6))
+    roles = {"body": TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)}
+    combined = (FlowSection("combined", FlowKind.SINGLE, tuple(element.element_id for element in elements)),)
+    split = tuple(FlowSection(str(index), FlowKind.SINGLE, (element.element_id,)) for index, element in enumerate(elements))
+
+    assert planner._fit_scale(combined, elements, roles, 100, 288) == 1.0
+    assert planner._fit_scale(split, elements, roles, 100, 288) < 1.0
 
 
 def test_page_geometry_floor_is_counted_once_across_model_order_sections() -> None:

@@ -23,7 +23,7 @@ from docflow.model.stages import (
 
 
 class ReflowPlanner:
-    def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.85) -> None:
+    def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.90) -> None:
         self.page_long_edge_pt = float(page_long_edge_pt)
         self.word_safety_factor = float(word_safety_factor)
 
@@ -61,6 +61,7 @@ class ReflowPlanner:
         usable_width = geometry.width_pt - geometry.margin_left_pt - geometry.margin_right_pt
         sections, placement = self._build_sections(body, bounds, usable_width)
         container_widths = self._container_widths(body, sections, placement, bounds.width)
+        vertical_spacing = self._vertical_spacing(body, sections, placement, scale)
         body_font_size = role_by_id[default_body_role].font_size_pt if default_body_role in role_by_id else 10.5
         planned = tuple(
             PlannedElement(
@@ -78,6 +79,8 @@ class ReflowPlanner:
                     "column": placement.get(element.element_id, 0),
                     "alignment": self._alignment(element, bounds),
                     "first_line_indent_pt": self._first_line_indent(element, scale),
+                    "space_before_pt": vertical_spacing.get(element.element_id, 0.0),
+                    "source_scale": scale,
                     "page_width_px": page.width_px,
                     "table_font_size_pt": self._table_font_size(element, scale, body_font_size),
                 },
@@ -307,11 +310,40 @@ class ReflowPlanner:
             result[item.element_id] = row
         return result
 
+    @staticmethod
+    def _vertical_spacing(elements, sections, placement, source_scale: float):
+        by_id = {element.element_id: element for element in elements}
+        structural_kinds = {"heading", "caption", "figure_group", "equation_group", "table_group"}
+        spacing = {}
+        for section in sections:
+            previous_by_column = defaultdict(list)
+            for identifier in section.element_ids:
+                current = by_id[identifier]
+                column = placement.get(identifier, 0)
+                predecessors = [
+                    previous
+                    for previous in previous_by_column[column]
+                    if previous.bbox.y2 <= current.bbox.y1
+                    and max(0.0, min(previous.bbox.x2, current.bbox.x2) - max(previous.bbox.x1, current.bbox.x1))
+                    / max(min(previous.bbox.width, current.bbox.width), 1.0)
+                    >= 0.30
+                ]
+                if predecessors:
+                    previous = max(predecessors, key=lambda element: element.bbox.y2)
+                    if current.kind in structural_kinds or previous.kind in structural_kinds:
+                        spacing[identifier] = (current.bbox.y1 - previous.bbox.y2) * source_scale
+                previous_by_column[column].append(current)
+        return spacing
+
     def _fit_scale(self, sections, elements, roles, usable_width: float, usable_height: float) -> float:
         target = usable_height * self.word_safety_factor
+        # Word keeps a paragraph boundary between adjacent flow containers.
+        section_overhead = max(len(sections) - 1, 0) * 5.0
 
         def content_height(scale: float) -> float:
-            return sum(self._section_height(section, elements, roles, usable_width, scale) for section in sections)
+            return section_overhead + sum(
+                self._section_height(section, elements, roles, usable_width, scale) for section in sections
+            )
 
         # Reserve vertical capacity without shrinking pages that already fit inside it.
         upper = 1.0
@@ -348,6 +380,7 @@ class ReflowPlanner:
     @staticmethod
     def _element_height(element, roles, width: float, fit_scale: float) -> float:
         role = roles.get(element.role_id)
+        spacing = float(element.payload.get("space_before_pt", 0.0)) * fit_scale
         if element.kind == "table_group" and element.payload.get("html"):
             soup = BeautifulSoup(str(element.payload["html"]), "html.parser")
             rows = soup.find_all("tr")
@@ -367,18 +400,24 @@ class ReflowPlanner:
                     lines = max(1, math.ceil(units * font_size / max(cell_width, 1.0)))
                     row_height = max(row_height, lines * font_size * 1.2)
                 height += row_height + 2.0
-            return height + (10.0 * fit_scale if element.payload.get("caption") else 0.0)
+            return spacing + height + (10.0 * fit_scale if element.payload.get("caption") else 0.0)
         if role is not None and element.text:
             font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
-            units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in element.text)
-            lines = max(1, math.ceil(units * font_size / max(width, 1.0)))
+            source_lines = element.payload.get("lines") or ()
+            if source_lines:
+                source_bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
+                source_width = (float(source_bbox[2]) - float(source_bbox[0])) * float(element.payload["source_scale"])
+                lines = max(1, math.ceil(len(source_lines) * source_width / max(width, 1.0) * fit_scale))
+            else:
+                units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in element.text)
+                lines = max(1, math.ceil(units * font_size / max(width, 1.0)))
             # Font metrics and Word wrapping accumulate a small error per text box.
-            return lines * font_size * role.line_spacing * 1.2 + font_size / 8.0
+            return spacing + lines * font_size * role.line_spacing * 1.2 + font_size / 8.0
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
         aspect = max(float(bbox[3]) - float(bbox[1]), 1.0) / max(float(bbox[2]) - float(bbox[0]), 1.0)
         visual_width = width * float(element.payload.get("width_fraction", 1.0)) * fit_scale
         caption_lines = 1 if element.payload.get("caption") else 0
-        return visual_width * aspect + caption_lines * 10.0 * fit_scale
+        return spacing + visual_width * aspect + caption_lines * 10.0 * fit_scale
 
     @staticmethod
     def _alignment(element, bounds: Rect) -> str:
