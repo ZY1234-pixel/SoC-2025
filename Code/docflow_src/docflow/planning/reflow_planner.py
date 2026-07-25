@@ -60,7 +60,9 @@ class ReflowPlanner:
         )
         usable_width = geometry.width_pt - geometry.margin_left_pt - geometry.margin_right_pt
         sections, placement = self._build_sections(body, bounds, usable_width)
-        container_widths = self._container_widths(body, sections, placement, bounds.width)
+        container_frames = self._container_frames(body, sections, placement, bounds)
+        container_widths = {identifier: max(right - left, 1.0) for identifier, (left, right) in container_frames.items()}
+        horizontal_indents = self._horizontal_indents(body, sections, placement, container_frames, usable_width)
         vertical_spacing = self._vertical_spacing(body, sections, placement, scale)
         body_font_size = role_by_id[default_body_role].font_size_pt if default_body_role in role_by_id else 10.5
         planned = tuple(
@@ -77,11 +79,20 @@ class ReflowPlanner:
                         1.0,
                     ),
                     "column": placement.get(element.element_id, 0),
-                    "alignment": self._alignment(element, bounds),
+                    "alignment": self._alignment(element, container_frames.get(element.element_id, (bounds.x1, bounds.x2))),
                     "first_line_indent_pt": self._first_line_indent(element, scale),
+                    "left_indent_pt": horizontal_indents.get(
+                        element.element_id,
+                        (max(element.bbox.x1 * scale - geometry.margin_left_pt, 0.0), 0.0),
+                    )[0],
+                    "right_indent_pt": horizontal_indents.get(
+                        element.element_id,
+                        (0.0, max((page.width_px - element.bbox.x2) * scale - geometry.margin_right_pt, 0.0)),
+                    )[1],
                     "space_before_pt": vertical_spacing.get(element.element_id, 0.0),
                     "source_scale": scale,
                     "page_width_px": page.width_px,
+                    "page_height_px": page.height_px,
                     "table_font_size_pt": self._table_font_size(element, scale, body_font_size),
                 },
             )
@@ -154,9 +165,9 @@ class ReflowPlanner:
         return tuple(sections), placement
 
     @staticmethod
-    def _container_widths(elements, sections, placement, body_width: float):
+    def _container_frames(elements, sections, placement, bounds: Rect):
         by_id = {element.element_id: element for element in elements}
-        widths = {element.element_id: max(body_width, 1.0) for element in elements}
+        frames = {element.element_id: (bounds.x1, bounds.x2) for element in elements}
         for section in sections:
             if section.kind == FlowKind.SINGLE:
                 continue
@@ -164,10 +175,41 @@ class ReflowPlanner:
             for identifier in section.element_ids:
                 by_column[placement[identifier]].append(by_id[identifier])
             for members in by_column.values():
-                lane_width = max(item.bbox.x2 for item in members) - min(item.bbox.x1 for item in members)
+                left = min(item.bbox.x1 for item in members)
+                right = max(item.bbox.x2 for item in members)
                 for item in members:
-                    widths[item.element_id] = max(lane_width, 1.0)
-        return widths
+                    frames[item.element_id] = (left, right)
+        return frames
+
+    @staticmethod
+    def _horizontal_indents(elements, sections, placement, frames, usable_width: float):
+        target_widths = {element.element_id: usable_width for element in elements}
+        section_kinds = {}
+        for section in sections:
+            section_kinds.update((identifier, section.kind) for identifier in section.element_ids)
+            if section.kind == FlowKind.SINGLE:
+                continue
+            for identifier in section.element_ids:
+                target_widths[identifier] = section.column_widths_pt[placement[identifier]]
+        result = {}
+        for element in elements:
+            left, right = frames[element.element_id]
+            source_width = max(right - left, 1.0)
+            source_lines = element.payload.get("lines") or ()
+            centered = abs((element.bbox.x1 + element.bbox.x2 - left - right) / 2.0) <= source_width * 0.04
+            if (
+                element.kind not in {"heading", "paragraph_group"}
+                or element.bbox.width / source_width < 0.3
+                or (section_kinds[element.element_id] == FlowKind.SINGLE and (not centered or len(source_lines) > 2))
+            ):
+                result[element.element_id] = (0.0, 0.0)
+                continue
+            target_width = target_widths[element.element_id]
+            result[element.element_id] = (
+                max(element.bbox.x1 - left, 0.0) / source_width * target_width,
+                max(right - element.bbox.x2, 0.0) / source_width * target_width,
+            )
+        return result
 
     @staticmethod
     def _visual_width(element) -> float:
@@ -402,17 +444,26 @@ class ReflowPlanner:
                 height += row_height + 2.0
             return spacing + height + (10.0 * fit_scale if element.payload.get("caption") else 0.0)
         if role is not None and element.text:
+            width = max(
+                width
+                - float(element.payload.get("left_indent_pt", 0.0))
+                - float(element.payload.get("right_indent_pt", 0.0)),
+                1.0,
+            )
             font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
             source_lines = element.payload.get("lines") or ()
+            cjk_count = sum(1 for char in element.text if ord(char) >= 0x2E80)
+            units = cjk_count + (len(element.text) - cjk_count) * 0.52
+            content_lines = max(1, math.ceil(units * font_size / max(width, 1.0)))
             if source_lines:
                 source_bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
                 source_width = (float(source_bbox[2]) - float(source_bbox[0])) * float(element.payload["source_scale"])
-                lines = max(1, math.ceil(len(source_lines) * source_width / max(width, 1.0) * fit_scale))
+                observed_lines = max(1, math.ceil(len(source_lines) * source_width / max(width, 1.0) * fit_scale))
+                lines = max(observed_lines, content_lines) if cjk_count else observed_lines
             else:
-                units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in element.text)
-                lines = max(1, math.ceil(units * font_size / max(width, 1.0)))
-            # Font metrics and Word wrapping accumulate a small error per text box.
-            return spacing + lines * font_size * role.line_spacing * 1.2 + font_size / 8.0
+                lines = content_lines
+            paragraph_boundary = font_size if cjk_count else font_size / 4.0
+            return spacing + lines * font_size * role.line_spacing * 1.05 + paragraph_boundary
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
         aspect = max(float(bbox[3]) - float(bbox[1]), 1.0) / max(float(bbox[2]) - float(bbox[0]), 1.0)
         visual_width = width * float(element.payload.get("width_fraction", 1.0)) * fit_scale
@@ -420,14 +471,18 @@ class ReflowPlanner:
         return spacing + visual_width * aspect + caption_lines * 10.0 * fit_scale
 
     @staticmethod
-    def _alignment(element, bounds: Rect) -> str:
+    def _alignment(element, frame) -> str:
         if element.kind in {"figure_group", "equation_group", "caption"}:
             return "center"
-        if element.kind == "heading":
-            element_center = (element.bbox.x1 + element.bbox.x2) / 2.0
-            bounds_center = (bounds.x1 + bounds.x2) / 2.0
-            if abs(element_center - bounds_center) <= bounds.width * 0.08:
-                return "center"
+        left, right = frame
+        width = max(right - left, 1.0)
+        element_center = (element.bbox.x1 + element.bbox.x2) / 2.0
+        centered = abs(element_center - (left + right) / 2.0) <= width * 0.04
+        source_lines = element.payload.get("lines") or ()
+        if centered and (element.kind == "heading" or element.bbox.width <= width * 0.75 or (len(source_lines) <= 2 and len(element.text) <= 300)):
+            return "center"
+        if element.bbox.x2 >= right - width * 0.03 and element.bbox.x1 > left + width * 0.25 and len(source_lines) <= 2:
+            return "right"
         return "justify" if element.kind == "paragraph_group" and len(element.text) >= 40 else "left"
 
     @staticmethod

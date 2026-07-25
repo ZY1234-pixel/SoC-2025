@@ -5,6 +5,7 @@ import io
 
 import pytest
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from PIL import Image
 
 from docflow.model.stages import AnalysisPage, DocumentAnalysis, Rect, SemanticElement, TypographicRole
@@ -78,8 +79,8 @@ def test_reflow_docx_creates_one_unlinked_section_per_source_page(tmp_path) -> N
     document = Document(output)
 
     assert len(document.sections) == 2
-    first_header = " ".join(cell.text for table in document.sections[0].header.tables for row in table.rows for cell in row.cells)
-    second_header = " ".join(cell.text for table in document.sections[1].header.tables for row in table.rows for cell in row.cells)
+    first_header = " ".join(paragraph.text for paragraph in document.sections[0].header.paragraphs)
+    second_header = " ".join(paragraph.text for paragraph in document.sections[1].header.paragraphs)
     assert "H0" in first_header
     assert "H1" in second_header
     assert not document.sections[1].header.is_linked_to_previous
@@ -91,6 +92,15 @@ def test_layout_table_gutter_preserves_planned_content_width() -> None:
     ReflowDocxRenderer._format_layout_table(table, (100, 100, 100), 20)
 
     assert [cell.width.pt for cell in table.rows[0].cells] == [110, 120, 110]
+
+
+def test_nested_table_trailing_paragraph_is_collapsed() -> None:
+    cell = Document().add_table(rows=1, cols=1).cell(0, 0)
+    cell.add_table(rows=1, cols=1)
+
+    ReflowDocxRenderer._collapse_trailing_paragraph(cell)
+
+    assert cell.paragraphs[-1].paragraph_format.line_spacing.pt == 1
 
 
 def test_reflow_docx_writes_planned_vertical_spacing(tmp_path) -> None:
@@ -110,3 +120,26 @@ def test_reflow_docx_writes_planned_vertical_spacing(tmp_path) -> None:
         plan.pages[0].elements[1].payload["space_before_pt"] * plan.pages[0].fit_scale,
         abs=0.1,
     )
+
+
+def test_reflow_docx_writes_source_bbox_paragraph_indents(tmp_path) -> None:
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+    element = SemanticElement(
+        "author",
+        "paragraph_group",
+        Rect(300, 100, 700, 150),
+        1,
+        ("r1",),
+        text="Author Name",
+        role_id="body",
+        payload={"lines": ("Author Name",)},
+    )
+    body = SemanticElement("body", "paragraph_group", Rect(100, 200, 900, 300), 2, ("r2",), text="Body", role_id="body")
+    plan = ReflowPlanner().plan(DocumentAnalysis((AnalysisPage(0, 1000, 1400, (element, body)),), (role,)))
+    output = tmp_path / "indents.docx"
+
+    ReflowDocxRenderer().render(plan, str(output))
+    paragraph = next(item for item in Document(output).paragraphs if item.text == "Author Name")
+
+    assert paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert paragraph.paragraph_format.left_indent.pt == pytest.approx(paragraph.paragraph_format.right_indent.pt, abs=0.1)

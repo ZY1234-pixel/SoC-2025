@@ -451,7 +451,10 @@ class DocumentAnalyzer:
                     continue
                 line_count = max(len(element.payload.get("lines") or ()), 1)
                 line_heights = element.payload.get("line_heights_px") or ()
-                source_height = median(line_heights) if line_heights else element.bbox.height / line_count
+                source_height = element.bbox.height / line_count
+                if line_heights:
+                    ink_height = median(line_heights)
+                    source_height = min(source_height, ink_height * 1.2) if source_height > 0 else ink_height
                 raw_size = source_height * scale / 1.05
                 raw_size = round(max(raw_size, 1.0) * 2.0) / 2.0
                 base = "heading" if element.kind == "heading" else "caption" if element.kind == "caption" else "body"

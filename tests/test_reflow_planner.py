@@ -133,14 +133,50 @@ def test_planner_preserves_vertical_gap_from_nearest_overlapping_predecessor() -
     assert planned["left-body"].payload["space_before_pt"] == pytest.approx(100 * 841.89 / 1400)
 
 
-def test_page_fit_uses_observed_source_lines_when_available() -> None:
-    text = "word " * 1200
+def test_planner_maps_narrow_centered_text_bbox_to_paragraph_indents() -> None:
+    element = _element("author", (300, 100, 700, 150), 1, "Author Name", payload={"lines": ("Author Name",)})
+    body = _element("body", (100, 200, 900, 300), 2, "Body")
+
+    planned = ReflowPlanner().plan(_analysis((element, body))).pages[0].elements[0]
+
+    assert planned.payload["alignment"] == "center"
+    assert planned.payload["left_indent_pt"] == pytest.approx(planned.payload["right_indent_pt"])
+    assert planned.payload["left_indent_pt"] > 0
+
+
+def test_single_flow_multiline_paragraph_does_not_use_bbox_as_column_width() -> None:
+    element = _element(
+        "body",
+        (300, 100, 700, 500),
+        1,
+        "Body text",
+        payload={"lines": ("one", "two", "three")},
+    )
+
+    planned = ReflowPlanner().plan(_analysis((element,))).pages[0].elements[0]
+
+    assert planned.payload["left_indent_pt"] == 0
+    assert planned.payload["right_indent_pt"] == 0
+
+
+def test_single_flow_off_center_heading_does_not_use_bbox_as_text_width() -> None:
+    heading = _element("sidebar", (100, 100, 500, 160), 1, "Sidebar", kind="heading", payload={"lines": ("Sidebar",)})
+    anchor = _element("anchor", (100, 200, 900, 260), 2, "Anchor", kind="heading")
+
+    planned = ReflowPlanner().plan(_analysis((heading, anchor))).pages[0].elements[0]
+
+    assert planned.payload["left_indent_pt"] == 0
+    assert planned.payload["right_indent_pt"] == 0
+
+
+def test_page_fit_uses_observed_source_lines_as_a_lower_bound() -> None:
+    text = "short"
     observed = ReflowPlanner().plan(
-        _analysis((_element("observed", (100, 100, 900, 1200), 1, text, payload={"lines": ("a", "b", "c")}),))
+        _analysis((_element("observed", (100, 100, 900, 1200), 1, text, payload={"lines": ("a",) * 80}),))
     ).pages[0]
     estimated = ReflowPlanner().plan(_analysis((_element("estimated", (100, 100, 900, 1200), 1, text),))).pages[0]
 
-    assert observed.fit_scale > estimated.fit_scale
+    assert observed.fit_scale < estimated.fit_scale
 
 
 def test_page_fit_reserves_word_flow_section_boundaries() -> None:
@@ -150,8 +186,8 @@ def test_page_fit_reserves_word_flow_section_boundaries() -> None:
     combined = (FlowSection("combined", FlowKind.SINGLE, tuple(element.element_id for element in elements)),)
     split = tuple(FlowSection(str(index), FlowKind.SINGLE, (element.element_id,)) for index, element in enumerate(elements))
 
-    assert planner._fit_scale(combined, elements, roles, 100, 288) == 1.0
-    assert planner._fit_scale(split, elements, roles, 100, 288) < 1.0
+    assert planner._fit_scale(combined, elements, roles, 100, 245) == 1.0
+    assert planner._fit_scale(split, elements, roles, 100, 245) < 1.0
 
 
 def test_page_geometry_floor_is_counted_once_across_model_order_sections() -> None:

@@ -44,6 +44,7 @@ class ReflowDocxRenderer:
             section = document.sections[0] if page_number == 0 else document.add_section(WD_SECTION.NEW_PAGE)
             self._set_page_geometry(section, page.geometry)
             elements = {element.element_id: element for element in page.elements}
+            self._set_furniture_distances(section, page, elements)
             usable_width = self._usable_width(page.geometry)
             self._render_furniture(section.header, page.header_element_ids, elements, roles, page.fit_scale, usable_width)
             self._render_furniture(section.footer, page.footer_element_ids, elements, roles, page.fit_scale, usable_width)
@@ -72,6 +73,19 @@ class ReflowDocxRenderer:
         self._clear_container(container)
         if not identifiers:
             return
+        if len(identifiers) == 1:
+            element = elements[identifiers[0]]
+            paragraph = container.add_paragraph()
+            if element.payload.get("image_base64"):
+                data = self._decode_image(element.payload.get("image_base64"))
+                if data:
+                    self._write_paragraph_geometry(paragraph, element, fit_scale)
+                    bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
+                    width = (float(bbox[2]) - float(bbox[0])) * float(element.payload.get("source_scale", 1.0)) * fit_scale
+                    paragraph.add_run().add_picture(io.BytesIO(data), width=Pt(max(width, 0.5)))
+                return
+            self._write_text(paragraph, element, roles, fit_scale)
+            return
         table = container.add_table(rows=1, cols=3, width=Pt(usable_width))
         self._format_layout_table(table, (usable_width / 3,) * 3)
         for cell in table.rows[0].cells:
@@ -91,6 +105,8 @@ class ReflowDocxRenderer:
                     paragraph.add_run().add_picture(io.BytesIO(data), width=Pt(max(width, 0.5)))
                 continue
             self._write_text(paragraph, element, roles, fit_scale)
+            paragraph.paragraph_format.left_indent = Pt(0)
+            paragraph.paragraph_format.right_indent = Pt(0)
             paragraph.alignment = (WD_ALIGN_PARAGRAPH.LEFT, WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.RIGHT)[column]
 
     def _render_columns(self, container, flow, elements, roles, fit_scale) -> None:
@@ -140,10 +156,7 @@ class ReflowDocxRenderer:
                 self._write_caption(container, element.payload.get("caption"), roles, fit_scale)
 
     def _write_text(self, paragraph, element, roles, fit_scale: float) -> None:
-        paragraph.paragraph_format.space_before = Pt(float(element.payload.get("space_before_pt", 0.0)) * fit_scale)
-        paragraph.paragraph_format.space_after = Pt(0)
-        paragraph.paragraph_format.first_line_indent = Pt(float(element.payload.get("first_line_indent_pt", 0.0)) * fit_scale)
-        paragraph.alignment = _ALIGNMENT.get(element.payload.get("alignment"), WD_ALIGN_PARAGRAPH.LEFT)
+        self._write_paragraph_geometry(paragraph, element, fit_scale)
         role = roles.get(element.role_id) or self._body_role(roles)
         if role:
             paragraph.paragraph_format.line_spacing = role.line_spacing
@@ -152,6 +165,28 @@ class ReflowDocxRenderer:
         self._shade(run._element.get_or_add_rPr(), element.payload.get("background_color"))
         if element.kind == "heading":
             paragraph.paragraph_format.keep_with_next = True
+
+    @staticmethod
+    def _write_paragraph_geometry(paragraph, element, fit_scale: float) -> None:
+        paragraph.paragraph_format.space_before = Pt(float(element.payload.get("space_before_pt", 0.0)) * fit_scale)
+        paragraph.paragraph_format.space_after = Pt(0)
+        paragraph.paragraph_format.first_line_indent = Pt(float(element.payload.get("first_line_indent_pt", 0.0)) * fit_scale)
+        paragraph.paragraph_format.left_indent = Pt(float(element.payload.get("left_indent_pt", 0.0)))
+        paragraph.paragraph_format.right_indent = Pt(float(element.payload.get("right_indent_pt", 0.0)))
+        paragraph.alignment = _ALIGNMENT.get(element.payload.get("alignment"), WD_ALIGN_PARAGRAPH.LEFT)
+
+    @staticmethod
+    def _set_furniture_distances(section, page, elements) -> None:
+        if page.header_element_ids:
+            section.header_distance = Pt(
+                min(float(elements[identifier].payload["source_bbox"][1]) for identifier in page.header_element_ids)
+                * float(elements[page.header_element_ids[0]].payload.get("source_scale", 1.0))
+            )
+        if page.footer_element_ids:
+            reference = elements[page.footer_element_ids[0]]
+            page_height = float(reference.payload.get("page_height_px", 1.0))
+            bottom = max(float(elements[identifier].payload["source_bbox"][3]) for identifier in page.footer_element_ids)
+            section.footer_distance = Pt((page_height - bottom) * float(reference.payload.get("source_scale", 1.0)))
 
     @staticmethod
     def _write_block_spacing(container, element, fit_scale: float) -> None:
@@ -211,6 +246,7 @@ class ReflowDocxRenderer:
         paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         role = roles.get(element.role_id) or self._body_role(roles)
         self._style_run(paragraph.add_run(number), role, fit_scale)
+        self._collapse_trailing_paragraph(container)
 
     def _write_native_table(self, container, element, roles, fit_scale: float, container_width: float) -> None:
         html = element.payload.get("html")
@@ -261,6 +297,7 @@ class ReflowDocxRenderer:
                     self._shade(cell._tc.get_or_add_tcPr(), fill)
                     run.font.color.rgb = RGBColor.from_string(text_color.lstrip("#"))
                 column_index += column_span
+        self._collapse_trailing_paragraph(container)
 
     @staticmethod
     def _format_layout_table(table, widths, gutter_pt: float = 0.0) -> None:
@@ -332,3 +369,12 @@ class ReflowDocxRenderer:
     def _clear_container(container) -> None:
         for paragraph in container.paragraphs:
             paragraph._element.getparent().remove(paragraph._element)
+
+    @staticmethod
+    def _collapse_trailing_paragraph(container) -> None:
+        if not container.paragraphs or container.paragraphs[-1].text:
+            return
+        paragraph = container.paragraphs[-1]
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(0)
+        paragraph.paragraph_format.line_spacing = Pt(1)

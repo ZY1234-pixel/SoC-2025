@@ -108,3 +108,17 @@ def test_vertical_cjk_sidebar_keeps_visual_orientation() -> None:
 
     assert element.kind == "figure_group"
     assert element.text == ""
+
+
+def test_font_size_uses_source_pitch_capped_by_ink_height() -> None:
+    item = RecognitionItem(
+        "body",
+        "text",
+        Rect(100, 100, 900, 220),
+        1,
+        text_lines=(TextEvidence("first", polygon=((100, 100), (900, 100), (900, 120), (100, 120))),),
+    )
+
+    role = DocumentAnalyzer().analyze(RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))).roles[0]
+
+    assert role.font_size_pt == 13.5
