@@ -186,8 +186,8 @@ def test_page_fit_reserves_word_flow_section_boundaries() -> None:
     combined = (FlowSection("combined", FlowKind.SINGLE, tuple(element.element_id for element in elements)),)
     split = tuple(FlowSection(str(index), FlowKind.SINGLE, (element.element_id,)) for index, element in enumerate(elements))
 
-    assert planner._fit_scale(combined, elements, roles, 100, 245) == 1.0
-    assert planner._fit_scale(split, elements, roles, 100, 245) < 1.0
+    assert planner._fit_scale(combined, elements, roles, 100, 258) == 1.0
+    assert planner._fit_scale(split, elements, roles, 100, 258) < 1.0
 
 
 def test_page_geometry_floor_is_counted_once_across_model_order_sections() -> None:

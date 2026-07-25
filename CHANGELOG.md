@@ -9,6 +9,7 @@
 - Word Safety Factor 由 0.80 校准为 0.85，并按文本框累计 1/8 行换行误差，减少统一过缩放
 - Page Fit 使用 OCR 原始行数与源 bbox 估算重排高度，恢复结构块间距并计入 Word 分段开销，安全预算校准为 0.90
 - 字号联合源行距与文字墨迹高度推断，文本 bbox 映射为可靠的段落缩进和页眉页脚位置，并计入 CJK 与嵌套表格的 Word 行框开销
+- Page Fit 固定预留 12pt 跨 Office 引擎分页差异空间，避免 LibreOffice 单页但 Microsoft Word 溢页
 - 原生可编辑表格、公式图像与可编辑编号、Single / Sequential Columns / Grid Flow 纳入统一规划
 - Reflow Planner 先按源图几何划分稳定分栏容器，再在容器内保持 PP-DocLayoutV3 Model Order
 - 全量验收增加内容来源完整性、DOCX 可打开、语义表格原生化和 PDF Page Budget 检查

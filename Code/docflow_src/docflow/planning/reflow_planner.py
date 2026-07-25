@@ -22,6 +22,9 @@ from docflow.model.stages import (
 )
 
 
+_CROSS_ENGINE_PAGE_RESERVE_PT = 12.0
+
+
 class ReflowPlanner:
     def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.90) -> None:
         self.page_long_edge_pt = float(page_long_edge_pt)
@@ -378,7 +381,7 @@ class ReflowPlanner:
         return spacing
 
     def _fit_scale(self, sections, elements, roles, usable_width: float, usable_height: float) -> float:
-        target = usable_height * self.word_safety_factor
+        target = max(usable_height * self.word_safety_factor - _CROSS_ENGINE_PAGE_RESERVE_PT, 1.0)
         # Word keeps a paragraph boundary between adjacent flow containers.
         section_overhead = max(len(sections) - 1, 0) * 5.0
 
