@@ -106,13 +106,32 @@ def test_page_geometry_floor_is_counted_once_across_model_order_sections() -> No
     elements = (
         _element("late-first", (100, 1000, 400, 1050), 1),
         _element("early-second", (100, 100, 400, 150), 2),
+        _element("early-right", (600, 100, 900, 150), 2.5),
         _element("separator", (100, 300, 900, 350), 3, kind="heading"),
         _element("middle-last", (100, 500, 400, 550), 4),
+        _element("right-last", (600, 500, 900, 550), 5),
     )
 
     page = ReflowPlanner(word_safety_factor=0.8).plan(_analysis(elements)).pages[0]
 
     assert page.fit_scale == pytest.approx(1.0)
+    assert [section.element_ids for section in page.sections] == [
+        ("early-second", "early-right"),
+        ("separator",),
+        ("late-first", "middle-last", "right-last"),
+    ]
+
+
+def test_single_flow_preserves_model_order_without_geometric_partitioning() -> None:
+    elements = (
+        _element("late-first", (100, 1000, 900, 1050), 1),
+        _element("early-second", (100, 100, 900, 150), 2),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+
+    assert len(page.sections) == 1
+    assert page.sections[0].element_ids == ("late-first", "early-second")
 
 
 def test_cross_column_paragraphs_do_not_merge_stable_lane_anchors() -> None:
@@ -146,3 +165,37 @@ def test_repeated_visual_blocks_form_a_grid_without_text_anchors() -> None:
 
     assert section.kind.value == "grid_flow"
     assert len(section.grid_cells) == 4
+
+
+def test_repeated_small_icon_text_pairs_form_a_local_grid() -> None:
+    elements = tuple(
+        item
+        for row, top in enumerate((100, 200, 300))
+        for item in (
+            _element(f"icon-{row}", (50, top, 100, top + 50), row * 2 + 1, text="", kind="figure_group"),
+            _element(f"text-{row}", (130, top, 700, top + 50), row * 2 + 2),
+        )
+    )
+
+    section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
+
+    assert section.kind.value == "grid_flow"
+    assert len(section.column_widths_pt) == 2
+    assert len(section.grid_cells) == 6
+
+
+def test_independent_text_and_visual_lanes_confirm_staggered_columns() -> None:
+    elements = (
+        _element("left-text-1", (50, 100, 450, 150), 1),
+        _element("left-figure-1", (50, 200, 450, 240), 2, text="", kind="figure_group"),
+        _element("left-text-2", (50, 500, 450, 550), 3),
+        _element("left-figure-2", (50, 600, 450, 640), 4, text="", kind="figure_group"),
+        _element("right-text-1", (550, 250, 950, 300), 5),
+        _element("right-figure-1", (550, 350, 950, 390), 6, text="", kind="figure_group"),
+        _element("right-text-2", (550, 650, 950, 700), 7),
+        _element("right-figure-2", (550, 750, 950, 790), 8, text="", kind="figure_group"),
+    )
+
+    section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
+
+    assert section.kind.value == "sequential_columns"

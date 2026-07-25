@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from collections import defaultdict
 from statistics import median
 
@@ -104,21 +105,12 @@ class ReflowPlanner:
     def _build_sections(self, elements, bounds: Rect, usable_width: float):
         sections = []
         placement = {}
-        run = []
         anchor_lanes = self._anchor_lanes(elements, bounds.width)
         lane_bounds = [
-            (min(item.bbox.x1 for item in lane), max(item.bbox.x2 for item in lane))
+            (median(item.bbox.x1 for item in lane), median(item.bbox.x2 for item in lane))
             for lane in anchor_lanes
         ]
-
-        def flush() -> None:
-            if not run:
-                return
-            section, columns = self._narrow_section(run, bounds, usable_width, len(sections))
-            sections.append(section)
-            placement.update(columns)
-            run.clear()
-
+        spanning = []
         for element in elements:
             overlap_count = sum(
                 1
@@ -127,15 +119,35 @@ class ReflowPlanner:
                 / max(right - left, 1.0)
                 >= 0.30
             )
-            is_spanning = overlap_count >= 2 if len(lane_bounds) >= 2 else element.bbox.width / max(bounds.width, 1.0) >= 0.72
+            is_spanning = overlap_count >= 2 if len(lane_bounds) >= 2 else False
             if is_spanning:
-                flush()
+                spanning.append(element)
+
+        spanning.sort(key=lambda item: ((item.bbox.y1 + item.bbox.y2) / 2.0, item.bbox.x1))
+        cuts = [(item.bbox.y1 + item.bbox.y2) / 2.0 for item in spanning]
+        bands = [[] for _ in range(len(spanning) + 1)]
+        spanning_ids = {item.element_id for item in spanning}
+        for element in elements:
+            if element.element_id not in spanning_ids:
+                center = (element.bbox.y1 + element.bbox.y2) / 2.0
+                bands[bisect_right(cuts, center)].append(element)
+
+        for index, band in enumerate(bands):
+            if band:
+                section, columns = self._narrow_section(
+                    band,
+                    bounds,
+                    usable_width,
+                    len(sections),
+                    anchor_lanes,
+                )
+                sections.append(section)
+                placement.update(columns)
+            if index < len(spanning):
+                element = spanning[index]
                 section_id = f"section_{len(sections)}"
                 sections.append(FlowSection(section_id, FlowKind.SINGLE, (element.element_id,)))
                 placement[element.element_id] = 0
-            else:
-                run.append(element)
-        flush()
         return tuple(sections), placement
 
     @staticmethod
@@ -159,26 +171,38 @@ class ReflowPlanner:
         bbox = element.payload.get("primary_bbox")
         return max(float(bbox[2]) - float(bbox[0]), 1.0) if bbox else element.bbox.width
 
-    def _narrow_section(self, elements, bounds: Rect, usable_width: float, section_index: int):
-        lanes = self._lanes(elements, bounds.width)
+    def _narrow_section(self, elements, bounds: Rect, usable_width: float, section_index: int, fallback_lanes=()):
+        lanes = self._anchor_lanes(elements, bounds.width) or list(fallback_lanes)
         section_id = f"section_{section_index}"
         if len(lanes) < 2:
             return FlowSection(section_id, FlowKind.SINGLE, tuple(item.element_id for item in elements)), {
                 item.element_id: 0 for item in elements
             }
 
-        lane_by_id = {
-            item.element_id: lane_index
-            for lane_index, lane in enumerate(lanes)
-            for item in lane
-        }
-        lane_sequence = [lane_by_id[item.element_id] for item in elements]
+        lane_bounds = [(median(item.bbox.x1 for item in lane), median(item.bbox.x2 for item in lane)) for lane in lanes]
+        placement = {}
+        for item in elements:
+            overlaps = [
+                index
+                for index, (left, right) in enumerate(lane_bounds)
+                if max(0.0, min(item.bbox.x2, right) - max(item.bbox.x1, left)) / max(right - left, 1.0) >= 0.30
+            ]
+            if overlaps:
+                placement[item.element_id] = min(overlaps)
+            else:
+                center = (item.bbox.x1 + item.bbox.x2) / 2.0
+                column = min(
+                    range(len(lane_bounds)),
+                    key=lambda index: abs(center - sum(lane_bounds[index]) / 2.0),
+                )
+                placement[item.element_id] = column
+
+        lane_sequence = [placement[item.element_id] for item in elements]
         collapsed = [lane_sequence[0]]
         for lane in lane_sequence[1:]:
             if lane != collapsed[-1]:
                 collapsed.append(lane)
-        widths = [max(item.bbox.x2 for item in lane) - min(item.bbox.x1 for item in lane) for lane in lanes]
-        lane_bounds = [(min(item.bbox.x1 for item in lane), max(item.bbox.x2 for item in lane)) for lane in lanes]
+        widths = [right - left for left, right in lane_bounds]
         gaps = [max(lane_bounds[index + 1][0] - lane_bounds[index][1], 0.0) for index in range(len(lanes) - 1)]
         gutter = (median(gaps) / max(bounds.width, 1.0) * usable_width) if gaps else 0.0
         available = max(usable_width - gutter * (len(lanes) - 1), 1.0)
@@ -192,12 +216,12 @@ class ReflowPlanner:
                 element_ids,
                 column_widths_pt=column_widths,
                 gutter_pt=gutter,
-            ), lane_by_id
+            ), placement
 
         rows = self._grid_rows(elements)
         cells = defaultdict(list)
         for item in elements:
-            cells[(rows[item.element_id], lane_by_id[item.element_id])].append(item.element_id)
+            cells[(rows[item.element_id], placement[item.element_id])].append(item.element_id)
         grid_cells = tuple(
             GridCell(row, column, tuple(ids))
             for (row, column), ids in sorted(cells.items())
@@ -209,18 +233,20 @@ class ReflowPlanner:
             column_widths_pt=column_widths,
             gutter_pt=gutter,
             grid_cells=grid_cells,
-        ), lane_by_id
+        ), placement
 
     @staticmethod
     def _anchor_lanes(elements, page_width: float):
         tolerance = page_width * 0.10
-        for kinds in ({"paragraph_group"}, {"figure_group", "table_group"}):
-            candidates = [
-                item
-                for item in elements
-                if item.kind in kinds and item.bbox.width >= page_width * 0.20
-            ]
+        candidate_sets = [
+            [item for item in elements if item.kind == "paragraph_group" and item.bbox.width >= page_width * 0.20],
+            [item for item in elements if item.kind in {"figure_group", "table_group"} and item.bbox.width >= page_width * 0.20],
+            list(elements),
+        ]
+        candidate_lanes = []
+        for candidate_index, candidates in enumerate(candidate_sets):
             if len(candidates) < 4:
+                candidate_lanes.append([])
                 continue
             lanes = []
             for item in sorted(candidates, key=lambda element: (element.bbox.x1 + element.bbox.x2) / 2.0):
@@ -235,31 +261,34 @@ class ReflowPlanner:
                 else:
                     lanes.append([item])
             lanes = [lane for lane in lanes if len(lane) >= 2]
-            lanes.sort(key=lambda lane: min(item.bbox.x1 for item in lane))
-            if 2 <= len(lanes) <= 4:
+            lanes.sort(key=lambda lane: median((item.bbox.x1 + item.bbox.x2) / 2.0 for item in lane))
+            candidate_lanes.append(lanes)
+            parallel_pairs = ReflowPlanner._parallel_lane_pairs(lanes)
+            if candidate_index < 2 and 2 <= len(lanes) <= 4 and parallel_pairs >= 1:
                 return lanes
+            if candidate_index == 2 and len(lanes) == 2 and parallel_pairs >= 2:
+                return lanes
+
+        text_lanes, visual_lanes = candidate_lanes[:2]
+        if 2 <= len(text_lanes) <= 4 and len(text_lanes) == len(visual_lanes):
+            text_centers = [median((item.bbox.x1 + item.bbox.x2) / 2.0 for item in lane) for lane in text_lanes]
+            visual_centers = [median((item.bbox.x1 + item.bbox.x2) / 2.0 for item in lane) for lane in visual_lanes]
+            if all(abs(text - visual) <= tolerance for text, visual in zip(text_centers, visual_centers)):
+                return text_lanes
         return []
 
-    @classmethod
-    def _lanes(cls, elements, page_width: float):
-        lanes = cls._anchor_lanes(elements, page_width)
-        if not lanes:
-            return [list(elements)]
-        anchored = {item.element_id for lane in lanes for item in lane}
-        for item in elements:
-            if item.element_id in anchored:
-                continue
-            center = (item.bbox.x1 + item.bbox.x2) / 2.0
-            lane = min(
-                lanes,
-                key=lambda members: abs(
-                    center
-                    - median([(member.bbox.x1 + member.bbox.x2) / 2.0 for member in members])
-                ),
-            )
-            lane.append(item)
-        lanes.sort(key=lambda lane: min(item.bbox.x1 for item in lane))
-        return lanes
+    @staticmethod
+    def _parallel_lane_pairs(lanes) -> int:
+        return sum(
+            1
+            for left_index, left_lane in enumerate(lanes)
+            for right_lane in lanes[left_index + 1 :]
+            for left in left_lane
+            for right in right_lane
+            if max(0.0, min(left.bbox.y2, right.bbox.y2) - max(left.bbox.y1, right.bbox.y1))
+            / max(min(left.bbox.height, right.bbox.height), 1.0)
+            >= 0.30
+        )
 
     @staticmethod
     def _grid_rows(elements):
