@@ -112,7 +112,7 @@ def test_page_geometry_floor_is_counted_once_across_model_order_sections() -> No
 
     page = ReflowPlanner(word_safety_factor=0.8).plan(_analysis(elements)).pages[0]
 
-    assert page.fit_scale == pytest.approx(0.8)
+    assert page.fit_scale == pytest.approx(1.0)
 
 
 def test_cross_column_paragraphs_do_not_merge_stable_lane_anchors() -> None:

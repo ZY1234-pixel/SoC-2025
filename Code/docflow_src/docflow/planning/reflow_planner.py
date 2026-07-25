@@ -284,7 +284,8 @@ class ReflowPlanner:
         def content_height(scale: float) -> float:
             return sum(self._section_height(section, elements, roles, usable_width, scale) for section in sections)
 
-        upper = self.word_safety_factor
+        # Reserve vertical capacity without shrinking pages that already fit inside it.
+        upper = 1.0
         if content_height(upper) <= target:
             return upper
         lower = 0.0
