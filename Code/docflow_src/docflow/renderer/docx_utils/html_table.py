@@ -22,3 +22,36 @@ def get_table_dimensions(table_soup) -> tuple[int, int]:
         default=0,
     )
     return len(rows), columns
+
+
+def get_table_cell_placements(table_soup) -> list[tuple[int, int, int, int, object]]:
+    rows, columns = get_table_dimensions(table_soup)
+    occupied = [[False] * columns for _ in range(rows)]
+    placements = []
+    for row_index, row in enumerate(get_table_rows(table_soup)):
+        column_index = 0
+        for cell in get_table_columns(row):
+            while column_index < columns and occupied[row_index][column_index]:
+                column_index += 1
+            if column_index >= columns:
+                break
+            row_span = min(int(cell.get("rowspan", 1)), rows - row_index)
+            column_span = min(int(cell.get("colspan", 1)), columns - column_index)
+            placements.append((row_index, column_index, row_span, column_span, cell))
+            for target_row in range(row_index, row_index + row_span):
+                for target_column in range(column_index, column_index + column_span):
+                    occupied[target_row][target_column] = True
+            column_index += column_span
+    return placements
+
+
+def get_table_column_weights(table_soup) -> tuple[float, ...]:
+    _rows, columns = get_table_dimensions(table_soup)
+    weights = [1.0] * columns
+    for _row, column, _row_span, column_span, cell in get_table_cell_placements(table_soup):
+        text = cell.get_text(" ", strip=True)
+        units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in text)
+        demand = max(units / max(column_span, 1), 1.0)
+        for target in range(column, column + column_span):
+            weights[target] = max(weights[target], demand)
+    return tuple(weights)

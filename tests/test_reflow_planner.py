@@ -80,6 +80,36 @@ def test_planner_uses_grid_when_model_order_alternates_parallel_lanes() -> None:
     assert planned["left-1"].payload["width_fraction"] == pytest.approx(1.0)
 
 
+def test_grid_assigns_narrow_elements_by_self_coverage() -> None:
+    elements = (
+        _element("left-1", (100, 100, 350, 250), 1),
+        _element("right-1", (400, 100, 900, 250), 2),
+        _element("left-2", (100, 300, 350, 450), 3),
+        _element("right-heading", (380, 300, 470, 340), 4, kind="heading"),
+        _element("right-2", (400, 350, 900, 500), 5),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+    planned = {element.element_id: element for element in page.elements}
+
+    assert page.sections[0].kind == FlowKind.GRID
+    assert planned["right-heading"].payload["column"] == 1
+    assert planned["right-heading"].payload["space_before_pt"] == pytest.approx(50 * 841.89 / 1400)
+
+
+def test_asymmetric_sidebar_and_main_lane_use_grid() -> None:
+    elements = (
+        _element("left-late", (100, 400, 350, 500), 1),
+        _element("left-top", (100, 100, 350, 250), 2),
+        _element("right-top", (400, 100, 900, 250), 3),
+        _element("right-bottom", (400, 300, 900, 500), 4),
+    )
+
+    section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
+
+    assert section.kind == FlowKind.GRID
+
+
 def test_visual_width_uses_primary_bbox_instead_of_grouped_number_bbox() -> None:
     formula = _element(
         "formula",
@@ -108,6 +138,7 @@ def test_single_row_table_uses_body_font_and_wrap_aware_fit() -> None:
     page = ReflowPlanner().plan(_analysis((table,))).pages[0]
 
     assert page.elements[0].payload["table_font_size_pt"] == pytest.approx(10.5)
+    assert page.elements[0].payload["table_min_font_size_pt"] == pytest.approx(6.5)
     assert 0.5 < page.fit_scale < 0.85
 
 

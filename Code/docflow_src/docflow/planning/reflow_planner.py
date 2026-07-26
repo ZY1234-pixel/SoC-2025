@@ -20,6 +20,7 @@ from docflow.model.stages import (
     ReflowLayoutPlan,
     ReflowPagePlan,
 )
+from docflow.renderer.docx_utils.html_table import get_table_cell_placements, get_table_column_weights
 
 
 _CROSS_ENGINE_PAGE_RESERVE_PT = 12.0
@@ -68,6 +69,10 @@ class ReflowPlanner:
         horizontal_indents = self._horizontal_indents(body, sections, placement, container_frames, usable_width)
         vertical_spacing = self._vertical_spacing(body, sections, placement, scale)
         body_font_size = role_by_id[default_body_role].font_size_pt if default_body_role in role_by_id else 10.5
+        table_font_sizes = {
+            element.element_id: self._table_font_size(element, scale, body_font_size)
+            for element in page.elements
+        }
         planned = tuple(
             PlannedElement(
                 element.element_id,
@@ -101,7 +106,12 @@ class ReflowPlanner:
                     "source_scale": scale,
                     "page_width_px": page.width_px,
                     "page_height_px": page.height_px,
-                    "table_font_size_pt": self._table_font_size(element, scale, body_font_size),
+                    "table_font_size_pt": table_font_sizes[element.element_id],
+                    "table_min_font_size_pt": (
+                        min(table_font_sizes[element.element_id], 6.5)
+                        if table_font_sizes[element.element_id] is not None
+                        else None
+                    ),
                 },
             )
             for element in page.elements
@@ -238,7 +248,9 @@ class ReflowPlanner:
             overlaps = [
                 index
                 for index, (left, right) in enumerate(lane_bounds)
-                if max(0.0, min(item.bbox.x2, right) - max(item.bbox.x1, left)) / max(right - left, 1.0) >= 0.30
+                if max(0.0, min(item.bbox.x2, right) - max(item.bbox.x1, left))
+                / max(min(item.bbox.width, right - left), 1.0)
+                >= 0.30
             ]
             if overlaps:
                 placement[item.element_id] = min(overlaps)
@@ -262,7 +274,8 @@ class ReflowPlanner:
         column_widths = tuple(width / max(sum(widths), 1.0) * available for width in widths)
         element_ids = tuple(item.element_id for item in elements)
 
-        if collapsed == sorted(set(collapsed)) and len(collapsed) == len(lanes):
+        balanced_columns = max(widths) <= min(widths) * 1.5
+        if collapsed == sorted(set(collapsed)) and len(collapsed) == len(lanes) and balanced_columns:
             return FlowSection(
                 section_id,
                 FlowKind.SEQUENTIAL_COLUMNS,
@@ -433,19 +446,22 @@ class ReflowPlanner:
         spacing = float(element.payload.get("space_before_pt", 0.0)) * fit_scale
         if element.kind == "table_group" and element.payload.get("html"):
             soup = BeautifulSoup(str(element.payload["html"]), "html.parser")
-            rows = soup.find_all("tr")
-            columns = max(
-                (sum(max(int(cell.get("colspan", 1)), 1) for cell in row.find_all(["td", "th"], recursive=False)) for row in rows),
-                default=1,
-            )
+            table = soup.find("table")
+            rows = table.find_all("tr") if table else []
+            weights = get_table_column_weights(table) if table else (1.0,)
             base_size = float(element.payload.get("table_font_size_pt") or (role.font_size_pt if role else 10.5))
-            font_size = max(round(base_size * fit_scale * 2) / 2.0, 0.5)
+            font_size = max(
+                round(base_size * fit_scale * 2) / 2.0,
+                float(element.payload.get("table_min_font_size_pt", 0.5)),
+            )
             height = 0.0
-            for row in rows:
+            placements = get_table_cell_placements(table) if table else []
+            for row_index, _row in enumerate(rows):
                 row_height = font_size * 1.2
-                for cell in row.find_all(["td", "th"], recursive=False):
-                    span = max(int(cell.get("colspan", 1)), 1)
-                    cell_width = width * span / columns
+                for _source_row, column, _row_span, span, cell in placements:
+                    if _source_row != row_index:
+                        continue
+                    cell_width = width * sum(weights[column : column + span]) / max(sum(weights), 1.0)
                     units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in cell.get_text(" ", strip=True))
                     lines = max(1, math.ceil(units * font_size / max(cell_width, 1.0)))
                     row_height = max(row_height, lines * font_size * 1.2)
@@ -467,13 +483,13 @@ class ReflowPlanner:
             if source_lines:
                 source_bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
                 source_width = (float(source_bbox[2]) - float(source_bbox[0])) * float(element.payload["source_scale"])
-                observed_lines = max(1, math.ceil(len(source_lines) * source_width / max(width, 1.0) * fit_scale))
+                observed_lines = max(1, round(len(source_lines) * source_width / max(width, 1.0) * fit_scale))
                 lines = observed_lines
             else:
                 lines = content_lines
             if source_lines and line_height:
                 rendered_line_height = max(float(line_height) * fit_scale, font_size * 1.05)
-                return spacing + (lines + 0.5) * rendered_line_height
+                return spacing + lines * rendered_line_height + min(font_size * 0.15, 2.0)
             paragraph_boundary = font_size if cjk_count else font_size / 4.0
             return spacing + lines * font_size * role.line_spacing * 1.05 + paragraph_boundary
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)

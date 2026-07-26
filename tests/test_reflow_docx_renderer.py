@@ -9,10 +9,12 @@ from docx.enum.table import WD_ROW_HEIGHT_RULE
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml.ns import qn
 from PIL import Image
+from bs4 import BeautifulSoup
 
 from docflow.model.stages import AnalysisPage, DocumentAnalysis, Rect, SemanticElement, TypographicRole
 from docflow.planning import ReflowPlanner
 from docflow.renderer.reflow_docx_renderer import ReflowDocxRenderer
+from docflow.renderer.docx_utils.html_table import get_table_column_weights
 
 
 def _png_base64() -> str:
@@ -20,6 +22,36 @@ def _png_base64() -> str:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def test_table_column_weights_follow_cell_content() -> None:
+    table = BeautifulSoup("<table><tr><td>近12个月最高/最低（元）</td><td>15.06/9.98</td></tr></table>", "html.parser").table
+
+    left, right = get_table_column_weights(table)
+
+    assert left > right * 2
+
+
+def test_single_line_text_is_sized_to_its_source_width() -> None:
+    role = TypographicRole("heading", "黑体", "Times New Roman", 16, 1.0)
+    element = SemanticElement(
+        "heading",
+        "heading",
+        Rect(100, 100, 350, 150),
+        1,
+        ("source",),
+        "投资评级：买入（维持）",
+        "heading",
+        payload={"lines": ("投资评级：买入（维持）",), "background_color": "#4671A6"},
+    )
+    plan = ReflowPlanner().plan(DocumentAnalysis((AnalysisPage(0, 1000, 1400, (element,)),), (role,)))
+
+    document = ReflowDocxRenderer().build(plan)
+    paragraph = document.tables[0].cell(0, 0).paragraphs[0]
+    run = paragraph.runs[0]
+
+    assert run.font.size.pt < role.font_size_pt * plan.pages[0].fit_scale
+    assert paragraph._p.pPr.find(qn("w:shd")) is not None
 
 
 def test_reflow_docx_keeps_text_tables_and_equation_numbers_editable(tmp_path) -> None:

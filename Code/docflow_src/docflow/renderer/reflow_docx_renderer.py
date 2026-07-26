@@ -16,7 +16,7 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 from docflow.model.stages import FlowKind, ReflowLayoutPlan
-from docflow.renderer.docx_utils.html_table import get_table_columns, get_table_dimensions, get_table_rows
+from docflow.renderer.docx_utils.html_table import get_table_cell_placements, get_table_column_weights, get_table_dimensions
 from docflow.renderer.docx_utils.table_fmt import clear_table_borders, set_cell_margins, set_table_col_widths
 
 
@@ -166,7 +166,7 @@ class ReflowDocxRenderer:
     def _render_element(self, container, element, roles, fit_scale: float, container_width: float) -> None:
         if element.kind in {"heading", "paragraph_group", "caption"}:
             paragraph = container.add_paragraph()
-            self._write_text(paragraph, element, roles, fit_scale)
+            self._write_text(paragraph, element, roles, fit_scale, container_width)
             return
         self._write_block_spacing(container, element, fit_scale)
         if element.kind == "figure_group":
@@ -186,19 +186,24 @@ class ReflowDocxRenderer:
             if element.payload.get("caption_position") != "before":
                 self._write_caption(container, element.payload.get("caption"), roles, fit_scale)
 
-    def _write_text(self, paragraph, element, roles, fit_scale: float) -> None:
+    def _write_text(self, paragraph, element, roles, fit_scale: float, container_width: float | None = None) -> None:
         self._write_paragraph_geometry(paragraph, element, fit_scale)
         role = roles.get(element.role_id) or self._body_role(roles)
+        font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5) if role else None
+        source_lines = element.payload.get("lines") or ()
+        if font_size and container_width and len(source_lines) == 1:
+            units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in element.text)
+            visual_width = container_width * float(element.payload.get("width_fraction", 1.0))
+            font_size = min(font_size, visual_width * 0.98 / max(units, 1.0))
         line_height = element.payload.get("line_height_pt")
         if role and line_height:
-            font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
             paragraph.paragraph_format.line_spacing = Pt(max(float(line_height) * fit_scale, font_size * 1.05))
             paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
         elif role:
             paragraph.paragraph_format.line_spacing = role.line_spacing
         run = paragraph.add_run(element.text)
-        self._style_run(run, role, fit_scale)
-        self._shade(run._element.get_or_add_rPr(), element.payload.get("background_color"))
+        self._style_run(run, role, 1.0, font_size_pt=font_size)
+        self._shade(paragraph._p.get_or_add_pPr(), element.payload.get("background_color"))
         paragraph.paragraph_format.widow_control = False
         paragraph.paragraph_format.keep_together = False
         paragraph.paragraph_format.keep_with_next = False
@@ -296,51 +301,52 @@ class ReflowDocxRenderer:
         table = container.add_table(rows=rows, cols=columns)
         table.style = "Table Grid"
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        set_table_col_widths(table, [container_width / columns] * columns)
-        occupied = [[False] * columns for _ in range(rows)]
+        column_weights = get_table_column_weights(source)
+        column_widths = [container_width * weight / sum(column_weights) for weight in column_weights]
+        set_table_col_widths(table, column_widths)
         role = roles.get(element.role_id) or self._body_role(roles)
+        base_size = float(element.payload.get("table_font_size_pt") or (role.font_size_pt if role else 10.5))
+        minimum_size = float(element.payload.get("table_min_font_size_pt", 0.5))
+        font_size = max(round(base_size * fit_scale * 2) / 2.0, minimum_size)
+        fit_size = min(
+            (
+                (sum(column_widths[column : column + span]) - 2.0)
+                * 0.96
+                / max(sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in cell.get_text(" ", strip=True)), 1.0)
+                for _row, column, _row_span, span, cell in get_table_cell_placements(source)
+            ),
+            default=font_size,
+        )
+        if fit_size >= minimum_size:
+            font_size = min(font_size, fit_size)
         row_styles = {
             int(row): (fill, text_color)
             for row, fill, text_color in element.payload.get("table_row_styles", ())
         }
-        for row_index, row_source in enumerate(get_table_rows(source)):
-            column_index = 0
-            for cell_source in get_table_columns(row_source):
-                while column_index < columns and occupied[row_index][column_index]:
-                    column_index += 1
-                if column_index >= columns:
-                    break
-                row_span = min(int(cell_source.get("rowspan", 1)), rows - row_index)
-                column_span = min(int(cell_source.get("colspan", 1)), columns - column_index)
-                for r in range(row_index, row_index + row_span):
-                    for c in range(column_index, column_index + column_span):
-                        occupied[r][c] = True
-                cell = table.cell(row_index, column_index)
-                if row_span > 1 or column_span > 1:
-                    cell = cell.merge(table.cell(row_index + row_span - 1, column_index + column_span - 1))
-                paragraph = cell.paragraphs[0]
-                paragraph.paragraph_format.space_before = Pt(0)
-                paragraph.paragraph_format.space_after = Pt(0)
-                base_size = float(element.payload.get("table_font_size_pt") or (role.font_size_pt if role else 10.5))
-                font_size = max(round(base_size * fit_scale * 2) / 2.0, 0.5)
-                paragraph.paragraph_format.line_spacing = Pt(font_size * 1.2)
-                paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
-                paragraph.paragraph_format.widow_control = False
-                paragraph.paragraph_format.keep_together = False
-                paragraph.paragraph_format.keep_with_next = False
-                set_cell_margins(cell, top=0, bottom=0, start=40, end=40)
-                run = paragraph.add_run(cell_source.get_text(" ", strip=True))
-                self._style_run(
-                    run,
-                    role,
-                    fit_scale,
-                    font_size_pt=element.payload.get("table_font_size_pt"),
-                )
-                if row_index in row_styles:
-                    fill, text_color = row_styles[row_index]
-                    self._shade(cell._tc.get_or_add_tcPr(), fill)
-                    run.font.color.rgb = RGBColor.from_string(text_color.lstrip("#"))
-                column_index += column_span
+        for row_index, column_index, row_span, column_span, cell_source in get_table_cell_placements(source):
+            cell = table.cell(row_index, column_index)
+            if row_span > 1 or column_span > 1:
+                cell = cell.merge(table.cell(row_index + row_span - 1, column_index + column_span - 1))
+            paragraph = cell.paragraphs[0]
+            paragraph.paragraph_format.space_before = Pt(0)
+            paragraph.paragraph_format.space_after = Pt(0)
+            paragraph.paragraph_format.line_spacing = Pt(font_size * 1.2)
+            paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+            paragraph.paragraph_format.widow_control = False
+            paragraph.paragraph_format.keep_together = False
+            paragraph.paragraph_format.keep_with_next = False
+            set_cell_margins(cell, top=0, bottom=0, start=20, end=20)
+            run = paragraph.add_run(cell_source.get_text(" ", strip=True))
+            self._style_run(
+                run,
+                role,
+                1.0,
+                font_size_pt=font_size,
+            )
+            if row_index in row_styles:
+                fill, text_color = row_styles[row_index]
+                self._shade(cell._tc.get_or_add_tcPr(), fill)
+                run.font.color.rgb = RGBColor.from_string(text_color.lstrip("#"))
         self._collapse_trailing_paragraph(container)
 
     @staticmethod
