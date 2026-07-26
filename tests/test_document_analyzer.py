@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from docflow.analysis import DocumentAnalyzer
-from docflow.model.stages import RecognitionEvidence, RecognitionItem, RecognitionPage, Rect, TextEvidence
+from docflow.model.stages import AnalysisPage, RecognitionEvidence, RecognitionItem, RecognitionPage, Rect, SemanticElement, TextEvidence
 
 
 def _item(identifier, category, bbox, order, text="", raw_type=None, html=None):
@@ -122,3 +122,25 @@ def test_font_size_uses_source_pitch_capped_by_ink_height() -> None:
     role = DocumentAnalyzer().analyze(RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))).roles[0]
 
     assert role.font_size_pt == 13.5
+
+
+def test_style_clustering_absorbs_an_isolated_font_prediction() -> None:
+    elements = tuple(
+        SemanticElement(
+            f"body-{index}",
+            "paragraph_group",
+            Rect(100, 100 + index * 30, 900, 100 + index * 30 + height),
+            index,
+            (f"r{index}",),
+            text="正文文本",
+            payload={"lines": ("正文文本",), "font_family": font},
+        )
+        for index, (font, height) in enumerate((("宋体", 18), ("宋体", 19), ("楷体", 18), ("宋体", 24)))
+    )
+
+    roles, assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, elements),))
+
+    assert len(roles) == 2
+    assert all(role.font_family == "宋体" for role in roles)
+    assert len({assignments[f"body-{index}"] for index in range(3)}) == 1
+    assert assignments["body-3"] != assignments["body-0"]

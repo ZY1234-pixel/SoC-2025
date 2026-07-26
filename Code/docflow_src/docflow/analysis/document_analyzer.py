@@ -464,32 +464,43 @@ class DocumentAnalyzer:
 
         clusters = {}
         assignments: dict[str, str] = {}
-        for element, size, base, font, color in sorted(samples, key=lambda item: (item[2], item[3], item[4], item[1])):
-            groups = clusters.setdefault((base, font, color), [])
-            if not groups or abs(size - median(groups[-1]["sizes"])) > max(1.25, median(groups[-1]["sizes"]) * 0.15):
-                groups.append({"sizes": [size], "elements": [element]})
+        for element, size, base, font, color in sorted(samples, key=lambda item: (item[2], item[4], item[1])):
+            color_bucket = tuple(int(color[index : index + 2], 16) // 32 for index in (1, 3, 5))
+            groups = clusters.setdefault((base, color_bucket), [])
+            if not groups or abs(size - median(groups[-1]["sizes"])) > max(1.0, median(groups[-1]["sizes"]) * 0.08):
+                groups.append({"sizes": [size], "samples": [(element, font, color)]})
             else:
                 groups[-1]["sizes"].append(size)
-                groups[-1]["elements"].append(element)
+                groups[-1]["samples"].append((element, font, color))
 
         roles = []
         role_counts = {}
-        for (base, font, color), groups in clusters.items():
+        for (base, _color_bucket), groups in clusters.items():
             for group in groups:
+                font_counts = {}
+                for _element, font, _color in group["samples"]:
+                    font_counts[font] = font_counts.get(font, 0) + 1
+                default_font = "黑体" if base == "heading" else "宋体"
+                dominant_font = max(font_counts, key=lambda font: (font_counts[font], font == default_font, font))
+                colors = [color for _element, _font, color in group["samples"]]
+                cluster_color = "#" + "".join(
+                    f"{round(median(int(color[index : index + 2], 16) for color in colors)):02X}"
+                    for index in (1, 3, 5)
+                )
                 role_counts[base] = role_counts.get(base, 0) + 1
                 role_id = f"{base}_{role_counts[base]}"
                 roles.append(
                     TypographicRole(
                         role_id,
-                        font,
+                        dominant_font,
                         "Times New Roman",
                         median(group["sizes"]),
                         1.0,
                         bold=base == "heading",
-                        color=color,
+                        color=cluster_color,
                     )
                 )
-                for element in group["elements"]:
+                for element, _font, _color in group["samples"]:
                     assignments[element.element_id] = role_id
         return tuple(roles), assignments
 
