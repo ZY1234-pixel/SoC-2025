@@ -472,7 +472,8 @@ class ReflowPlanner:
             else:
                 lines = content_lines
             if source_lines and line_height:
-                return spacing + lines * max(float(line_height) * fit_scale, font_size * 1.05)
+                rendered_line_height = max(float(line_height) * fit_scale, font_size * 1.05)
+                return spacing + (lines + 0.5) * rendered_line_height
             paragraph_boundary = font_size if cjk_count else font_size / 4.0
             return spacing + lines * font_size * role.line_spacing * 1.05 + paragraph_boundary
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)

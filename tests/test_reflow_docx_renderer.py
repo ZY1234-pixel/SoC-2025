@@ -5,7 +5,9 @@ import io
 
 import pytest
 from docx import Document
+from docx.enum.table import WD_ROW_HEIGHT_RULE
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
+from docx.oxml.ns import qn
 from PIL import Image
 
 from docflow.model.stages import AnalysisPage, DocumentAnalysis, Rect, SemanticElement, TypographicRole
@@ -50,13 +52,12 @@ def test_reflow_docx_keeps_text_tables_and_equation_numbers_editable(tmp_path) -
 
     ReflowDocxRenderer().render(plan, str(output))
     document = Document(output)
-    text = "\n".join(paragraph.text for paragraph in document.paragraphs)
-    table_text = " ".join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
+    text = " ".join(node.text or "" for node in document.element.body.iter(qn("w:t")))
 
     assert "Editable heading" in text
-    assert "Name" in table_text and "Value" in table_text
-    assert "(7)" in table_text
-    assert len(document.tables) >= 2
+    assert "Name" in text and "Value" in text
+    assert "(7)" in text
+    assert len(document.element.body.xpath(".//w:tbl")) >= 3
     native_table = document.element.body.xpath('.//w:tbl[w:tblPr/w:tblStyle[@w:val="TableGrid"]]')[0]
     assert native_table.xpath('.//w:pPr/w:spacing[@w:lineRule="exact"]')
 
@@ -88,6 +89,22 @@ def test_reflow_docx_creates_one_unlinked_section_per_source_page(tmp_path) -> N
     assert not document.sections[1].header.is_linked_to_previous
 
 
+def test_reflow_docx_contains_each_source_page_in_an_exact_height_frame(tmp_path) -> None:
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+    element = SemanticElement("body", "paragraph_group", Rect(100, 100, 900, 1200), 1, ("r1",), text="Body", role_id="body")
+    plan = ReflowPlanner().plan(DocumentAnalysis((AnalysisPage(0, 1000, 1400, (element,)),), (role,)))
+    output = tmp_path / "page-frame.docx"
+
+    ReflowDocxRenderer().render(plan, str(output))
+    frame = Document(output).tables[0]
+    row = frame.rows[0]
+    usable_height = plan.pages[0].geometry.height_pt - plan.pages[0].geometry.margin_top_pt - plan.pages[0].geometry.margin_bottom_pt
+
+    assert row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY
+    assert row.height.pt == pytest.approx(usable_height - 2, abs=0.1)
+    assert row._tr.xpath("./w:trPr/w:cantSplit")
+
+
 def test_layout_table_gutter_preserves_planned_content_width() -> None:
     table = Document().add_table(rows=1, cols=3)
 
@@ -116,7 +133,7 @@ def test_reflow_docx_writes_planned_vertical_spacing(tmp_path) -> None:
     output = tmp_path / "spacing.docx"
 
     ReflowDocxRenderer().render(plan, str(output))
-    paragraph = next(item for item in Document(output).paragraphs if item.text == "Second")
+    paragraph = next(item for item in Document(output).tables[0].cell(0, 0).paragraphs if item.text == "Second")
 
     assert plan.pages[0].elements[1].payload["space_before_pt"] > 0
     assert paragraph.paragraph_format.space_before.pt == pytest.approx(
@@ -142,7 +159,7 @@ def test_reflow_docx_writes_source_bbox_paragraph_indents(tmp_path) -> None:
     output = tmp_path / "indents.docx"
 
     ReflowDocxRenderer().render(plan, str(output))
-    paragraph = next(item for item in Document(output).paragraphs if item.text == "Author Name")
+    paragraph = next(item for item in Document(output).tables[0].cell(0, 0).paragraphs if item.text == "Author Name")
 
     assert paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER
     assert paragraph.paragraph_format.left_indent.pt == pytest.approx(paragraph.paragraph_format.right_indent.pt, abs=0.1)
@@ -164,7 +181,7 @@ def test_reflow_docx_uses_deterministic_line_height(tmp_path) -> None:
     output = tmp_path / "source-lines.docx"
 
     ReflowDocxRenderer().render(plan, str(output))
-    paragraph = next(item for item in Document(output).paragraphs if "First line" in item.text)
+    paragraph = next(item for item in Document(output).tables[0].cell(0, 0).paragraphs if "First line" in item.text)
 
     assert plan.pages[0].elements[0].payload["line_height_pt"] == pytest.approx(20 * 841.89 / 1400)
     assert paragraph.text == "First line Second line"

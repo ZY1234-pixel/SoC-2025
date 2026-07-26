@@ -9,7 +9,7 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from docx import Document
 from docx.enum.section import WD_SECTION
-from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -27,6 +27,8 @@ _ALIGNMENT = {
     "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
 }
 
+_PAGE_FRAME_BOTTOM_RESERVE_PT = 2.0
+
 
 class ReflowDocxRenderer:
     def render(self, plan: ReflowLayoutPlan, output_path: str) -> None:
@@ -42,21 +44,50 @@ class ReflowDocxRenderer:
         roles = {role.role_id: role for role in plan.roles}
         for page_number, page in enumerate(plan.pages):
             section = document.sections[0] if page_number == 0 else document.add_section(WD_SECTION.NEW_PAGE)
+            if page_number > 0:
+                self._collapse_section_break(document.paragraphs[-1])
             self._set_page_geometry(section, page.geometry)
             elements = {element.element_id: element for element in page.elements}
             self._set_furniture_distances(section, page, elements)
             usable_width = self._usable_width(page.geometry)
             self._render_furniture(section.header, page.header_element_ids, elements, roles, page.fit_scale, usable_width)
             self._render_furniture(section.footer, page.footer_element_ids, elements, roles, page.fit_scale, usable_width)
+            body = self._add_page_frame(document, page.geometry)
             for flow in page.sections:
                 if flow.kind == FlowKind.SINGLE:
                     for identifier in flow.element_ids:
-                        self._render_element(document, elements[identifier], roles, page.fit_scale, self._usable_width(page.geometry))
+                        self._render_element(body, elements[identifier], roles, page.fit_scale, usable_width)
                 elif flow.kind == FlowKind.SEQUENTIAL_COLUMNS:
-                    self._render_columns(document, flow, elements, roles, page.fit_scale)
+                    self._render_columns(body, flow, elements, roles, page.fit_scale)
                 else:
-                    self._render_grid(document, flow, elements, roles, page.fit_scale)
+                    self._render_grid(body, flow, elements, roles, page.fit_scale)
+            self._collapse_trailing_paragraph(body)
         return document
+
+    def _add_page_frame(self, document, geometry):
+        usable_width = self._usable_width(geometry)
+        usable_height = geometry.height_pt - geometry.margin_top_pt - geometry.margin_bottom_pt
+        table = document.add_table(rows=1, cols=1)
+        self._format_layout_table(table, (usable_width,))
+        row = table.rows[0]
+        row.height = Pt(max(usable_height - _PAGE_FRAME_BOTTOM_RESERVE_PT, 1.0))
+        row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
+        row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
+        cell = row.cells[0]
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+        self._clear_container(cell)
+        return cell
+
+    @staticmethod
+    def _collapse_section_break(paragraph) -> None:
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(0)
+        paragraph.paragraph_format.line_spacing = Pt(1)
+        paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+        if not paragraph.runs:
+            paragraph.add_run()
+        for run in paragraph.runs:
+            run.font.size = Pt(1)
 
     @staticmethod
     def _set_page_geometry(section, geometry) -> None:

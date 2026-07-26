@@ -13,6 +13,8 @@
 - OCR 行高同时驱动 Page Fit 与 DOCX 固定行距，并关闭孤行、段落粘连等隐式分页规则，减少跨 Office 引擎的溢页漂移
 - 布局表格不再设置整行禁止跨页，避免 Microsoft Word 将接近页底的分栏或 Grid 容器整体推到下一页
 - 原生表格单元格使用与 Page Fit 相同的固定行距，消除 Word 与 LibreOffice 默认表格行框差异
+- 每个源页使用固定高度、不可跨页的顶层页面容器，静态 Page Fit 负责缩放，页面容器负责阻断 Word 二次分页
+- Page Fit 为每个 OCR 文本框预留半行跨引擎换行误差，文本框越碎的页面获得越多自适应缩放余量
 - 原生可编辑表格、公式图像与可编辑编号、Single / Sequential Columns / Grid Flow 纳入统一规划
 - Reflow Planner 先按源图几何划分稳定分栏容器，再在容器内保持 PP-DocLayoutV3 Model Order
 - 全量验收增加内容来源完整性、DOCX 可打开、语义表格原生化和 PDF Page Budget 检查
