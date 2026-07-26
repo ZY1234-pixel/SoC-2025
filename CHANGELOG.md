@@ -11,6 +11,7 @@
 - 字号联合源行距与文字墨迹高度推断，文本 bbox 映射为可靠的段落缩进和页眉页脚位置，并计入 CJK 与嵌套表格的 Word 行框开销
 - Page Fit 固定预留 12pt 跨 Office 引擎分页差异空间，避免 LibreOffice 单页但 Microsoft Word 溢页
 - OCR 行高同时驱动 Page Fit 与 DOCX 固定行距，并关闭孤行、段落粘连等隐式分页规则，减少跨 Office 引擎的溢页漂移
+- 布局表格不再设置整行禁止跨页，避免 Microsoft Word 将接近页底的分栏或 Grid 容器整体推到下一页
 - 原生可编辑表格、公式图像与可编辑编号、Single / Sequential Columns / Grid Flow 纳入统一规划
 - Reflow Planner 先按源图几何划分稳定分栏容器，再在容器内保持 PP-DocLayoutV3 Model Order
 - 全量验收增加内容来源完整性、DOCX 可打开、语义表格原生化和 PDF Page Budget 检查

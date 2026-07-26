@@ -317,9 +317,6 @@ class ReflowDocxRenderer:
         )
         set_table_col_widths(table, layout_widths)
         for row in table.rows:
-            tr_pr = row._tr.get_or_add_trPr()
-            cant_split = OxmlElement("w:cantSplit")
-            tr_pr.append(cant_split)
             for column, cell in enumerate(row.cells):
                 half_gutter_twips = int(max(gutter_pt, 0.0) * 10)
                 set_cell_margins(

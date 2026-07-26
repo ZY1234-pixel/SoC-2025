@@ -92,6 +92,7 @@ def test_layout_table_gutter_preserves_planned_content_width() -> None:
     ReflowDocxRenderer._format_layout_table(table, (100, 100, 100), 20)
 
     assert [cell.width.pt for cell in table.rows[0].cells] == [110, 120, 110]
+    assert not table._tbl.xpath(".//w:cantSplit")
 
 
 def test_nested_table_trailing_paragraph_is_collapsed() -> None:
