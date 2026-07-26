@@ -518,11 +518,11 @@ class ReflowPlanner:
         element_center = (element.bbox.x1 + element.bbox.x2) / 2.0
         centered = abs(element_center - (left + right) / 2.0) <= width * 0.04
         source_lines = element.payload.get("lines") or ()
-        if centered and (element.kind == "heading" or element.bbox.width <= width * 0.75 or (len(source_lines) <= 2 and len(element.text) <= 300)):
+        if centered and (element.kind == "heading" or element.bbox.width <= width * 0.75):
             return "center"
         if element.bbox.x2 >= right - width * 0.03 and element.bbox.x1 > left + width * 0.25 and len(source_lines) <= 2:
             return "right"
-        return "justify" if element.kind == "paragraph_group" and len(element.text) >= 40 else "left"
+        return "justify" if element.kind == "paragraph_group" and len(source_lines) >= 3 and len(element.text) >= 40 else "left"
 
     @staticmethod
     def _first_line_indent(element, source_scale: float) -> float:

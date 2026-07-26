@@ -191,6 +191,20 @@ def test_planner_maps_narrow_centered_text_bbox_to_paragraph_indents() -> None:
     assert planned.payload["left_indent_pt"] > 0
 
 
+def test_wide_two_line_paragraph_is_left_aligned() -> None:
+    element = _element(
+        "risk",
+        (100, 100, 900, 220),
+        1,
+        "Risk statement " * 10,
+        payload={"lines": ("first", "second")},
+    )
+
+    planned = ReflowPlanner().plan(_analysis((element,))).pages[0].elements[0]
+
+    assert planned.payload["alignment"] == "left"
+
+
 def test_single_flow_multiline_paragraph_does_not_use_bbox_as_column_width() -> None:
     element = _element(
         "body",

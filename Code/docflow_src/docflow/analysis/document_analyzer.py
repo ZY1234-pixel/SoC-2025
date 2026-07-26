@@ -462,6 +462,34 @@ class DocumentAnalyzer:
                 color = element.payload.get("text_color") or "#000000"
                 samples.append((element, raw_size, base, font, color))
 
+        paragraph_sizes = {}
+        for element, size, base, _font, color in samples:
+            lines = element.payload.get("lines") or ()
+            if base == "body" and element.kind == "paragraph_group" and len(lines) >= 2 and len(element.text) >= 40:
+                color_bucket = tuple(int(color[index : index + 2], 16) // 32 for index in (1, 3, 5))
+                paragraph_sizes.setdefault((base, color_bucket), []).append(size)
+        paragraph_consensus = {}
+        for key, sizes in paragraph_sizes.items():
+            center = median(sizes)
+            support = sum(abs(size - center) <= max(1.0, center * 0.08) for size in sizes)
+            if len(sizes) >= 3 and support * 2 > len(sizes):
+                paragraph_consensus[key] = center
+        samples = [
+            (
+                element,
+                paragraph_consensus.get(
+                    (base, tuple(int(color[index : index + 2], 16) // 32 for index in (1, 3, 5))),
+                    size,
+                )
+                if base == "body" and element.kind == "paragraph_group" and len(element.payload.get("lines") or ()) >= 2 and len(element.text) >= 40
+                else size,
+                base,
+                font,
+                color,
+            )
+            for element, size, base, font, color in samples
+        ]
+
         clusters = {}
         assignments: dict[str, str] = {}
         font_votes = {}

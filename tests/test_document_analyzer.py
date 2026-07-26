@@ -170,3 +170,27 @@ def test_style_clustering_uses_strong_document_font_consensus_across_visual_role
     roles, _assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, elements),))
 
     assert all(role.font_family == "楷体" for role in roles)
+
+
+def test_style_clustering_absorbs_a_noisy_long_paragraph_size() -> None:
+    elements = tuple(
+        SemanticElement(
+            f"body-{index}",
+            "paragraph_group",
+            Rect(100, 100 + index * 100, 900, 169 + index * 100),
+            index,
+            (f"r{index}",),
+            text="正文段落内容" * 10,
+            payload={
+                "lines": ("第一行", "第二行", "第三行"),
+                "line_heights_px": (line_height,) * 3,
+            },
+        )
+        for index, line_height in enumerate((23, 23, 15, 23))
+    )
+
+    roles, assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, elements),))
+
+    assert len(roles) == 1
+    assert roles[0].font_size_pt == 13.0
+    assert len(set(assignments.values())) == 1
