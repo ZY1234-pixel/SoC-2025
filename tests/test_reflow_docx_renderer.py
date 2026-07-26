@@ -54,6 +54,22 @@ def test_single_line_text_is_sized_to_its_source_width() -> None:
     assert paragraph._p.pPr.find(qn("w:shd")) is not None
 
 
+def test_sparse_grid_keeps_valid_empty_cells() -> None:
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+    elements = (
+        SemanticElement("top-left", "paragraph_group", Rect(0, 0, 400, 200), 1, ("a",), "A", "body"),
+        SemanticElement("bottom-right", "paragraph_group", Rect(600, 300, 1000, 500), 2, ("b",), "B", "body"),
+        SemanticElement("top-right", "paragraph_group", Rect(600, 0, 1000, 200), 3, ("c",), "C", "body"),
+        SemanticElement("bottom-left", "paragraph_group", Rect(0, 600, 400, 800), 4, ("d",), "D", "body"),
+    )
+    plan = ReflowPlanner().plan(DocumentAnalysis((AnalysisPage(0, 1000, 1400, elements),), (role,)))
+
+    document = ReflowDocxRenderer().build(plan)
+    grid = document.tables[0].cell(0, 0).tables[0]
+
+    assert all(cell.paragraphs or cell.tables for row in grid.rows for cell in row.cells)
+
+
 def test_reflow_docx_keeps_text_tables_and_equation_numbers_editable(tmp_path) -> None:
     roles = (
         TypographicRole("heading", "黑体", "Times New Roman", 18, 1.0, bold=True),

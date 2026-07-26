@@ -139,15 +139,16 @@ class ReflowPlanner:
         placement = {}
         anchor_lanes = self._anchor_lanes(elements, bounds.width)
         lane_bounds = [
-            (median(item.bbox.x1 for item in lane), median(item.bbox.x2 for item in lane))
+            (median(self._layout_bbox(item).x1 for item in lane), median(self._layout_bbox(item).x2 for item in lane))
             for lane in anchor_lanes
         ]
         spanning = []
         for element in elements:
+            layout_bbox = self._layout_bbox(element)
             overlap_count = sum(
                 1
                 for left, right in lane_bounds
-                if max(0.0, min(element.bbox.x2, right) - max(element.bbox.x1, left))
+                if max(0.0, min(layout_bbox.x2, right) - max(layout_bbox.x1, left))
                 / max(right - left, 1.0)
                 >= 0.30
             )
@@ -193,8 +194,8 @@ class ReflowPlanner:
             for identifier in section.element_ids:
                 by_column[placement[identifier]].append(by_id[identifier])
             for members in by_column.values():
-                left = min(item.bbox.x1 for item in members)
-                right = max(item.bbox.x2 for item in members)
+                left = min(ReflowPlanner._layout_bbox(item).x1 for item in members)
+                right = max(ReflowPlanner._layout_bbox(item).x2 for item in members)
                 for item in members:
                     frames[item.element_id] = (left, right)
         return frames
@@ -215,10 +216,14 @@ class ReflowPlanner:
             source_width = max(right - left, 1.0)
             source_lines = element.payload.get("lines") or ()
             centered = abs((element.bbox.x1 + element.bbox.x2 - left - right) / 2.0) <= source_width * 0.04
+            width_fraction = element.bbox.width / source_width
+            single_flow_uses_full_width = section_kinds[element.element_id] == FlowKind.SINGLE and (
+                element.kind == "heading" or width_fraction > 0.85
+            )
             if (
                 element.kind not in {"heading", "paragraph_group"}
-                or element.bbox.width / source_width < 0.3
-                or (section_kinds[element.element_id] == FlowKind.SINGLE and (not centered or len(source_lines) > 2))
+                or width_fraction < 0.3
+                or single_flow_uses_full_width
             ):
                 result[element.element_id] = (0.0, 0.0)
                 continue
@@ -231,31 +236,47 @@ class ReflowPlanner:
 
     @staticmethod
     def _visual_width(element) -> float:
+        return ReflowPlanner._layout_bbox(element).width
+
+    @staticmethod
+    def _layout_bbox(element) -> Rect:
         bbox = element.payload.get("primary_bbox")
-        return max(float(bbox[2]) - float(bbox[0]), 1.0) if bbox else element.bbox.width
+        return Rect.from_sequence(bbox) if bbox else element.bbox
 
     def _narrow_section(self, elements, bounds: Rect, usable_width: float, section_index: int, fallback_lanes=()):
         lanes = self._anchor_lanes(elements, bounds.width) or list(fallback_lanes)
+        for rail in self._side_rail_lanes(elements, bounds):
+            rail_center = median((item.bbox.x1 + item.bbox.x2) / 2.0 for item in rail)
+            if all(
+                abs(rail_center - median((item.bbox.x1 + item.bbox.x2) / 2.0 for item in lane)) > bounds.width * 0.08
+                for lane in lanes
+            ):
+                lanes.append(rail)
+        lanes.sort(key=lambda lane: median((item.bbox.x1 + item.bbox.x2) / 2.0 for item in lane))
         section_id = f"section_{section_index}"
         if len(lanes) < 2:
             return FlowSection(section_id, FlowKind.SINGLE, tuple(item.element_id for item in elements)), {
                 item.element_id: 0 for item in elements
             }
 
-        lane_bounds = [(median(item.bbox.x1 for item in lane), median(item.bbox.x2 for item in lane)) for lane in lanes]
+        lane_bounds = [
+            (median(self._layout_bbox(item).x1 for item in lane), median(self._layout_bbox(item).x2 for item in lane))
+            for lane in lanes
+        ]
         placement = {}
         for item in elements:
+            layout_bbox = self._layout_bbox(item)
             overlaps = [
                 index
                 for index, (left, right) in enumerate(lane_bounds)
-                if max(0.0, min(item.bbox.x2, right) - max(item.bbox.x1, left))
-                / max(min(item.bbox.width, right - left), 1.0)
+                if max(0.0, min(layout_bbox.x2, right) - max(layout_bbox.x1, left))
+                / max(min(layout_bbox.width, right - left), 1.0)
                 >= 0.30
             ]
             if overlaps:
                 placement[item.element_id] = min(overlaps)
             else:
-                center = (item.bbox.x1 + item.bbox.x2) / 2.0
+                center = (layout_bbox.x1 + layout_bbox.x2) / 2.0
                 column = min(
                     range(len(lane_bounds)),
                     key=lambda index: abs(center - sum(lane_bounds[index]) / 2.0),
@@ -267,7 +288,10 @@ class ReflowPlanner:
             for index in range(len(lane_bounds))
         ]
         lane_bounds = [
-            (min(item.bbox.x1 for item in members), max(item.bbox.x2 for item in members))
+            (
+                min(self._layout_bbox(item).x1 for item in members),
+                max(self._layout_bbox(item).x2 for item in members),
+            )
             if members
             else lane_bounds[index]
             for index, members in enumerate(lane_members)
@@ -313,11 +337,49 @@ class ReflowPlanner:
         ), placement
 
     @staticmethod
+    def _side_rail_lanes(elements, bounds: Rect):
+        candidates = [
+            item
+            for item in elements
+            if item.kind == "figure_group"
+            and item.bbox.width <= bounds.width * 0.08
+            and (
+                item.bbox.x2 <= bounds.x1 + bounds.width * 0.12
+                or item.bbox.x1 >= bounds.x2 - bounds.width * 0.12
+            )
+        ]
+        groups = []
+        for item in sorted(candidates, key=lambda element: (element.bbox.x1 + element.bbox.x2) / 2.0):
+            center = (item.bbox.x1 + item.bbox.x2) / 2.0
+            target = next(
+                (
+                    group
+                    for group in groups
+                    if abs(center - median((member.bbox.x1 + member.bbox.x2) / 2.0 for member in group)) <= bounds.width * 0.03
+                ),
+                None,
+            )
+            if target is None:
+                groups.append([item])
+            else:
+                target.append(item)
+        return [
+            group
+            for group in groups
+            if len(group) >= 2 and sum(item.bbox.height for item in group) >= bounds.height * 0.30
+        ]
+
+    @staticmethod
     def _anchor_lanes(elements, page_width: float):
         tolerance = page_width * 0.10
         candidate_sets = [
             [item for item in elements if item.kind == "paragraph_group" and item.bbox.width >= page_width * 0.20],
-            [item for item in elements if item.kind in {"figure_group", "table_group"} and item.bbox.width >= page_width * 0.20],
+            [
+                item
+                for item in elements
+                if item.kind in {"figure_group", "table_group"}
+                and ReflowPlanner._layout_bbox(item).width >= page_width * 0.20
+            ],
             list(elements),
         ]
         candidate_lanes = []
@@ -326,19 +388,40 @@ class ReflowPlanner:
                 candidate_lanes.append([])
                 continue
             lanes = []
-            for item in sorted(candidates, key=lambda element: (element.bbox.x1 + element.bbox.x2) / 2.0):
-                center = (item.bbox.x1 + item.bbox.x2) / 2.0
+            for item in sorted(
+                candidates,
+                key=lambda element: (ReflowPlanner._layout_bbox(element).x1 + ReflowPlanner._layout_bbox(element).x2) / 2.0,
+            ):
+                bbox = ReflowPlanner._layout_bbox(item)
+                center = (bbox.x1 + bbox.x2) / 2.0
                 best = min(
                     range(len(lanes)),
-                    key=lambda index: abs(center - median((member.bbox.x1 + member.bbox.x2) / 2.0 for member in lanes[index])),
+                    key=lambda index: abs(
+                        center
+                        - median(
+                            (ReflowPlanner._layout_bbox(member).x1 + ReflowPlanner._layout_bbox(member).x2) / 2.0
+                            for member in lanes[index]
+                        )
+                    ),
                     default=None,
                 )
-                if best is not None and abs(center - median((member.bbox.x1 + member.bbox.x2) / 2.0 for member in lanes[best])) <= tolerance:
+                if best is not None and abs(
+                    center
+                    - median(
+                        (ReflowPlanner._layout_bbox(member).x1 + ReflowPlanner._layout_bbox(member).x2) / 2.0
+                        for member in lanes[best]
+                    )
+                ) <= tolerance:
                     lanes[best].append(item)
                 else:
                     lanes.append([item])
             lanes = [lane for lane in lanes if len(lane) >= 2]
-            lanes.sort(key=lambda lane: median((item.bbox.x1 + item.bbox.x2) / 2.0 for item in lane))
+            lanes.sort(
+                key=lambda lane: median(
+                    (ReflowPlanner._layout_bbox(item).x1 + ReflowPlanner._layout_bbox(item).x2) / 2.0
+                    for item in lane
+                )
+            )
             candidate_lanes.append(lanes)
             parallel_pairs = ReflowPlanner._parallel_lane_pairs(lanes)
             if candidate_index < 2 and 2 <= len(lanes) <= 4 and parallel_pairs >= 1:
@@ -348,8 +431,14 @@ class ReflowPlanner:
 
         text_lanes, visual_lanes = candidate_lanes[:2]
         if 2 <= len(text_lanes) <= 4 and len(text_lanes) == len(visual_lanes):
-            text_centers = [median((item.bbox.x1 + item.bbox.x2) / 2.0 for item in lane) for lane in text_lanes]
-            visual_centers = [median((item.bbox.x1 + item.bbox.x2) / 2.0 for item in lane) for lane in visual_lanes]
+            text_centers = [
+                median((ReflowPlanner._layout_bbox(item).x1 + ReflowPlanner._layout_bbox(item).x2) / 2.0 for item in lane)
+                for lane in text_lanes
+            ]
+            visual_centers = [
+                median((ReflowPlanner._layout_bbox(item).x1 + ReflowPlanner._layout_bbox(item).x2) / 2.0 for item in lane)
+                for lane in visual_lanes
+            ]
             if all(abs(text - visual) <= tolerance for text, visual in zip(text_centers, visual_centers)):
                 return text_lanes
         return []
@@ -371,16 +460,20 @@ class ReflowPlanner:
     def _grid_rows(elements):
         rows = []
         result = {}
-        for item in sorted(elements, key=lambda element: (element.bbox.y1, element.bbox.x1)):
+        for item in sorted(
+            elements,
+            key=lambda element: (ReflowPlanner._layout_bbox(element).y1, ReflowPlanner._layout_bbox(element).x1),
+        ):
+            bbox = ReflowPlanner._layout_bbox(item)
             row = next(
-                (index for index, bottom in enumerate(rows) if item.bbox.y1 <= bottom),
+                (index for index, bottom in enumerate(rows) if bbox.y1 <= bottom),
                 None,
             )
             if row is None:
                 row = len(rows)
-                rows.append(item.bbox.y2)
+                rows.append(bbox.y2)
             else:
-                rows[row] = max(rows[row], item.bbox.y2)
+                rows[row] = max(rows[row], bbox.y2)
             result[item.element_id] = row
         return result
 
@@ -495,7 +588,7 @@ class ReflowPlanner:
                 source_bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
                 source_width = (float(source_bbox[2]) - float(source_bbox[0])) * float(element.payload["source_scale"])
                 observed_lines = max(1, round(len(source_lines) * source_width / max(width, 1.0) * fit_scale))
-                lines = observed_lines
+                lines = max(observed_lines, content_lines)
             else:
                 lines = content_lines
             if source_lines and line_height:

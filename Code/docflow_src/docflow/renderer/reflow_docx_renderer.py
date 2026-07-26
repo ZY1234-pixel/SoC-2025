@@ -162,6 +162,11 @@ class ReflowDocxRenderer:
             cell = table.cell(grid_cell.row, grid_cell.column)
             for identifier in grid_cell.element_ids:
                 self._render_element(cell, elements[identifier], roles, fit_scale, flow.column_widths_pt[grid_cell.column])
+        for row in table.rows:
+            for cell in row.cells:
+                if not cell.paragraphs and not cell.tables:
+                    cell.add_paragraph()
+                    self._collapse_trailing_paragraph(cell)
 
     def _render_element(self, container, element, roles, fit_scale: float, container_width: float) -> None:
         if element.kind in {"heading", "paragraph_group", "caption"}:

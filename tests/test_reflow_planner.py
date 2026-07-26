@@ -126,6 +126,22 @@ def test_column_geometry_uses_all_assigned_elements_after_anchor_detection() -> 
     assert section.column_widths_pt[0] > 180
 
 
+def test_repeated_edge_rails_form_an_independent_grid_lane() -> None:
+    elements = (
+        _element("rail-top", (20, 50, 70, 300), 1, text="", kind="figure_group"),
+        _element("rail-bottom", (20, 350, 70, 1050), 2, text="", kind="figure_group"),
+        _element("main-left-1", (120, 100, 600, 300), 3),
+        _element("main-right-1", (650, 100, 950, 300), 4),
+        _element("main-left-2", (120, 400, 600, 700), 5),
+        _element("main-right-2", (650, 400, 950, 700), 6),
+    )
+
+    section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
+
+    assert section.kind == FlowKind.GRID
+    assert len(section.column_widths_pt) == 3
+
+
 def test_visual_width_uses_primary_bbox_instead_of_grouped_number_bbox() -> None:
     formula = _element(
         "formula",
@@ -139,6 +155,30 @@ def test_visual_width_uses_primary_bbox_instead_of_grouped_number_bbox() -> None
     planned = ReflowPlanner().plan(_analysis((formula,))).pages[0].elements[0]
 
     assert planned.payload["width_fraction"] == pytest.approx(0.25)
+
+
+def test_primary_bbox_keeps_parallel_visuals_in_the_same_grid_row() -> None:
+    elements = (
+        _element("left-1", (100, 100, 450, 250), 1, text="", kind="figure_group"),
+        _element("right-1", (550, 100, 900, 250), 2, text="", kind="figure_group"),
+        _element(
+            "left-2",
+            (100, 300, 700, 450),
+            3,
+            text="",
+            kind="figure_group",
+            payload={"primary_bbox": (100, 300, 450, 450)},
+        ),
+        _element("right-2", (550, 300, 900, 450), 4, text="", kind="table_group"),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+    sections = page.sections
+
+    assert len(sections) == 1
+    assert sections[0].kind == FlowKind.GRID
+    assert {(cell.row, cell.column) for cell in sections[0].grid_cells} == {(0, 0), (0, 1), (1, 0), (1, 1)}
+    assert page.elements[0].payload["width_fraction"] == pytest.approx(1.0)
 
 
 def test_single_row_table_uses_body_font_and_wrap_aware_fit() -> None:
@@ -220,6 +260,22 @@ def test_single_flow_multiline_paragraph_does_not_use_bbox_as_column_width() -> 
     assert planned.payload["right_indent_pt"] == 0
 
 
+def test_single_flow_preserves_substantial_inset_paragraph_width() -> None:
+    anchor = _element("figure", (100, 100, 900, 300), 1, text="", kind="figure_group")
+    paragraph = _element(
+        "body",
+        (300, 400, 900, 700),
+        2,
+        "Body text " * 20,
+        payload={"lines": ("one", "two", "three", "four")},
+    )
+
+    planned = ReflowPlanner().plan(_analysis((anchor, paragraph))).pages[0].elements[1]
+
+    assert planned.payload["left_indent_pt"] > 0
+    assert planned.payload["right_indent_pt"] == 0
+
+
 def test_single_flow_off_center_heading_does_not_use_bbox_as_text_width() -> None:
     heading = _element("sidebar", (100, 100, 500, 160), 1, "Sidebar", kind="heading", payload={"lines": ("Sidebar",)})
     anchor = _element("anchor", (100, 200, 900, 260), 2, "Anchor", kind="heading")
@@ -238,6 +294,16 @@ def test_page_fit_uses_observed_source_lines_as_a_lower_bound() -> None:
     estimated = ReflowPlanner().plan(_analysis((_element("estimated", (100, 100, 900, 1200), 1, text),))).pages[0]
 
     assert observed.fit_scale < estimated.fit_scale
+
+
+def test_page_fit_does_not_trust_underreported_source_lines_over_text_width() -> None:
+    text = "x" * 1760
+    estimated = ReflowPlanner().plan(_analysis((_element("estimated", (100, 100, 900, 1200), 1, text),))).pages[0]
+    underreported = ReflowPlanner().plan(
+        _analysis((_element("observed", (100, 100, 900, 1200), 1, text, payload={"lines": ("one",)}),))
+    ).pages[0]
+
+    assert underreported.fit_scale <= estimated.fit_scale
 
 
 def test_page_fit_reserves_word_flow_section_boundaries() -> None:
