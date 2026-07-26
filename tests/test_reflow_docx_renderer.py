@@ -106,6 +106,7 @@ def test_reflow_docx_contains_each_source_page_in_an_exact_height_frame(tmp_path
     assert row._tr.xpath("./w:trPr/w:cantSplit")
     assert document.paragraphs[-1].paragraph_format.line_spacing.pt == 1
     assert document.element.body[-2].tag == qn("w:p")
+    assert not document.element.body.xpath(".//w:sectPr/w:docGrid")
 
 
 def test_layout_table_gutter_preserves_planned_content_width() -> None:

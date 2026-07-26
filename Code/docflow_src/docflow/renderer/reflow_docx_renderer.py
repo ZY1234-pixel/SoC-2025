@@ -92,6 +92,8 @@ class ReflowDocxRenderer:
 
     @staticmethod
     def _set_page_geometry(section, geometry) -> None:
+        for grid in section._sectPr.xpath("./w:docGrid"):
+            section._sectPr.remove(grid)
         section.page_width = Pt(geometry.width_pt)
         section.page_height = Pt(geometry.height_pt)
         section.top_margin = Pt(geometry.margin_top_pt)
