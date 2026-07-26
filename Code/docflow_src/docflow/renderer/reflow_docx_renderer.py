@@ -62,6 +62,7 @@ class ReflowDocxRenderer:
                 else:
                     self._render_grid(body, flow, elements, roles, page.fit_scale)
             self._collapse_trailing_paragraph(body)
+        self._collapse_section_break(document.add_paragraph())
         return document
 
     def _add_page_frame(self, document, geometry):
