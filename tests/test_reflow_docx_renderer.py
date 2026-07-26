@@ -102,7 +102,7 @@ def test_reflow_docx_contains_each_source_page_in_an_exact_height_frame(tmp_path
     usable_height = plan.pages[0].geometry.height_pt - plan.pages[0].geometry.margin_top_pt - plan.pages[0].geometry.margin_bottom_pt
 
     assert row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY
-    assert row.height.pt == pytest.approx(usable_height - 2, abs=0.1)
+    assert row.height.pt == pytest.approx(usable_height * plan.word_safety_factor, abs=0.1)
     assert row._tr.xpath("./w:trPr/w:cantSplit")
     assert document.paragraphs[-1].paragraph_format.line_spacing.pt == 1
     assert document.element.body[-2].tag == qn("w:p")

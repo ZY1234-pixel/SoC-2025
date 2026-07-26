@@ -27,9 +27,6 @@ _ALIGNMENT = {
     "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
 }
 
-_PAGE_FRAME_BOTTOM_RESERVE_PT = 2.0
-
-
 class ReflowDocxRenderer:
     def render(self, plan: ReflowLayoutPlan, output_path: str) -> None:
         document = self.build(plan)
@@ -52,7 +49,7 @@ class ReflowDocxRenderer:
             usable_width = self._usable_width(page.geometry)
             self._render_furniture(section.header, page.header_element_ids, elements, roles, page.fit_scale, usable_width)
             self._render_furniture(section.footer, page.footer_element_ids, elements, roles, page.fit_scale, usable_width)
-            body = self._add_page_frame(document, page.geometry)
+            body = self._add_page_frame(document, page.geometry, plan.word_safety_factor)
             for flow in page.sections:
                 if flow.kind == FlowKind.SINGLE:
                     for identifier in flow.element_ids:
@@ -65,13 +62,13 @@ class ReflowDocxRenderer:
         self._collapse_section_break(document.add_paragraph())
         return document
 
-    def _add_page_frame(self, document, geometry):
+    def _add_page_frame(self, document, geometry, word_safety_factor):
         usable_width = self._usable_width(geometry)
         usable_height = geometry.height_pt - geometry.margin_top_pt - geometry.margin_bottom_pt
         table = document.add_table(rows=1, cols=1)
         self._format_layout_table(table, (usable_width,))
         row = table.rows[0]
-        row.height = Pt(max(usable_height - _PAGE_FRAME_BOTTOM_RESERVE_PT, 1.0))
+        row.height = Pt(max(usable_height * word_safety_factor, 1.0))
         row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
         row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
         cell = row.cells[0]
