@@ -57,6 +57,8 @@ def test_reflow_docx_keeps_text_tables_and_equation_numbers_editable(tmp_path) -
     assert "Name" in table_text and "Value" in table_text
     assert "(7)" in table_text
     assert len(document.tables) >= 2
+    native_table = document.element.body.xpath('.//w:tbl[w:tblPr/w:tblStyle[@w:val="TableGrid"]]')[0]
+    assert native_table.xpath('.//w:pPr/w:spacing[@w:lineRule="exact"]')
 
 
 def test_reflow_docx_creates_one_unlinked_section_per_source_page(tmp_path) -> None:

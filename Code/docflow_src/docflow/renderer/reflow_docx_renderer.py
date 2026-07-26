@@ -290,6 +290,13 @@ class ReflowDocxRenderer:
                 paragraph = cell.paragraphs[0]
                 paragraph.paragraph_format.space_before = Pt(0)
                 paragraph.paragraph_format.space_after = Pt(0)
+                base_size = float(element.payload.get("table_font_size_pt") or (role.font_size_pt if role else 10.5))
+                font_size = max(round(base_size * fit_scale * 2) / 2.0, 0.5)
+                paragraph.paragraph_format.line_spacing = Pt(font_size * 1.2)
+                paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+                paragraph.paragraph_format.widow_control = False
+                paragraph.paragraph_format.keep_together = False
+                paragraph.paragraph_format.keep_with_next = False
                 set_cell_margins(cell, top=0, bottom=0, start=40, end=40)
                 run = paragraph.add_run(cell_source.get_text(" ", strip=True))
                 self._style_run(
