@@ -262,6 +262,17 @@ class ReflowPlanner:
                 )
                 placement[item.element_id] = column
 
+        lane_members = [
+            [item for item in elements if placement[item.element_id] == index]
+            for index in range(len(lane_bounds))
+        ]
+        lane_bounds = [
+            (min(item.bbox.x1 for item in members), max(item.bbox.x2 for item in members))
+            if members
+            else lane_bounds[index]
+            for index, members in enumerate(lane_members)
+        ]
+
         lane_sequence = [placement[item.element_id] for item in elements]
         collapsed = [lane_sequence[0]]
         for lane in lane_sequence[1:]:

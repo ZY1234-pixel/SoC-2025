@@ -110,6 +110,22 @@ def test_asymmetric_sidebar_and_main_lane_use_grid() -> None:
     assert section.kind == FlowKind.GRID
 
 
+def test_column_geometry_uses_all_assigned_elements_after_anchor_detection() -> None:
+    elements = (
+        _element("left-anchor-1", (100, 100, 350, 180), 1),
+        _element("right-anchor-1", (500, 100, 900, 180), 2),
+        _element("left-wide", (100, 250, 450, 400), 3, text="", kind="table_group"),
+        _element("right-anchor-2", (480, 250, 900, 400), 4),
+        _element("left-anchor-2", (100, 450, 350, 520), 5),
+        _element("right-anchor-3", (480, 450, 900, 520), 6),
+    )
+
+    section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
+
+    assert section.gutter_pt < 40
+    assert section.column_widths_pt[0] > 180
+
+
 def test_visual_width_uses_primary_bbox_instead_of_grouped_number_bbox() -> None:
     formula = _element(
         "formula",

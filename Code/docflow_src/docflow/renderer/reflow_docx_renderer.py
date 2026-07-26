@@ -194,7 +194,7 @@ class ReflowDocxRenderer:
         if font_size and container_width and len(source_lines) == 1:
             units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in element.text)
             visual_width = container_width * float(element.payload.get("width_fraction", 1.0))
-            font_size = min(font_size, visual_width * 0.98 / max(units, 1.0))
+            font_size = min(font_size, visual_width * 0.90 / max(units, 1.0))
         line_height = element.payload.get("line_height_pt")
         if role and line_height:
             paragraph.paragraph_format.line_spacing = Pt(max(float(line_height) * fit_scale, font_size * 1.05))

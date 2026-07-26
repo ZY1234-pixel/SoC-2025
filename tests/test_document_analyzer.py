@@ -144,3 +144,29 @@ def test_style_clustering_absorbs_an_isolated_font_prediction() -> None:
     assert all(role.font_family == "宋体" for role in roles)
     assert len({assignments[f"body-{index}"] for index in range(3)}) == 1
     assert assignments["body-3"] != assignments["body-0"]
+
+
+def test_style_clustering_uses_strong_document_font_consensus_across_visual_roles() -> None:
+    elements = tuple(
+        SemanticElement(
+            f"heading-{index}",
+            "heading",
+            Rect(100, 100 + index * 50, 900, 140 + index * 50),
+            index,
+            (f"r{index}",),
+            text="标题文本",
+            payload={
+                "lines": ("标题文本",),
+                "font_family": font,
+                "text_color": color,
+                "font_prediction": {"accepted": True, "margin": 0.9},
+            },
+        )
+        for index, (font, color) in enumerate(
+            (("楷体", "#000000"), ("楷体", "#335577"), ("楷体", "#FFFFFF"), ("仿宋", "#000000"))
+        )
+    )
+
+    roles, _assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, elements),))
+
+    assert all(role.font_family == "楷体" for role in roles)
