@@ -1,0 +1,32 @@
+# 数据集介绍
+
+7 种语言如下：
+——韩语：`hy`
+——泰语：`ty`
+——俄语：`ey`
+——保加利亚语：`bjly`
+——乌克兰语：`wkl`
+——哈萨克语：`hsk`
+——希腊语：`xl`
+
+本数据集数据集通过“text-renderer”生成，语料主要来自 Wikimedia `pages-articles` dump，共33万张，包括训练集30万张，验证集3万张。
+
+
+# 数据集格式
+
+mixed7_data_punct
+——images
+        ——train_word_xx.jpg
+        ——val_word_xx.jpg
+——single7
+        ——language.png
+——dict.txt
+——train.txt
+——val.txt
+
+
+# 数据集路径
+
+通过网盘分享的文件：mixed7_data_punct.zip
+链接: https://pan.baidu.com/s/1g6Cs-HBxVMcgjYp7xJrXZQ?pwd=khq9 提取码: khq9 
+--来自百度网盘超级会员v6的分享
