@@ -22,7 +22,12 @@ from docflow.renderer.docx_utils.html_table import (
     get_table_column_weights,
     get_table_dimensions,
 )
-from docflow.renderer.docx_utils.table_fmt import clear_table_borders, set_cell_margins, set_table_col_widths
+from docflow.renderer.docx_utils.table_fmt import (
+    clear_table_borders,
+    set_cell_margins,
+    set_horizontal_table_borders,
+    set_table_col_widths,
+)
 
 
 _ALIGNMENT = {
@@ -206,20 +211,20 @@ class ReflowDocxRenderer:
         self._write_block_spacing(container, element, fit_scale)
         if element.kind == "figure_group":
             if element.payload.get("caption_position") == "before":
-                self._write_caption(container, element.payload.get("caption"), roles, fit_scale)
+                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"))
             self._write_image(container, element, fit_scale, container_width)
             if element.payload.get("caption_position") != "before":
-                self._write_caption(container, element.payload.get("caption"), roles, fit_scale)
+                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"))
             return
         if element.kind == "equation_group":
             self._write_equation(container, element, roles, fit_scale, container_width)
             return
         if element.kind == "table_group":
             if element.payload.get("caption_position") == "before":
-                self._write_caption(container, element.payload.get("caption"), roles, fit_scale)
+                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"))
             self._write_native_table(container, element, roles, fit_scale, container_width)
             if element.payload.get("caption_position") != "before":
-                self._write_caption(container, element.payload.get("caption"), roles, fit_scale)
+                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"))
 
     def _write_text(self, paragraph, element, roles, fit_scale: float, container_width: float | None = None) -> None:
         self._write_paragraph_geometry(paragraph, element, fit_scale)
@@ -275,12 +280,12 @@ class ReflowDocxRenderer:
         paragraph.paragraph_format.space_after = Pt(max(spacing - 1.0, 0.0))
         paragraph.paragraph_format.line_spacing = Pt(1)
 
-    def _write_caption(self, container, text, roles, fit_scale: float) -> None:
+    def _write_caption(self, container, text, roles, fit_scale: float, alignment=None) -> None:
         if not text:
             return
         role = next((role for role_id, role in roles.items() if role_id.startswith("caption_")), None) or self._body_role(roles)
         paragraph = container.add_paragraph()
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.alignment = _ALIGNMENT.get(alignment, WD_ALIGN_PARAGRAPH.CENTER)
         paragraph.paragraph_format.space_before = Pt(0)
         paragraph.paragraph_format.space_after = Pt(0)
         run = paragraph.add_run(str(text))
@@ -334,7 +339,14 @@ class ReflowDocxRenderer:
         rows, columns = get_table_dimensions(source)
         rows, columns = max(rows, 1), max(columns, 1)
         table = container.add_table(rows=rows, cols=columns)
-        table.style = "Table Grid"
+        rule_style = element.payload.get("table_rule_style") or "grid"
+        if rule_style == "grid":
+            table.style = "Table Grid"
+        elif rule_style == "horizontal":
+            head = source.find("thead")
+            set_horizontal_table_borders(table, len(head.find_all("tr", recursive=False)) if head else 0)
+        else:
+            clear_table_borders(table)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         column_weights = get_table_column_weights(source)
         table_width = container_width * float(element.payload.get("width_fraction", 1.0))

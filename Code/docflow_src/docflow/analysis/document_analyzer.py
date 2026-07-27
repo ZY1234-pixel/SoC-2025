@@ -12,7 +12,7 @@ from typing import Iterable, Optional
 from bs4 import BeautifulSoup
 from PIL import Image
 
-from docflow.layout.color_inferrer import infer_crop_style, infer_table_row_fills
+from docflow.layout.color_inferrer import infer_crop_style, infer_table_row_fills, infer_table_rule_style
 from docflow.layout.font_classifier import FONT_FAMILY_BY_LABEL
 from docflow.model.stages import (
     AnalysisDiagnostic,
@@ -129,6 +129,15 @@ class DocumentAnalyzer:
             if not target_category or caption.evidence_id in consumed:
                 continue
             target = self._nearest_relation(caption, items, target_category, page.width_px, page.height_px)
+            if target is None and caption.category in _CAPTION_TARGET:
+                nearby = filter(
+                    None,
+                    (
+                        self._nearest_relation(caption, items, category, page.width_px, page.height_px)
+                        for category in ("figure", "table", "formula")
+                    ),
+                )
+                target = min(nearby, key=lambda item: self._rect_distance(caption.bbox, item.bbox), default=None)
             if target is None:
                 diagnostics.append(
                     AnalysisDiagnostic(
@@ -210,7 +219,8 @@ class DocumentAnalyzer:
                 for line in primary.text_lines
                 if line.polygon
             ),
-            "caption": " ".join(filter(None, (self._text(item) for item in captions))),
+            "caption": self._merge_caption_text(captions),
+            "caption_alignment": self._caption_alignment(primary, captions),
             "caption_position": (
                 "before"
                 if captions and min(item.bbox.y1 for item in captions) < primary.bbox.y1
@@ -243,11 +253,12 @@ class DocumentAnalyzer:
         if primary.category == "table" and primary.html:
             row_count = len(BeautifulSoup(primary.html, "html.parser").find_all("tr"))
             payload["table_row_styles"] = infer_table_row_fills(primary.image_base64, row_count)
+            payload["table_rule_style"] = infer_table_rule_style(primary.image_base64)
         return SemanticElement(
             element_id=f"p{page_index:04d}_{kind}_{primary.evidence_id}",
             kind=kind,
             bbox=self._union(item.bbox for item in related),
-            model_order=min(item.model_order for item in related),
+            model_order=primary.model_order,
             source_ids=tuple(item.evidence_id for item in related),
             text=text,
             payload=payload,
@@ -317,6 +328,37 @@ class DocumentAnalyzer:
         if re.match(r"^(?:fig(?:ure)?\.?|图)\s*\w", text):
             return "figure"
         return _CAPTION_TARGET.get(item.category)
+
+    @classmethod
+    def _merge_caption_text(cls, captions: Iterable[RecognitionItem]) -> str:
+        parts = []
+        for item in sorted(captions, key=lambda value: (value.bbox.y1, value.bbox.x1)):
+            text = cls._text(item)
+            normalized = re.sub(r"\s+", "", text).casefold()
+            if not normalized:
+                continue
+            contained = next(
+                (index for index, part in enumerate(parts) if normalized in part[0] or part[0] in normalized),
+                None,
+            )
+            if contained is None:
+                parts.append((normalized, text))
+            elif len(normalized) > len(parts[contained][0]):
+                parts[contained] = (normalized, text)
+        return " ".join(text for _normalized, text in parts)
+
+    @classmethod
+    def _caption_alignment(cls, primary: RecognitionItem, captions: Iterable[RecognitionItem]) -> str:
+        items = tuple(captions)
+        if not items:
+            return "center"
+        bbox = cls._union(item.bbox for item in items)
+        tolerance = max(primary.bbox.width * 0.08, 1.0)
+        if abs(bbox.x1 - primary.bbox.x1) <= tolerance:
+            return "left"
+        if abs(bbox.x2 - primary.bbox.x2) <= tolerance:
+            return "right"
+        return "center"
 
     def _merge_duplicates(
         self, items: Iterable[RecognitionItem]

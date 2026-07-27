@@ -44,6 +44,31 @@ def test_analyzer_groups_figure_content_and_caption_without_reordering() -> None
     assert [element.model_order for element in elements] == [1, 2, 5]
 
 
+def test_analyzer_merges_split_misclassified_table_captions_without_moving_the_table() -> None:
+    evidence = RecognitionEvidence(
+        (
+            RecognitionPage(
+                0,
+                1000,
+                1400,
+                (
+                    _item("duplicate", "text", (100, 220, 500, 245), 1, "Table 7 Results"),
+                    _item("table-six", "table", (100, 100, 900, 180), 20, html="<table><tr><td>6</td></tr></table>"),
+                    _item("label", "figure_caption", (100, 220, 180, 225), 28, "Table 7"),
+                    _item("caption", "figure_caption", (100, 228, 500, 255), 29, "Results"),
+                    _item("table-seven", "table", (100, 260, 900, 290), 30, html="<table><tr><td>7</td></tr></table>"),
+                ),
+            ),
+        )
+    )
+
+    tables = [element for element in DocumentAnalyzer().analyze(evidence).pages[0].elements if element.kind == "table_group"]
+
+    assert [element.model_order for element in tables] == [20, 30]
+    assert tables[1].payload["caption"] == "Table 7 Results"
+    assert set(tables[1].source_ids) == {"duplicate", "label", "caption", "table-seven"}
+
+
 def test_analyzer_joins_visual_lines_and_groups_editable_formula_number() -> None:
     paragraph = RecognitionItem(
         "body",

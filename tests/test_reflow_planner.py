@@ -63,6 +63,22 @@ def test_planner_uses_sequential_columns_when_model_order_finishes_each_lane() -
     assert section.element_ids == tuple(element.element_id for element in elements)
 
 
+def test_full_width_paragraphs_do_not_become_a_third_column_lane() -> None:
+    elements = (
+        _element("wide-1", (100, 50, 900, 120), 1),
+        _element("wide-2", (100, 140, 900, 210), 2),
+        _element("left-1", (100, 260, 450, 500), 3),
+        _element("left-2", (100, 520, 450, 760), 4),
+        _element("right-1", (550, 260, 900, 500), 5),
+        _element("right-2", (550, 520, 900, 760), 6),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+
+    assert [section.kind for section in page.sections] == [FlowKind.SINGLE, FlowKind.SINGLE, FlowKind.SEQUENTIAL_COLUMNS]
+    assert len(page.sections[-1].column_widths_pt) == 2
+
+
 def test_planner_uses_grid_when_model_order_alternates_parallel_lanes() -> None:
     elements = (
         _element("left-1", (100, 100, 430, 300), 1),

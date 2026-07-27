@@ -47,6 +47,29 @@ def infer_table_row_fills(image_base64: Optional[str], row_count: int) -> tuple[
     return tuple((row, *colors) for row, colors in sorted(fills.items()))
 
 
+def infer_table_rule_style(image_base64: Optional[str]) -> Optional[str]:
+    image = _decode_image(image_base64)
+    if image is None:
+        return None
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+    horizontal = cv2.morphologyEx(
+        ink,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (max(image.shape[1] // 8, 2), 1)),
+    )
+    vertical = cv2.morphologyEx(
+        ink,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(image.shape[0] // 4, 2))),
+    )
+    horizontal_rules = int(np.count_nonzero((horizontal > 0).mean(axis=1) >= 0.40))
+    vertical_rules = int(np.count_nonzero((vertical > 0).mean(axis=0) >= 0.40))
+    if vertical_rules:
+        return "grid"
+    return "horizontal" if horizontal_rules >= 2 else "borderless"
+
+
 def _infer_pixels_style(image: np.ndarray) -> Optional[CropStylePrediction]:
     pixels = image.reshape(-1, 3)
     bins = (pixels.astype(np.uint16) // 16).astype(np.uint16)

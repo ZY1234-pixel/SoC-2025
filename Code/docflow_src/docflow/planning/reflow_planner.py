@@ -150,7 +150,7 @@ class ReflowPlanner:
                 for left, right in lane_bounds
                 if max(0.0, min(layout_bbox.x2, right) - max(layout_bbox.x1, left))
                 / max(right - left, 1.0)
-                >= 0.30
+                >= 0.20
             )
             is_spanning = overlap_count == len(lane_bounds) if len(lane_bounds) >= 2 else False
             if is_spanning:
@@ -268,6 +268,9 @@ class ReflowPlanner:
         return Rect.from_sequence(bbox) if bbox else element.bbox
 
     def _narrow_section(self, elements, bounds: Rect, usable_width: float, section_index: int, fallback_lanes=()):
+        if len(elements) == 1:
+            section_id = f"section_{section_index}"
+            return FlowSection(section_id, FlowKind.SINGLE, (elements[0].element_id,)), {elements[0].element_id: 0}
         lanes = self._anchor_lanes(elements, bounds.width) or list(fallback_lanes)
         for rail in self._side_rail_lanes(elements, bounds):
             rail_center = median((item.bbox.x1 + item.bbox.x2) / 2.0 for item in rail)
@@ -443,7 +446,11 @@ class ReflowPlanner:
     def _anchor_lanes(elements, page_width: float):
         tolerance = page_width * 0.10
         candidate_sets = [
-            [item for item in elements if item.kind == "paragraph_group" and item.bbox.width >= page_width * 0.20],
+            [
+                item
+                for item in elements
+                if item.kind == "paragraph_group" and page_width * 0.20 <= item.bbox.width <= page_width * 0.60
+            ],
             [
                 item
                 for item in elements
@@ -619,6 +626,30 @@ class ReflowPlanner:
                     row = row_by_id[identifier]
                     if any(previous_row < row for previous_row in row_by_id.values()):
                         spacing[identifier] = 0.0
+        section_by_id = {
+            identifier: section_index
+            for section_index, section in enumerate(sections)
+            for identifier in section.element_ids
+        }
+        section_elements = [
+            [by_id[identifier] for identifier in section.element_ids]
+            for section in sections
+        ]
+        for current in elements:
+            section_index = section_by_id.get(current.element_id, 0)
+            if section_index <= 0:
+                continue
+            section_top = min(element.bbox.y1 for element in section_elements[section_index])
+            if current.bbox.y1 > section_top + max(current.bbox.height * 0.10, 2.0):
+                continue
+            predecessors = [
+                previous
+                for previous in section_elements[section_index - 1]
+                if previous.bbox.y2 <= current.bbox.y1
+            ]
+            if predecessors:
+                previous = max(predecessors, key=lambda element: element.bbox.y2)
+                spacing[current.element_id] = (current.bbox.y1 - previous.bbox.y2) * source_scale
         return spacing
 
     def _fit_scale(self, sections, elements, roles, usable_width: float, usable_height: float) -> float:

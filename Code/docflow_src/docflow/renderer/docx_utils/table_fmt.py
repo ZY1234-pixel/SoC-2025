@@ -41,6 +41,31 @@ def clear_table_borders(table) -> None:
             set_cell_margins(cell)
 
 
+def set_horizontal_table_borders(table, header_rows: int = 0) -> None:
+    clear_table_borders(table)
+    borders = table._tbl.tblPr.find(qn("w:tblBorders"))
+    for edge in ("top", "bottom"):
+        node = borders.find(qn(f"w:{edge}"))
+        node.set(qn("w:val"), "single")
+        node.set(qn("w:sz"), "6")
+        node.set(qn("w:color"), "000000")
+    if not header_rows:
+        return
+    for cell in table.rows[min(header_rows, len(table.rows)) - 1].cells:
+        properties = cell._element.get_or_add_tcPr()
+        borders = properties.find(qn("w:tcBorders"))
+        if borders is None:
+            borders = OxmlElement("w:tcBorders")
+            properties.append(borders)
+        bottom = borders.find(qn("w:bottom"))
+        if bottom is None:
+            bottom = OxmlElement("w:bottom")
+            borders.append(bottom)
+        bottom.set(qn("w:val"), "single")
+        bottom.set(qn("w:sz"), "6")
+        bottom.set(qn("w:color"), "000000")
+
+
 def set_table_col_widths(table, widths_pt) -> None:
     widths = [int(width * 20) for width in widths_pt]
     table_width = table._tbl.tblPr.find(qn("w:tblW"))
