@@ -128,6 +128,22 @@ def test_native_table_respects_element_width_and_sets_fixed_table_width() -> Non
     assert int(table_width.get(qn("w:w"))) == pytest.approx(75 * 20, abs=2)
 
 
+def test_native_table_uses_inferred_table_font() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={"html": "<table><tr><td>内容</td></tr></table>", "font_family": "仿宋"},
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
+
+    fonts = container.tables[0].cell(0, 0).paragraphs[0].runs[0]._r.rPr.find(qn("w:rFonts"))
+    assert fonts.get(qn("w:eastAsia")) == "仿宋"
+
+
 def test_native_table_uses_source_height_as_row_minimum() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     element = PlannedElement(
@@ -157,6 +173,21 @@ def test_heading_preserves_visual_rows_but_joins_overlapping_lines() -> None:
     )
 
     assert ReflowDocxRenderer._visual_text(element) == "2 Chapter title\nContinued"
+
+
+def test_column_layout_collapses_word_trailing_paragraph() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+    elements = {
+        "left": PlannedElement("left", "paragraph_group", "body", text="left", payload={"column": 0}),
+        "right": PlannedElement("right", "paragraph_group", "body", text="right", payload={"column": 1}),
+    }
+    flow = FlowSection("columns", FlowKind.SEQUENTIAL_COLUMNS, tuple(elements), column_widths_pt=(50, 50))
+
+    ReflowDocxRenderer()._render_columns(container, flow, elements, {"body": role}, 1.0)
+
+    spacing = container.paragraphs[-1]._p.pPr.find(qn("w:spacing"))
+    assert spacing.get(qn("w:line")) == "1"
 
 
 def test_reflow_docx_keeps_text_tables_and_equation_numbers_editable(tmp_path) -> None:

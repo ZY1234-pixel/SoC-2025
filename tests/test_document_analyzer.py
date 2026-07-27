@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import base64
+import io
+from types import SimpleNamespace
+
+from PIL import Image
+
 from docflow.analysis import DocumentAnalyzer
 from docflow.model.stages import AnalysisPage, RecognitionEvidence, RecognitionItem, RecognitionPage, Rect, SemanticElement, TextEvidence
 
@@ -100,6 +106,30 @@ def test_analyzer_joins_visual_lines_and_groups_editable_formula_number() -> Non
     assert equation_group.source_ids == ("formula", "number")
     assert equation_group.payload["number"] == "(7)"
     assert all(element.role_id for element in analysis.pages[0].elements if element.kind == "paragraph_group")
+
+
+def test_analyzer_uses_consistent_table_row_font_predictions() -> None:
+    image = Image.new("RGB", (120, 90), "white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    labels = iter(("仿宋", "宋体", "仿宋"))
+
+    class Classifier:
+        def predict_image(self, _image):
+            return SimpleNamespace(label=next(labels), confidence=0.9, margin=0.8, accepted=True)
+
+    item = RecognitionItem(
+        "table",
+        "table",
+        Rect(0, 0, 120, 90),
+        1,
+        image_base64=base64.b64encode(buffer.getvalue()).decode("ascii"),
+        html="<table><tr><td>甲</td></tr><tr><td>乙</td></tr><tr><td>丙</td></tr></table>",
+    )
+
+    style = DocumentAnalyzer(Classifier())._infer_visual_style(item)
+
+    assert style["font_family"] == "仿宋"
 
 
 def test_duplicate_semantic_element_keeps_all_evidence_provenance() -> None:
@@ -293,6 +323,26 @@ def test_style_clustering_unifies_moderate_body_size_noise() -> None:
             payload={"lines": ("第一行", "第二行", "第三行"), "line_heights_px": (height,) * 3},
         )
         for index, height in enumerate((18, 20, 22))
+    )
+
+    roles, assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, elements),))
+
+    assert len(set(assignments.values())) == 1
+    assert len(roles) == 1
+
+
+def test_style_clustering_absorbs_one_large_body_outlier() -> None:
+    elements = tuple(
+        SemanticElement(
+            f"body-{index}",
+            "paragraph_group",
+            Rect(100, 100 + index * 100, 900, 100 + index * 100 + height * 3),
+            index,
+            (f"r{index}",),
+            text="正文段落内容" * 10,
+            payload={"lines": ("第一行", "第二行", "第三行"), "line_heights_px": (height,) * 3},
+        )
+        for index, height in enumerate((22, 22, 22, 29))
     )
 
     roles, assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, elements),))

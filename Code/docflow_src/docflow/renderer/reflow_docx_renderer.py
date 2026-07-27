@@ -168,6 +168,7 @@ class ReflowDocxRenderer:
                 element = elements[identifier]
                 if int(element.payload.get("column", 0)) == column:
                     self._render_element(cell, element, roles, fit_scale, flow.column_widths_pt[column])
+        self._collapse_trailing_paragraph(container)
 
     def _render_grid(self, container, flow, elements, roles, fit_scale) -> None:
         row_count = max(cell.row + cell.row_span for cell in flow.grid_cells)
@@ -202,6 +203,7 @@ class ReflowDocxRenderer:
                 if not cell.paragraphs and not cell.tables:
                     cell.add_paragraph()
                     self._collapse_trailing_paragraph(cell)
+        self._collapse_trailing_paragraph(container)
 
     def _render_element(self, container, element, roles, fit_scale: float, container_width: float) -> None:
         if element.kind in {"heading", "paragraph_group", "caption"}:
@@ -394,6 +396,7 @@ class ReflowDocxRenderer:
                 role,
                 1.0,
                 font_size_pt=font_size,
+                font_family=element.payload.get("font_family"),
             )
             if row_index in row_styles:
                 fill, text_color = row_styles[row_index]
@@ -424,7 +427,7 @@ class ReflowDocxRenderer:
                 )
 
     @staticmethod
-    def _style_run(run, role, fit_scale: float, font_size_pt=None) -> None:
+    def _style_run(run, role, fit_scale: float, font_size_pt=None, font_family=None) -> None:
         if role is None:
             return
         run.font.name = role.western_font_family
@@ -437,7 +440,7 @@ class ReflowDocxRenderer:
         if fonts is None:
             fonts = OxmlElement("w:rFonts")
             run._element.get_or_add_rPr().insert(0, fonts)
-        fonts.set(qn("w:eastAsia"), role.font_family)
+        fonts.set(qn("w:eastAsia"), font_family or role.font_family)
 
     @staticmethod
     def _shade(properties, color) -> None:

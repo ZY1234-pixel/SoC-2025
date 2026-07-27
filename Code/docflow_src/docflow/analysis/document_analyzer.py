@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import re
+from collections import Counter
 from dataclasses import replace
 from statistics import median
 from typing import Iterable, Optional
@@ -270,24 +271,42 @@ class DocumentAnalyzer:
         )
 
     def _infer_visual_style(self, item: RecognitionItem) -> dict:
-        if item.category not in _TEXT_CATEGORIES or not item.image_base64:
+        if item.category not in _TEXT_CATEGORIES | {"table"} or not item.image_base64:
             return {}
-        style = infer_crop_style(item.image_base64)
         result = {}
-        if style is not None:
-            result["text_color"] = style.text_color
-            if style.background_color:
-                result["background_color"] = style.background_color
-        if self.font_classifier is None or not any("\u4e00" <= char <= "\u9fff" for char in self._text(item)):
+        if item.category in _TEXT_CATEGORIES:
+            style = infer_crop_style(item.image_base64)
+            if style is not None:
+                result["text_color"] = style.text_color
+                if style.background_color:
+                    result["background_color"] = style.background_color
+        content = self._text(item) or BeautifulSoup(str(item.html or ""), "html.parser").get_text()
+        if self.font_classifier is None or not any("\u4e00" <= char <= "\u9fff" for char in content):
             return result
         try:
             image = Image.open(io.BytesIO(base64.b64decode(item.image_base64))).convert("RGB")
-            prediction = self.font_classifier.predict_image(image)
+            if item.category == "table" and item.html:
+                row_count = max(len(BeautifulSoup(item.html, "html.parser").find_all("tr")), 1)
+                predictions = [
+                    self.font_classifier.predict_image(
+                        image.crop((0, round(image.height * row / row_count), image.width, round(image.height * (row + 1) / row_count)))
+                    )
+                    for row in range(row_count)
+                ]
+            else:
+                predictions = [self.font_classifier.predict_image(image)]
         except Exception:
             self.font_classifier = None
             return result
-        family = FONT_FAMILY_BY_LABEL.get(prediction.label)
-        if prediction.accepted and family:
+        accepted = [prediction for prediction in predictions if prediction.accepted and prediction.label in FONT_FAMILY_BY_LABEL]
+        votes = Counter(prediction.label for prediction in accepted)
+        label, count = votes.most_common(1)[0] if votes else (None, 0)
+        prediction = max((value for value in accepted if value.label == label), key=lambda value: value.confidence, default=predictions[0])
+        if item.category == "table" and (count < 2 or count * 2 <= len(accepted)):
+            prediction = predictions[0]
+            label = None
+        family = FONT_FAMILY_BY_LABEL.get(label or prediction.label)
+        if prediction.accepted and family and (item.category != "table" or label):
             result["font_family"] = family
         result["font_prediction"] = {
             "label": prediction.label,
@@ -542,7 +561,7 @@ class DocumentAnalyzer:
             if base == "body" and element.kind == "paragraph_group":
                 color_bucket = tuple(int(color[index : index + 2], 16) // 32 for index in (1, 3, 5))
                 local_consensus = paragraph_consensus.get((base, color_bucket))
-                if local_consensus is not None and abs(size - local_consensus) <= max(1.0, local_consensus * 0.20):
+                if local_consensus is not None and abs(size - local_consensus) <= max(1.0, local_consensus * 0.40):
                     size = local_consensus
                 if body_consensus is not None and size < body_consensus * 0.85:
                     size = body_consensus
