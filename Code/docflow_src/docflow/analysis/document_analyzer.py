@@ -214,6 +214,11 @@ class DocumentAnalyzer:
                 for line in primary.text_lines
                 if line.polygon
             ),
+            "line_tops_px": tuple(
+                min(point[1] for point in line.polygon)
+                for line in primary.text_lines
+                if line.polygon
+            ),
             "line_lefts_px": tuple(
                 min(point[0] for point in line.polygon)
                 for line in primary.text_lines
@@ -496,7 +501,7 @@ class DocumentAnalyzer:
                 source_height = element.bbox.height / line_count
                 if line_heights:
                     ink_height = median(line_heights)
-                    source_height = min(source_height, ink_height * 1.2) if source_height > 0 else ink_height
+                    source_height = ink_height if element.kind == "heading" else min(source_height, ink_height * 1.2)
                 raw_size = source_height * scale / 1.05
                 raw_size = round(max(raw_size, 1.0) * 2.0) / 2.0
                 base = "heading" if element.kind == "heading" else "caption" if element.kind == "caption" else "body"

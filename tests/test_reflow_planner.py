@@ -49,6 +49,17 @@ def test_planner_preserves_page_ratio_and_excludes_header_from_content_frame() -
     assert page.header_element_ids == ("header",)
 
 
+def test_single_flow_repairs_outlying_model_order_with_geometry() -> None:
+    elements = (
+        _element("bottom", (100, 500, 400, 600), 1),
+        _element("top", (100, 100, 900, 200), 2),
+    )
+
+    section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
+
+    assert section.element_ids == ("top", "bottom")
+
+
 def test_planner_uses_sequential_columns_when_model_order_finishes_each_lane() -> None:
     elements = (
         _element("left-1", (100, 100, 430, 300), 1),
@@ -439,6 +450,20 @@ def test_repeated_visual_blocks_form_a_grid_without_text_anchors() -> None:
 
     assert section.kind.value == "grid_flow"
     assert len(section.grid_cells) == 4
+
+
+def test_single_visual_pair_forms_a_local_grid() -> None:
+    elements = (
+        _element("intro", (100, 50, 900, 150), 1),
+        _element("image", (100, 220, 450, 500), 2, text="", kind="figure_group"),
+        _element("description", (550, 220, 900, 500), 3),
+        _element("body", (100, 550, 900, 700), 4),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+
+    assert [section.kind for section in page.sections] == [FlowKind.SINGLE, FlowKind.SEQUENTIAL_COLUMNS, FlowKind.SINGLE]
+    assert len(page.sections[1].column_widths_pt) == 2
 
 
 def test_repeated_small_icon_text_pairs_form_a_local_grid() -> None:

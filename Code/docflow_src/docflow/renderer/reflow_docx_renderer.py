@@ -241,7 +241,7 @@ class ReflowDocxRenderer:
             paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
         elif role:
             paragraph.paragraph_format.line_spacing = role.line_spacing
-        run = paragraph.add_run(element.text)
+        run = paragraph.add_run(self._visual_text(element))
         self._style_run(run, role, 1.0, font_size_pt=font_size)
         self._shade(paragraph._p.get_or_add_pPr(), element.payload.get("background_color"))
         paragraph.paragraph_format.widow_control = False
@@ -367,6 +367,10 @@ class ReflowDocxRenderer:
         )
         if fit_size >= minimum_size:
             font_size = min(font_size, fit_size)
+        row_height = max(float(element.payload.get("table_height_pt") or 0.0) * fit_scale / rows, font_size * 1.2)
+        for row in table.rows:
+            row.height = Pt(row_height)
+            row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
         row_styles = {
             int(row): (fill, text_color)
             for row, fill, text_color in element.payload.get("table_row_styles", ())
@@ -448,6 +452,20 @@ class ReflowDocxRenderer:
     @staticmethod
     def _body_role(roles):
         return next((role for role_id, role in roles.items() if role_id.startswith("body_")), next(iter(roles.values()), None))
+
+    @staticmethod
+    def _visual_text(element) -> str:
+        lines = element.payload.get("lines") or ()
+        tops = element.payload.get("line_tops_px") or ()
+        heights = element.payload.get("line_heights_px") or ()
+        if element.kind != "heading" or len(lines) < 2 or len(tops) != len(lines) or len(heights) != len(lines):
+            return element.text
+        output = str(lines[0])
+        row_bottom = float(tops[0]) + float(heights[0])
+        for line, top, height in zip(lines[1:], tops[1:], heights[1:]):
+            output += ("\n" if float(top) >= row_bottom - min(float(height), row_bottom - float(tops[0])) * 0.10 else " ") + str(line)
+            row_bottom = max(row_bottom, float(top) + float(height))
+        return output
 
     @staticmethod
     def _decode_image(value):

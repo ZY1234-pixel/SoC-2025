@@ -107,6 +107,11 @@ class ReflowPlanner:
                     "page_width_px": page.width_px,
                     "page_height_px": page.height_px,
                     "table_font_size_pt": table_font_sizes[element.element_id],
+                    "table_height_pt": (
+                        self._layout_bbox(element).height * scale
+                        if element.kind == "table_group" and element.payload.get("html")
+                        else None
+                    ),
                     "table_min_font_size_pt": (
                         min(table_font_sizes[element.element_id], 6.5)
                         if table_font_sizes[element.element_id] is not None
@@ -137,7 +142,7 @@ class ReflowPlanner:
     def _build_sections(self, elements, bounds: Rect, usable_width: float):
         sections = []
         placement = {}
-        anchor_lanes = self._anchor_lanes(elements, bounds.width)
+        anchor_lanes = self._anchor_lanes(elements, bounds.width) or self._local_visual_lanes(elements, bounds.width)
         lane_bounds = [
             (median(self._layout_bbox(item).x1 for item in lane), median(self._layout_bbox(item).x2 for item in lane))
             for lane in anchor_lanes
@@ -282,7 +287,16 @@ class ReflowPlanner:
         lanes.sort(key=lambda lane: median((item.bbox.x1 + item.bbox.x2) / 2.0 for item in lane))
         section_id = f"section_{section_index}"
         if len(lanes) < 2:
-            return FlowSection(section_id, FlowKind.SINGLE, tuple(item.element_id for item in elements)), {
+            narrow = [item for item in elements if self._layout_bbox(item).width < bounds.width * 0.60]
+            ordered = [item for item in elements if item not in narrow]
+            for item in sorted(narrow, key=lambda value: (self._layout_bbox(value).y1, self._layout_bbox(value).x1)):
+                top = self._layout_bbox(item).y1
+                index = next(
+                    (position for position, existing in enumerate(ordered) if self._layout_bbox(existing).y1 > top),
+                    len(ordered),
+                )
+                ordered.insert(index, item)
+            return FlowSection(section_id, FlowKind.SINGLE, tuple(item.element_id for item in ordered)), {
                 item.element_id: 0 for item in elements
             }
 
@@ -309,6 +323,11 @@ class ReflowPlanner:
                     key=lambda index: abs(center - sum(lane_bounds[index]) / 2.0),
                 )
                 placement[item.element_id] = column
+
+        if len(set(placement.values())) < 2:
+            return FlowSection(section_id, FlowKind.SINGLE, tuple(item.element_id for item in elements)), {
+                item.element_id: 0 for item in elements
+            }
 
         spans = {}
         for item in elements:
@@ -521,6 +540,34 @@ class ReflowPlanner:
         return []
 
     @staticmethod
+    def _local_visual_lanes(elements, page_width: float):
+        candidates = [
+            item
+            for item in elements
+            if item.kind in {"figure_group", "table_group"}
+            and page_width * 0.15 <= ReflowPlanner._layout_bbox(item).width <= page_width * 0.70
+        ]
+        pairs = []
+        for visual in candidates:
+            visual_bbox = ReflowPlanner._layout_bbox(visual)
+            for partner in elements:
+                if partner.element_id == visual.element_id:
+                    continue
+                partner_bbox = ReflowPlanner._layout_bbox(partner)
+                if not page_width * 0.15 <= partner_bbox.width <= page_width * 0.70:
+                    continue
+                vertical_overlap = max(0.0, min(visual_bbox.y2, partner_bbox.y2) - max(visual_bbox.y1, partner_bbox.y1))
+                overlap_ratio = vertical_overlap / max(min(visual_bbox.height, partner_bbox.height), 1.0)
+                horizontal_overlap = max(0.0, min(visual_bbox.x2, partner_bbox.x2) - max(visual_bbox.x1, partner_bbox.x1))
+                if overlap_ratio < 0.30 or horizontal_overlap > min(visual_bbox.width, partner_bbox.width) * 0.10:
+                    continue
+                pairs.append((overlap_ratio, visual_bbox.width + partner_bbox.width, visual, partner))
+        if not pairs:
+            return []
+        _overlap, _width, first, second = max(pairs, key=lambda value: (value[0], value[1]))
+        return [[first], [second]] if ReflowPlanner._layout_bbox(first).x1 < ReflowPlanner._layout_bbox(second).x1 else [[second], [first]]
+
+    @staticmethod
     def _parallel_lane_pairs(lanes) -> int:
         return sum(
             1
@@ -722,6 +769,7 @@ class ReflowPlanner:
                     lines = max(1, math.ceil(units * font_size / max(cell_width, 1.0)))
                     row_height = max(row_height, lines * font_size * 1.2)
                 height += row_height + 2.0
+            height = max(height, float(element.payload.get("table_height_pt") or 0.0) * fit_scale)
             return spacing + height + (10.0 * fit_scale if element.payload.get("caption") else 0.0)
         if role is not None and element.text:
             width = max(

@@ -128,6 +128,37 @@ def test_native_table_respects_element_width_and_sets_fixed_table_width() -> Non
     assert int(table_width.get(qn("w:w"))) == pytest.approx(75 * 20, abs=2)
 
 
+def test_native_table_uses_source_height_as_row_minimum() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={"html": "<table><tr><td>A</td></tr><tr><td>B</td></tr></table>", "table_height_pt": 100},
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 0.8, 100)
+
+    assert all(row.height.pt == pytest.approx(40) for row in container.tables[0].rows)
+
+
+def test_heading_preserves_visual_rows_but_joins_overlapping_lines() -> None:
+    element = PlannedElement(
+        "heading",
+        "heading",
+        "heading",
+        text="2 Chapter title Continued",
+        payload={
+            "lines": ("2", "Chapter title", "Continued"),
+            "line_tops_px": (10, 12, 40),
+            "line_heights_px": (30, 24, 20),
+        },
+    )
+
+    assert ReflowDocxRenderer._visual_text(element) == "2 Chapter title\nContinued"
+
+
 def test_reflow_docx_keeps_text_tables_and_equation_numbers_editable(tmp_path) -> None:
     roles = (
         TypographicRole("heading", "黑体", "Times New Roman", 18, 1.0, bold=True),
