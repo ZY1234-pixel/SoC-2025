@@ -162,6 +162,9 @@ class ReflowDocxRenderer:
     def _render_columns(self, container, flow, elements, roles, fit_scale) -> None:
         table = container.add_table(rows=1, cols=len(flow.column_widths_pt))
         self._format_layout_table(table, flow.column_widths_pt, flow.gutter_pt)
+        if flow.row_heights_pt:
+            table.rows[0].height = Pt(flow.row_heights_pt[0] * fit_scale)
+            table.rows[0].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
         for column, cell in enumerate(table.rows[0].cells):
             self._clear_container(cell)
             for identifier in flow.element_ids:
@@ -175,6 +178,9 @@ class ReflowDocxRenderer:
         column_count = len(flow.column_widths_pt)
         table = container.add_table(rows=row_count, cols=column_count)
         self._format_layout_table(table, flow.column_widths_pt, flow.gutter_pt)
+        for row, height in zip(table.rows, flow.row_heights_pt):
+            row.height = Pt(height * fit_scale)
+            row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
         target_cells = {}
         for grid_cell in flow.grid_cells:
             cell = table.cell(grid_cell.row, grid_cell.column)
@@ -230,6 +236,10 @@ class ReflowDocxRenderer:
 
     def _write_text(self, paragraph, element, roles, fit_scale: float, container_width: float | None = None) -> None:
         self._write_paragraph_geometry(paragraph, element, fit_scale)
+        if element.payload.get("background_color") and container_width:
+            left_indent = paragraph.paragraph_format.left_indent.pt if paragraph.paragraph_format.left_indent else 0.0
+            visual_width = container_width * float(element.payload.get("width_fraction", 1.0)) * fit_scale
+            paragraph.paragraph_format.right_indent = Pt(max(container_width - left_indent - visual_width, 0.0))
         role = roles.get(element.role_id) or self._body_role(roles)
         font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5) if role else None
         source_lines = element.payload.get("lines") or ()

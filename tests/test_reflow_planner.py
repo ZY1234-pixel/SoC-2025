@@ -72,6 +72,7 @@ def test_planner_uses_sequential_columns_when_model_order_finishes_each_lane() -
 
     assert section.kind.value == "sequential_columns"
     assert section.element_ids == tuple(element.element_id for element in elements)
+    assert section.row_heights_pt == pytest.approx((400 * 841.89 / 1400,))
 
 
 def test_full_width_paragraphs_do_not_become_a_third_column_lane() -> None:
@@ -248,6 +249,7 @@ def test_primary_bbox_keeps_parallel_visuals_in_the_same_grid_row() -> None:
     assert len(sections) == 1
     assert sections[0].kind == FlowKind.GRID
     assert {(cell.row, cell.column) for cell in sections[0].grid_cells} == {(0, 0), (0, 1), (1, 0), (1, 1)}
+    assert sections[0].row_heights_pt == pytest.approx((200 * 841.89 / 1400, 150 * 841.89 / 1400))
     assert page.elements[0].payload["width_fraction"] == pytest.approx(1.0)
 
 
@@ -376,7 +378,7 @@ def test_page_fit_does_not_trust_underreported_source_lines_over_text_width() ->
     assert underreported.fit_scale <= estimated.fit_scale
 
 
-def test_page_fit_reserves_word_flow_section_boundaries() -> None:
+def test_page_fit_does_not_charge_markup_free_single_section_boundaries() -> None:
     planner = ReflowPlanner()
     elements = tuple(PlannedElement(str(index), "paragraph_group", "body", "x" * 50) for index in range(6))
     roles = {"body": TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)}
@@ -384,7 +386,7 @@ def test_page_fit_reserves_word_flow_section_boundaries() -> None:
     split = tuple(FlowSection(str(index), FlowKind.SINGLE, (element.element_id,)) for index, element in enumerate(elements))
 
     assert planner._fit_scale(combined, elements, roles, 100, 258) == 1.0
-    assert planner._fit_scale(split, elements, roles, 100, 258) < 1.0
+    assert planner._fit_scale(split, elements, roles, 100, 258) == 1.0
 
 
 def test_page_geometry_floor_is_counted_once_across_model_order_sections() -> None:

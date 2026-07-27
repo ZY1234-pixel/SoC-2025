@@ -96,6 +96,7 @@ def test_grid_renderer_merges_column_and_row_spans() -> None:
             GridCell(0, 2, ("side",), row_span=2),
             GridCell(1, 0, ("span",), column_span=2),
         ),
+        row_heights_pt=(30, 40),
     )
     elements = {
         "span": PlannedElement("span", "paragraph_group", "body", "image area"),
@@ -107,6 +108,7 @@ def test_grid_renderer_merges_column_and_row_spans() -> None:
 
     assert container.tables[0]._tbl.xpath('.//w:gridSpan[@w:val="2"]')
     assert container.tables[0]._tbl.xpath(".//w:vMerge")
+    assert [row.height.pt for row in container.tables[0].rows] == pytest.approx((30, 40))
 
 
 def test_native_table_respects_element_width_and_sets_fixed_table_width() -> None:
@@ -314,6 +316,22 @@ def test_reflow_docx_writes_planned_vertical_spacing(tmp_path) -> None:
         plan.pages[0].elements[1].payload["space_before_pt"] * plan.pages[0].fit_scale,
         abs=0.1,
     )
+
+
+def test_background_paragraph_uses_source_width() -> None:
+    paragraph = Document().add_paragraph()
+    element = PlannedElement(
+        "label",
+        "paragraph_group",
+        "body",
+        "Label",
+        payload={"background_color": "#892549", "width_fraction": 0.25},
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_text(paragraph, element, {"body": role}, 0.8, 100)
+
+    assert paragraph.paragraph_format.right_indent.pt == pytest.approx(80)
 
 
 def test_reflow_docx_writes_source_bbox_paragraph_indents(tmp_path) -> None:

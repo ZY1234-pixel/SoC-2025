@@ -246,12 +246,18 @@ class FlowSection:
     column_widths_pt: Tuple[float, ...] = ()
     gutter_pt: float = 0.0
     grid_cells: Tuple[GridCell, ...] = ()
+    row_heights_pt: Tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "element_ids", tuple(self.element_ids))
         object.__setattr__(self, "column_widths_pt", tuple(float(value) for value in self.column_widths_pt))
         object.__setattr__(self, "grid_cells", tuple(self.grid_cells))
-        if self.gutter_pt < 0 or any(width <= 0 for width in self.column_widths_pt):
+        object.__setattr__(self, "row_heights_pt", tuple(float(value) for value in self.row_heights_pt))
+        if (
+            self.gutter_pt < 0
+            or any(width <= 0 for width in self.column_widths_pt)
+            or any(height <= 0 for height in self.row_heights_pt)
+        ):
             raise ValueError("invalid flow section dimensions")
         if self.kind == FlowKind.SEQUENTIAL_COLUMNS and len(self.column_widths_pt) < 2:
             raise ValueError("sequential columns require at least two columns")

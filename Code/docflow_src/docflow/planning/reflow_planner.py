@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from bisect import bisect_right
 from collections import defaultdict
+from dataclasses import replace
 from statistics import median
 
 from bs4 import BeautifulSoup
@@ -64,6 +65,7 @@ class ReflowPlanner:
         )
         usable_width = geometry.width_pt - geometry.margin_left_pt - geometry.margin_right_pt
         sections, placement = self._build_sections(body, bounds, usable_width)
+        sections = tuple(self._with_vertical_tracks(section, body, scale) for section in sections)
         container_frames = self._container_frames(body, sections, placement, bounds)
         container_widths = {identifier: max(right - left, 1.0) for identifier, (left, right) in container_frames.items()}
         horizontal_indents = self._horizontal_indents(body, sections, placement, container_frames, usable_width)
@@ -705,8 +707,7 @@ class ReflowPlanner:
 
     def _fit_scale(self, sections, elements, roles, usable_width: float, usable_height: float) -> float:
         target = max(usable_height * self.word_safety_factor - _CROSS_ENGINE_PAGE_RESERVE_PT, 1.0)
-        # Word keeps a paragraph boundary between adjacent flow containers.
-        section_overhead = max(len(sections) - 1, 0) * 5.0
+        section_overhead = sum(section.kind != FlowKind.SINGLE for section in sections) * 0.05
 
         def content_height(scale: float) -> float:
             return section_overhead + sum(
@@ -737,14 +738,53 @@ class ReflowPlanner:
                 element = by_id[identifier]
                 column = int(element.payload.get("column", 0))
                 totals[column] += self._element_height(element, roles, widths[column], fit_scale)
-            return max(totals, default=0.0)
-        row_heights = defaultdict(float)
+            source_height = section.row_heights_pt[0] * fit_scale if section.row_heights_pt else 0.0
+            return max(max(totals, default=0.0), source_height)
+        row_heights = defaultdict(
+            float,
+            {row: height * fit_scale for row, height in enumerate(section.row_heights_pt)},
+        )
         for cell in section.grid_cells:
             width = sum(widths[cell.column : cell.column + cell.column_span]) + section.gutter_pt * (cell.column_span - 1)
             height = sum(self._element_height(by_id[identifier], roles, width, fit_scale) for identifier in cell.element_ids)
             for row in range(cell.row, cell.row + cell.row_span):
                 row_heights[row] = max(row_heights[row], height / cell.row_span)
         return sum(row_heights.values())
+
+    def _with_vertical_tracks(self, section, elements, source_scale: float):
+        if section.kind == FlowKind.SINGLE:
+            return section
+        by_id = {element.element_id: element for element in elements}
+        boxes = sorted((by_id[identifier].bbox for identifier in section.element_ids), key=lambda box: box.y1)
+        gap_limit = median(box.height for box in boxes)
+        covered_bottom = boxes[0].y2
+        for box in boxes[1:]:
+            if box.y1 - covered_bottom > gap_limit:
+                return section
+            covered_bottom = max(covered_bottom, box.y2)
+        if section.kind == FlowKind.SEQUENTIAL_COLUMNS:
+            height = (max(box.y2 for box in boxes) - min(box.y1 for box in boxes)) * source_scale
+            return replace(section, row_heights_pt=(height,))
+
+        row_count = max(cell.row + cell.row_span for cell in section.grid_cells)
+        starts = []
+        for row in range(row_count):
+            identifiers = [
+                identifier
+                for cell in section.grid_cells
+                if cell.row == row
+                for identifier in cell.element_ids
+            ]
+            starts.append(min(by_id[identifier].bbox.y1 for identifier in identifiers) if identifiers else None)
+        bottom = max(box.y2 for box in boxes)
+        if any(value is None for value in starts) or any(left >= right for left, right in zip(starts, starts[1:])):
+            height = (bottom - min(box.y1 for box in boxes)) * source_scale / row_count
+            return replace(section, row_heights_pt=(height,) * row_count)
+        boundaries = starts + [bottom]
+        return replace(
+            section,
+            row_heights_pt=tuple((boundaries[index + 1] - boundaries[index]) * source_scale for index in range(row_count)),
+        )
 
     @staticmethod
     def _element_height(element, roles, width: float, fit_scale: float) -> float:
