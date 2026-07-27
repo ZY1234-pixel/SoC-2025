@@ -468,6 +468,22 @@ def test_single_visual_pair_forms_a_local_grid() -> None:
     assert len(page.sections[1].column_widths_pt) == 2
 
 
+def test_edge_figure_with_continuous_text_becomes_wrapped_flow() -> None:
+    elements = (
+        _element("left-1", (100, 100, 500, 180), 1),
+        _element("left-2", (100, 190, 500, 400), 2),
+        _element("image", (600, 100, 900, 400), 3, text="", kind="figure_group"),
+        _element("full-width", (100, 410, 900, 520), 4),
+    )
+
+    section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
+
+    assert section.kind == FlowKind.WRAPPED
+    assert section.floating_element_id == "image"
+    assert section.floating_side == "right"
+    assert section.element_ids == ("left-1", "left-2", "image", "full-width")
+
+
 def test_centered_heading_spans_local_visual_lanes() -> None:
     elements = (
         _element("heading", (450, 50, 550, 100), 1, kind="heading"),

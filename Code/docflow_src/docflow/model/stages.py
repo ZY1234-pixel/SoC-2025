@@ -202,6 +202,7 @@ class FlowKind(str, Enum):
     SINGLE = "single_flow"
     SEQUENTIAL_COLUMNS = "sequential_columns"
     GRID = "grid_flow"
+    WRAPPED = "wrapped_flow"
 
 
 @dataclass(frozen=True)
@@ -247,6 +248,10 @@ class FlowSection:
     gutter_pt: float = 0.0
     grid_cells: Tuple[GridCell, ...] = ()
     row_heights_pt: Tuple[float, ...] = ()
+    floating_element_id: Optional[str] = None
+    floating_width_pt: float = 0.0
+    floating_side: str = "right"
+    floating_offset_y_pt: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "element_ids", tuple(self.element_ids))
@@ -257,12 +262,20 @@ class FlowSection:
             self.gutter_pt < 0
             or any(width <= 0 for width in self.column_widths_pt)
             or any(height <= 0 for height in self.row_heights_pt)
+            or self.floating_width_pt < 0
+            or self.floating_offset_y_pt < 0
         ):
             raise ValueError("invalid flow section dimensions")
         if self.kind == FlowKind.SEQUENTIAL_COLUMNS and len(self.column_widths_pt) < 2:
             raise ValueError("sequential columns require at least two columns")
         if self.kind == FlowKind.GRID and not self.grid_cells:
             raise ValueError("grid flow requires cells")
+        if self.kind == FlowKind.WRAPPED and (
+            self.floating_element_id not in self.element_ids or self.floating_width_pt <= 0
+        ):
+            raise ValueError("wrapped flow requires floating media")
+        if self.floating_side not in {"left", "right"}:
+            raise ValueError("invalid floating side")
 
 
 @dataclass(frozen=True)

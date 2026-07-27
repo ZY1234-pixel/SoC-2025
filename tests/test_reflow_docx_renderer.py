@@ -111,6 +111,34 @@ def test_grid_renderer_merges_column_and_row_spans() -> None:
     assert [row.height.pt for row in container.tables[0].rows] == pytest.approx((30, 40))
 
 
+def test_wrapped_flow_uses_floating_editable_media_table() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    flow = FlowSection(
+        "wrapped",
+        FlowKind.WRAPPED,
+        ("body", "image"),
+        floating_element_id="image",
+        floating_width_pt=40,
+    )
+    elements = {
+        "body": PlannedElement("body", "paragraph_group", "body", "Editable body"),
+        "image": PlannedElement(
+            "image",
+            "figure_group",
+            "body",
+            payload={"image_base64": _png_base64(), "caption": "Editable caption"},
+        ),
+    }
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._render_wrapped(container, flow, elements, {"body": role}, 1.0, 100)
+
+    positioning = container.tables[0]._tbl.tblPr.find(qn("w:tblpPr"))
+    assert positioning.get(qn("w:tblpXSpec")) == "right"
+    assert container.tables[0].cell(0, 0).paragraphs[-1].text == "Editable caption"
+    assert container.paragraphs[-1].text == "Editable body"
+
+
 def test_native_table_respects_element_width_and_sets_fixed_table_width() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     element = PlannedElement(

@@ -64,6 +64,8 @@ class ReflowDocxRenderer:
                 if flow.kind == FlowKind.SINGLE:
                     for identifier in flow.element_ids:
                         self._render_element(body, elements[identifier], roles, page.fit_scale, usable_width)
+                elif flow.kind == FlowKind.WRAPPED:
+                    self._render_wrapped(body, flow, elements, roles, page.fit_scale, usable_width)
                 elif flow.kind == FlowKind.SEQUENTIAL_COLUMNS:
                     self._render_columns(body, flow, elements, roles, page.fit_scale)
                 else:
@@ -172,6 +174,53 @@ class ReflowDocxRenderer:
                 if int(element.payload.get("column", 0)) == column:
                     self._render_element(cell, element, roles, fit_scale, flow.column_widths_pt[column])
         self._collapse_trailing_paragraph(container)
+
+    def _render_wrapped(self, container, flow, elements, roles, fit_scale, container_width) -> None:
+        floating = elements[flow.floating_element_id]
+        width = flow.floating_width_pt * fit_scale
+        table = container.add_table(rows=1, cols=1)
+        self._format_layout_table(table, (width,))
+        self._float_table(
+            table,
+            flow.floating_side,
+            flow.floating_offset_y_pt * fit_scale,
+            flow.gutter_pt * fit_scale,
+        )
+        cell = table.cell(0, 0)
+        set_cell_margins(cell, top=0, bottom=0, start=0, end=0)
+        self._clear_container(cell)
+        data = self._decode_image(floating.payload.get("image_base64"))
+        if data:
+            paragraph = cell.add_paragraph()
+            paragraph.paragraph_format.space_before = Pt(0)
+            paragraph.paragraph_format.space_after = Pt(0)
+            paragraph.add_run().add_picture(io.BytesIO(data), width=Pt(max(width, 0.5)))
+        self._write_caption(
+            cell,
+            floating.payload.get("caption"),
+            roles,
+            fit_scale,
+            floating.payload.get("caption_alignment"),
+        )
+        self._collapse_trailing_paragraph(cell)
+        for identifier in flow.element_ids:
+            if identifier != flow.floating_element_id:
+                self._render_element(container, elements[identifier], roles, fit_scale, container_width)
+
+    @staticmethod
+    def _float_table(table, side: str, offset_y_pt: float, gutter_pt: float) -> None:
+        properties = table._tbl.tblPr
+        positioning = OxmlElement("w:tblpPr")
+        distance = str(round(max(gutter_pt / 2.0, 2.0) * 20))
+        positioning.set(qn("w:leftFromText"), distance)
+        positioning.set(qn("w:rightFromText"), distance)
+        positioning.set(qn("w:topFromText"), "0")
+        positioning.set(qn("w:bottomFromText"), "0")
+        positioning.set(qn("w:vertAnchor"), "text")
+        positioning.set(qn("w:horzAnchor"), "text")
+        positioning.set(qn("w:tblpXSpec"), side)
+        positioning.set(qn("w:tblpY"), str(round(offset_y_pt * 20)))
+        properties.append(positioning)
 
     def _render_grid(self, container, flow, elements, roles, fit_scale) -> None:
         row_count = max(cell.row + cell.row_span for cell in flow.grid_cells)

@@ -65,6 +65,7 @@ class ReflowPlanner:
         )
         usable_width = geometry.width_pt - geometry.margin_left_pt - geometry.margin_right_pt
         sections, placement = self._build_sections(body, bounds, usable_width)
+        sections, placement = self._promote_wrapped_media(sections, body, placement, scale)
         sections = tuple(self._with_vertical_tracks(section, body, scale) for section in sections)
         container_frames = self._container_frames(body, sections, placement, bounds)
         container_widths = {identifier: max(right - left, 1.0) for identifier, (left, right) in container_frames.items()}
@@ -195,11 +196,76 @@ class ReflowPlanner:
         return tuple(sections), placement
 
     @staticmethod
+    def _promote_wrapped_media(sections, elements, placement, source_scale: float):
+        by_id = {element.element_id: element for element in elements}
+        promoted = []
+        updated_placement = dict(placement)
+        index = 0
+        while index < len(sections):
+            section = sections[index]
+            figures = [
+                by_id[identifier]
+                for identifier in section.element_ids
+                if by_id[identifier].kind == "figure_group"
+            ]
+            text = [
+                by_id[identifier]
+                for identifier in section.element_ids
+                if by_id[identifier].kind == "paragraph_group"
+            ]
+            if (
+                section.kind not in {FlowKind.SEQUENTIAL_COLUMNS, FlowKind.GRID}
+                or len(figures) != 1
+                or len(text) < 2
+                or len(figures) + len(text) != len(section.element_ids)
+            ):
+                promoted.append(section)
+                index += 1
+                continue
+            figure = figures[0]
+            figure_column = placement[figure.element_id]
+            side = "left" if figure_column == 0 else "right"
+            if figure_column not in {0, len(section.column_widths_pt) - 1}:
+                promoted.append(section)
+                index += 1
+                continue
+            element_ids = list(section.element_ids)
+            next_index = index + 1
+            while next_index < len(sections):
+                following = sections[next_index]
+                if following.kind != FlowKind.SINGLE or any(
+                    by_id[identifier].kind != "paragraph_group" for identifier in following.element_ids
+                ):
+                    break
+                element_ids.extend(following.element_ids)
+                next_index += 1
+            text_top = min(
+                by_id[identifier].bbox.y1
+                for identifier in element_ids
+                if identifier != figure.element_id
+            )
+            promoted.append(
+                FlowSection(
+                    section.section_id,
+                    FlowKind.WRAPPED,
+                    tuple(element_ids),
+                    gutter_pt=section.gutter_pt,
+                    floating_element_id=figure.element_id,
+                    floating_width_pt=section.column_widths_pt[figure_column],
+                    floating_side=side,
+                    floating_offset_y_pt=max(figure.bbox.y1 - text_top, 0.0) * source_scale,
+                )
+            )
+            updated_placement.update((identifier, 0) for identifier in element_ids)
+            index = next_index
+        return tuple(promoted), updated_placement
+
+    @staticmethod
     def _container_frames(elements, sections, placement, bounds: Rect):
         by_id = {element.element_id: element for element in elements}
         frames = {element.element_id: (bounds.x1, bounds.x2) for element in elements}
         for section in sections:
-            if section.kind == FlowKind.SINGLE:
+            if section.kind in {FlowKind.SINGLE, FlowKind.WRAPPED}:
                 continue
             spans = {
                 identifier: cell.column_span
@@ -232,7 +298,7 @@ class ReflowPlanner:
         section_kinds = {}
         for section in sections:
             section_kinds.update((identifier, section.kind) for identifier in section.element_ids)
-            if section.kind == FlowKind.SINGLE:
+            if section.kind in {FlowKind.SINGLE, FlowKind.WRAPPED}:
                 continue
             spans = {
                 identifier: cell.column_span
@@ -252,8 +318,9 @@ class ReflowPlanner:
             source_lines = element.payload.get("lines") or ()
             centered = abs((element.bbox.x1 + element.bbox.x2 - left - right) / 2.0) <= source_width * 0.04
             width_fraction = element.bbox.width / source_width
-            single_flow_uses_full_width = section_kinds[element.element_id] == FlowKind.SINGLE and (
-                element.kind == "heading" or width_fraction > 0.85
+            section_kind = section_kinds[element.element_id]
+            single_flow_uses_full_width = section_kind == FlowKind.WRAPPED or (
+                section_kind == FlowKind.SINGLE and (element.kind == "heading" or width_fraction > 0.85)
             )
             if (
                 element.kind not in {"heading", "paragraph_group"}
@@ -731,6 +798,33 @@ class ReflowPlanner:
         by_id = {element.element_id: element for element in elements}
         if section.kind == FlowKind.SINGLE:
             return sum(self._element_height(by_id[item], roles, usable_width, fit_scale) for item in section.element_ids)
+        if section.kind == FlowKind.WRAPPED:
+            floating = by_id[section.floating_element_id]
+            floating_bbox = floating.payload.get("source_bbox") or (0, 0, 1, 1)
+            wrap_width = max(usable_width - section.floating_width_pt - section.gutter_pt, 1.0)
+            text_height = sum(
+                self._element_height(
+                    by_id[identifier],
+                    roles,
+                    wrap_width
+                    if float((by_id[identifier].payload.get("source_bbox") or (0, 0, 1, 1))[1])
+                    < float(floating_bbox[3])
+                    else usable_width,
+                    fit_scale,
+                )
+                for identifier in section.element_ids
+                if identifier != section.floating_element_id
+            )
+            aspect = max(float(floating_bbox[3]) - float(floating_bbox[1]), 1.0) / max(
+                float(floating_bbox[2]) - float(floating_bbox[0]), 1.0
+            )
+            floating_height = (
+                section.floating_offset_y_pt
+                + section.floating_width_pt * aspect
+                + (10.0 if floating.payload.get("caption") else 0.0)
+            ) * fit_scale
+            source_height = section.row_heights_pt[0] * fit_scale if section.row_heights_pt else 0.0
+            return max(text_height, floating_height, source_height)
         widths = section.column_widths_pt
         if section.kind == FlowKind.SEQUENTIAL_COLUMNS:
             totals = [0.0] * len(widths)
@@ -762,7 +856,7 @@ class ReflowPlanner:
             if box.y1 - covered_bottom > gap_limit:
                 return section
             covered_bottom = max(covered_bottom, box.y2)
-        if section.kind == FlowKind.SEQUENTIAL_COLUMNS:
+        if section.kind in {FlowKind.SEQUENTIAL_COLUMNS, FlowKind.WRAPPED}:
             height = (max(box.y2 for box in boxes) - min(box.y1 for box in boxes)) * source_scale
             return replace(section, row_heights_pt=(height,))
 
