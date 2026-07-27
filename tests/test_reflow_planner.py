@@ -80,6 +80,29 @@ def test_planner_uses_grid_when_model_order_alternates_parallel_lanes() -> None:
     assert planned["left-1"].payload["width_fraction"] == pytest.approx(1.0)
 
 
+def test_partial_width_elements_span_grid_columns_without_splitting_the_section() -> None:
+    elements = (
+        _element("title", (100, 50, 600, 100), 1, kind="heading"),
+        _element("left-1", (100, 150, 300, 300), 2),
+        _element("middle-1", (400, 150, 600, 300), 3),
+        _element("right-1", (700, 150, 900, 300), 4),
+        _element("left-2", (100, 320, 300, 450), 5),
+        _element("middle-2", (400, 320, 600, 450), 6),
+        _element("right-2", (700, 320, 900, 450), 7),
+        _element("right-bridge", (700, 450, 900, 650), 8),
+        _element("image", (100, 500, 600, 700), 9, text="", kind="figure_group"),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+    cells = {identifier: cell for cell in page.sections[0].grid_cells for identifier in cell.element_ids}
+
+    assert len(page.sections) == 1
+    assert page.sections[0].kind == FlowKind.GRID
+    assert cells["title"].column_span == 2
+    assert cells["image"].column_span == 2
+    assert cells["image"].row == cells["right-bridge"].row
+
+
 def test_grid_assigns_narrow_elements_by_self_coverage() -> None:
     elements = (
         _element("left-1", (100, 100, 350, 250), 1),

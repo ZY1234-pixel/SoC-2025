@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 
+def estimate_text_units(text: str) -> float:
+    return sum(1.0 if ord(char) >= 0x2E80 else 0.42 for char in text)
+
+
 def get_table_rows(table_soup) -> list:
     rows = []
     for section in table_soup.find_all(["thead", "tbody", "tfoot"], recursive=False):
@@ -50,7 +54,7 @@ def get_table_column_weights(table_soup) -> tuple[float, ...]:
     weights = [1.0] * columns
     for _row, column, _row_span, column_span, cell in get_table_cell_placements(table_soup):
         text = cell.get_text(" ", strip=True)
-        units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in text)
+        units = estimate_text_units(text)
         demand = max(units / max(column_span, 1), 1.0)
         for target in range(column, column + column_span):
             weights[target] = max(weights[target], demand)

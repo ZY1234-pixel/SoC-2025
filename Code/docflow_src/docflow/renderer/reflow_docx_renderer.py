@@ -16,7 +16,12 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 from docflow.model.stages import FlowKind, ReflowLayoutPlan
-from docflow.renderer.docx_utils.html_table import get_table_cell_placements, get_table_column_weights, get_table_dimensions
+from docflow.renderer.docx_utils.html_table import (
+    estimate_text_units,
+    get_table_cell_placements,
+    get_table_column_weights,
+    get_table_dimensions,
+)
 from docflow.renderer.docx_utils.table_fmt import clear_table_borders, set_cell_margins, set_table_col_widths
 
 
@@ -155,13 +160,24 @@ class ReflowDocxRenderer:
         column_count = len(flow.column_widths_pt)
         table = container.add_table(rows=row_count, cols=column_count)
         self._format_layout_table(table, flow.column_widths_pt, flow.gutter_pt)
-        for row in table.rows:
-            for cell in row.cells:
-                self._clear_container(cell)
+        target_cells = {}
         for grid_cell in flow.grid_cells:
             cell = table.cell(grid_cell.row, grid_cell.column)
+            if grid_cell.column_span > 1:
+                cell = cell.merge(table.cell(grid_cell.row, grid_cell.column + grid_cell.column_span - 1))
+            target_cells[(grid_cell.row, grid_cell.column)] = cell
+        for row in table.rows:
+            for cell in row.cells:
+                if cell._tc.xpath("./w:p | ./w:tbl"):
+                    self._clear_container(cell)
+        for grid_cell in flow.grid_cells:
+            cell = target_cells[(grid_cell.row, grid_cell.column)]
+            container_width = (
+                sum(flow.column_widths_pt[grid_cell.column : grid_cell.column + grid_cell.column_span])
+                + flow.gutter_pt * (grid_cell.column_span - 1)
+            )
             for identifier in grid_cell.element_ids:
-                self._render_element(cell, elements[identifier], roles, fit_scale, flow.column_widths_pt[grid_cell.column])
+                self._render_element(cell, elements[identifier], roles, fit_scale, container_width)
         for row in table.rows:
             for cell in row.cells:
                 if not cell.paragraphs and not cell.tables:
@@ -197,7 +213,7 @@ class ReflowDocxRenderer:
         font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5) if role else None
         source_lines = element.payload.get("lines") or ()
         if font_size and container_width and len(source_lines) == 1:
-            units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in element.text)
+            units = estimate_text_units(element.text)
             visual_width = container_width * float(element.payload.get("width_fraction", 1.0))
             font_size = min(font_size, visual_width * 0.90 / max(units, 1.0))
         line_height = element.payload.get("line_height_pt")
@@ -318,7 +334,7 @@ class ReflowDocxRenderer:
             (
                 (sum(column_widths[column : column + span]) - 2.0)
                 * 0.96
-                / max(sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in cell.get_text(" ", strip=True)), 1.0)
+                / max(estimate_text_units(cell.get_text(" ", strip=True)), 1.0)
                 for _row, column, _row_span, span, cell in get_table_cell_placements(source)
             ),
             default=font_size,

@@ -27,6 +27,8 @@
 - 页高估算同时采用 OCR 行数与字符宽度预测的较大值，避免源行数低估导致页底裁切
 - 图表与表格使用 primary bbox 参与列归属和 Grid 行划分，避免分组标题扩张 bbox 后拆散并排元素
 - 原生表格应用元素宽度并写入固定 OOXML 表宽，避免办公软件按内容撑出 Grid 栏边界
+- 部分跨栏元素使用 Grid column span 与旁栏内容并排，只有覆盖全部栏的元素才切分流段
+- 英文字符宽度统一按 0.42em 估算，避免窄栏杂志正文被系统性高估行数并过度缩小
 - 原生可编辑表格、公式图像与可编辑编号、Single / Sequential Columns / Grid Flow 纳入统一规划
 - Reflow Planner 先按源图几何划分稳定分栏容器，再在容器内保持 PP-DocLayoutV3 Model Order
 - 全量验收增加内容来源完整性、DOCX 可打开、语义表格原生化和 PDF Page Budget 检查

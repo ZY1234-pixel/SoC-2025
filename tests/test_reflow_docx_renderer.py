@@ -11,10 +11,20 @@ from docx.oxml.ns import qn
 from PIL import Image
 from bs4 import BeautifulSoup
 
-from docflow.model.stages import AnalysisPage, DocumentAnalysis, PlannedElement, Rect, SemanticElement, TypographicRole
+from docflow.model.stages import (
+    AnalysisPage,
+    DocumentAnalysis,
+    FlowKind,
+    FlowSection,
+    GridCell,
+    PlannedElement,
+    Rect,
+    SemanticElement,
+    TypographicRole,
+)
 from docflow.planning import ReflowPlanner
 from docflow.renderer.reflow_docx_renderer import ReflowDocxRenderer
-from docflow.renderer.docx_utils.html_table import get_table_column_weights
+from docflow.renderer.docx_utils.html_table import estimate_text_units, get_table_column_weights
 
 
 def _png_base64() -> str:
@@ -30,6 +40,11 @@ def test_table_column_weights_follow_cell_content() -> None:
     left, right = get_table_column_weights(table)
 
     assert left > right * 2
+
+
+def test_text_width_units_match_latin_and_cjk_font_metrics() -> None:
+    assert estimate_text_units("AAAA") == pytest.approx(1.68)
+    assert estimate_text_units("中文") == 2.0
 
 
 def test_single_line_text_is_sized_to_its_source_width() -> None:
@@ -68,6 +83,23 @@ def test_sparse_grid_keeps_valid_empty_cells() -> None:
     grid = document.tables[0].cell(0, 0).tables[0]
 
     assert all(cell.paragraphs or cell.tables for row in grid.rows for cell in row.cells)
+
+
+def test_grid_renderer_merges_column_spans() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    flow = FlowSection(
+        "grid",
+        FlowKind.GRID,
+        ("span",),
+        (100, 100, 100),
+        grid_cells=(GridCell(0, 0, ("span",), column_span=2),),
+    )
+    element = PlannedElement("span", "paragraph_group", "body", "text")
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._render_grid(container, flow, {"span": element}, {"body": role}, 1.0)
+
+    assert container.tables[0]._tbl.xpath('.//w:gridSpan[@w:val="2"]')
 
 
 def test_native_table_respects_element_width_and_sets_fixed_table_width() -> None:

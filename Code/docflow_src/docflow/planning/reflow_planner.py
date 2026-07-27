@@ -20,7 +20,7 @@ from docflow.model.stages import (
     ReflowLayoutPlan,
     ReflowPagePlan,
 )
-from docflow.renderer.docx_utils.html_table import get_table_cell_placements, get_table_column_weights
+from docflow.renderer.docx_utils.html_table import estimate_text_units, get_table_cell_placements, get_table_column_weights
 
 
 _CROSS_ENGINE_PAGE_RESERVE_PT = 12.0
@@ -152,7 +152,7 @@ class ReflowPlanner:
                 / max(right - left, 1.0)
                 >= 0.30
             )
-            is_spanning = overlap_count >= 2 if len(lane_bounds) >= 2 else False
+            is_spanning = overlap_count == len(lane_bounds) if len(lane_bounds) >= 2 else False
             if is_spanning:
                 spanning.append(element)
 
@@ -190,14 +190,29 @@ class ReflowPlanner:
         for section in sections:
             if section.kind == FlowKind.SINGLE:
                 continue
+            spans = {
+                identifier: cell.column_span
+                for cell in section.grid_cells
+                for identifier in cell.element_ids
+            }
             by_column = defaultdict(list)
             for identifier in section.element_ids:
-                by_column[placement[identifier]].append(by_id[identifier])
-            for members in by_column.values():
+                if spans.get(identifier, 1) == 1:
+                    by_column[placement[identifier]].append(by_id[identifier])
+            column_frames = {}
+            for column, members in by_column.items():
                 left = min(ReflowPlanner._layout_bbox(item).x1 for item in members)
                 right = max(ReflowPlanner._layout_bbox(item).x2 for item in members)
+                column_frames[column] = (left, right)
                 for item in members:
                     frames[item.element_id] = (left, right)
+            for identifier, span in spans.items():
+                if span == 1:
+                    continue
+                column = placement[identifier]
+                covered = [column_frames[index] for index in range(column, column + span) if index in column_frames]
+                if covered:
+                    frames[identifier] = (min(frame[0] for frame in covered), max(frame[1] for frame in covered))
         return frames
 
     @staticmethod
@@ -208,8 +223,17 @@ class ReflowPlanner:
             section_kinds.update((identifier, section.kind) for identifier in section.element_ids)
             if section.kind == FlowKind.SINGLE:
                 continue
+            spans = {
+                identifier: cell.column_span
+                for cell in section.grid_cells
+                for identifier in cell.element_ids
+            }
             for identifier in section.element_ids:
-                target_widths[identifier] = section.column_widths_pt[placement[identifier]]
+                column = placement[identifier]
+                span = spans.get(identifier, 1)
+                target_widths[identifier] = (
+                    sum(section.column_widths_pt[column : column + span]) + section.gutter_pt * (span - 1)
+                )
         result = {}
         for element in elements:
             left, right = frames[element.element_id]
@@ -283,8 +307,17 @@ class ReflowPlanner:
                 )
                 placement[item.element_id] = column
 
+        spans = {}
+        for item in elements:
+            bbox = self._layout_bbox(item)
+            overlaps = [
+                index
+                for index, (left, right) in enumerate(lane_bounds)
+                if max(0.0, min(bbox.x2, right) - max(bbox.x1, left)) / max(right - left, 1.0) >= 0.30
+            ]
+            spans[item.element_id] = max(overlaps) - min(overlaps) + 1 if overlaps else 1
         lane_members = [
-            [item for item in elements if placement[item.element_id] == index]
+            [item for item in elements if placement[item.element_id] == index and spans[item.element_id] == 1]
             for index in range(len(lane_bounds))
         ]
         lane_bounds = [
@@ -310,7 +343,7 @@ class ReflowPlanner:
         element_ids = tuple(item.element_id for item in elements)
 
         balanced_columns = max(widths) <= min(widths) * 1.5
-        if collapsed == sorted(set(collapsed)) and len(collapsed) == len(lanes) and balanced_columns:
+        if max(spans.values(), default=1) == 1 and collapsed == sorted(set(collapsed)) and len(collapsed) == len(lanes) and balanced_columns:
             return FlowSection(
                 section_id,
                 FlowKind.SEQUENTIAL_COLUMNS,
@@ -319,13 +352,17 @@ class ReflowPlanner:
                 gutter_pt=gutter,
             ), placement
 
-        rows = self._grid_rows(elements)
+        rows = (
+            self._spanning_grid_rows(elements, placement, spans)
+            if max(spans.values(), default=1) > 1
+            else self._grid_rows(elements)
+        )
         cells = defaultdict(list)
         for item in elements:
-            cells[(rows[item.element_id], placement[item.element_id])].append(item.element_id)
+            cells[(rows[item.element_id], placement[item.element_id], spans[item.element_id])].append(item.element_id)
         grid_cells = tuple(
-            GridCell(row, column, tuple(ids))
-            for (row, column), ids in sorted(cells.items())
+            GridCell(row, column, tuple(ids), column_span=column_span)
+            for (row, column, column_span), ids in sorted(cells.items())
         )
         return FlowSection(
             section_id,
@@ -478,6 +515,45 @@ class ReflowPlanner:
         return result
 
     @staticmethod
+    def _spanning_grid_rows(elements, placement, spans):
+        anchor_groups = []
+        anchor_group_by_id = {}
+        for item in sorted(
+            (element for element in elements if spans[element.element_id] > 1),
+            key=lambda element: ReflowPlanner._layout_bbox(element).y1,
+        ):
+            bbox = ReflowPlanner._layout_bbox(item)
+            columns = set(range(placement[item.element_id], placement[item.element_id] + spans[item.element_id]))
+            if anchor_groups and bbox.y1 <= anchor_groups[-1][1] and columns.isdisjoint(anchor_groups[-1][2]):
+                anchor_groups[-1][1] = max(anchor_groups[-1][1], bbox.y2)
+                anchor_groups[-1][2].update(columns)
+            else:
+                anchor_groups.append([bbox.y1, bbox.y2, columns])
+            anchor_group_by_id[item.element_id] = len(anchor_groups) - 1
+
+        row_keys = {}
+        for item in elements:
+            if item.element_id in anchor_group_by_id:
+                row_keys[item.element_id] = anchor_group_by_id[item.element_id] * 2 + 1
+                continue
+            bbox = ReflowPlanner._layout_bbox(item)
+            center = (bbox.y1 + bbox.y2) / 2.0
+            overlapping = next(
+                (
+                    index
+                    for index, (top, bottom, columns) in enumerate(anchor_groups)
+                    if top <= center <= bottom and placement[item.element_id] not in columns
+                ),
+                None,
+            )
+            if overlapping is not None:
+                row_keys[item.element_id] = overlapping * 2 + 1
+            else:
+                row_keys[item.element_id] = sum(bottom < center for _top, bottom, _columns in anchor_groups) * 2
+        compact_rows = {key: index for index, key in enumerate(sorted(set(row_keys.values())))}
+        return {identifier: compact_rows[key] for identifier, key in row_keys.items()}
+
+    @staticmethod
     def _vertical_spacing(elements, sections, placement, source_scale: float):
         by_id = {element.element_id: element for element in elements}
         structural_kinds = {"heading", "caption", "figure_group", "equation_group", "table_group"}
@@ -539,7 +615,7 @@ class ReflowPlanner:
             return max(totals, default=0.0)
         row_heights = defaultdict(float)
         for cell in section.grid_cells:
-            width = widths[cell.column]
+            width = sum(widths[cell.column : cell.column + cell.column_span]) + section.gutter_pt * (cell.column_span - 1)
             height = sum(self._element_height(by_id[identifier], roles, width, fit_scale) for identifier in cell.element_ids)
             row_heights[cell.row] = max(row_heights[cell.row], height)
         return sum(row_heights.values())
@@ -567,7 +643,7 @@ class ReflowPlanner:
                         continue
                     table_width = width * float(element.payload.get("width_fraction", 1.0))
                     cell_width = table_width * sum(weights[column : column + span]) / max(sum(weights), 1.0)
-                    units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in cell.get_text(" ", strip=True))
+                    units = estimate_text_units(cell.get_text(" ", strip=True))
                     lines = max(1, math.ceil(units * font_size / max(cell_width, 1.0)))
                     row_height = max(row_height, lines * font_size * 1.2)
                 height += row_height + 2.0
@@ -583,7 +659,7 @@ class ReflowPlanner:
             source_lines = element.payload.get("lines") or ()
             line_height = element.payload.get("line_height_pt")
             cjk_count = sum(1 for char in element.text if ord(char) >= 0x2E80)
-            units = cjk_count + (len(element.text) - cjk_count) * 0.52
+            units = estimate_text_units(element.text)
             content_lines = max(1, math.ceil(units * font_size / max(width, 1.0)))
             if source_lines:
                 source_bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
