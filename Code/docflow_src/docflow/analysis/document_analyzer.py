@@ -498,10 +498,19 @@ class DocumentAnalyzer:
                     continue
                 line_count = max(len(element.payload.get("lines") or ()), 1)
                 line_heights = element.payload.get("line_heights_px") or ()
+                line_tops = element.payload.get("line_tops_px") or ()
+                if element.kind == "heading" and len(line_tops) == len(line_heights) and line_tops:
+                    row_bottoms = []
+                    for top, height in sorted(zip(line_tops, line_heights)):
+                        if not row_bottoms or float(top) >= row_bottoms[-1] - float(height) * 0.10:
+                            row_bottoms.append(float(top) + float(height))
+                        else:
+                            row_bottoms[-1] = max(row_bottoms[-1], float(top) + float(height))
+                    line_count = len(row_bottoms)
                 source_height = element.bbox.height / line_count
                 if line_heights:
                     ink_height = median(line_heights)
-                    source_height = ink_height if element.kind == "heading" else min(source_height, ink_height * 1.2)
+                    source_height = min(source_height, ink_height * 1.2)
                 raw_size = source_height * scale / 1.05
                 raw_size = round(max(raw_size, 1.0) * 2.0) / 2.0
                 base = "heading" if element.kind == "heading" else "caption" if element.kind == "caption" else "body"
@@ -518,13 +527,13 @@ class DocumentAnalyzer:
         paragraph_consensus = {}
         for key, sizes in paragraph_sizes.items():
             center = median(sizes)
-            support = sum(abs(size - center) <= max(1.0, center * 0.08) for size in sizes)
+            support = sum(abs(size - center) <= max(1.0, center * 0.20) for size in sizes)
             if len(sizes) >= 3 and support * 2 > len(sizes):
                 paragraph_consensus[key] = center
         body_sizes = [size for sizes in paragraph_sizes.values() for size in sizes]
         body_consensus = median(body_sizes) if len(body_sizes) >= 3 else None
         if body_consensus is not None:
-            support = sum(abs(size - body_consensus) <= max(1.0, body_consensus * 0.08) for size in body_sizes)
+            support = sum(abs(size - body_consensus) <= max(1.0, body_consensus * 0.20) for size in body_sizes)
             body_consensus = body_consensus if support * 2 > len(body_sizes) else None
 
         normalized_samples = []
@@ -532,8 +541,9 @@ class DocumentAnalyzer:
             lines = element.payload.get("lines") or ()
             if base == "body" and element.kind == "paragraph_group":
                 color_bucket = tuple(int(color[index : index + 2], 16) // 32 for index in (1, 3, 5))
-                if len(lines) >= 2 and len(element.text) >= 40:
-                    size = paragraph_consensus.get((base, color_bucket), size)
+                local_consensus = paragraph_consensus.get((base, color_bucket))
+                if local_consensus is not None and abs(size - local_consensus) <= max(1.0, local_consensus * 0.20):
+                    size = local_consensus
                 if body_consensus is not None and size < body_consensus * 0.85:
                     size = body_consensus
             elif base == "heading" and body_consensus is not None and size < body_consensus:

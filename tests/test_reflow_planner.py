@@ -466,6 +466,20 @@ def test_single_visual_pair_forms_a_local_grid() -> None:
     assert len(page.sections[1].column_widths_pt) == 2
 
 
+def test_centered_heading_spans_local_visual_lanes() -> None:
+    elements = (
+        _element("heading", (450, 50, 550, 100), 1, kind="heading"),
+        _element("left", (100, 150, 450, 450), 2),
+        _element("image", (550, 150, 900, 450), 3, text="", kind="figure_group"),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+    planned = {element.element_id: element for element in page.elements}
+
+    assert page.sections[0].kind == FlowKind.SINGLE
+    assert planned["heading"].payload["alignment"] == "center"
+
+
 def test_repeated_small_icon_text_pairs_form_a_local_grid() -> None:
     elements = tuple(
         item

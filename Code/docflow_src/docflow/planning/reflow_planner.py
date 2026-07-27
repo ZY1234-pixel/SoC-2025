@@ -157,7 +157,11 @@ class ReflowPlanner:
                 / max(right - left, 1.0)
                 >= 0.20
             )
-            is_spanning = overlap_count == len(lane_bounds) if len(lane_bounds) >= 2 else False
+            lane_center = (lane_bounds[0][0] + lane_bounds[-1][1]) / 2.0 if lane_bounds else 0.0
+            centered_heading = element.kind == "heading" and abs(
+                (layout_bbox.x1 + layout_bbox.x2) / 2.0 - lane_center
+            ) <= bounds.width * 0.05
+            is_spanning = len(lane_bounds) >= 2 and (overlap_count == len(lane_bounds) or centered_heading)
             if is_spanning:
                 spanning.append(element)
 

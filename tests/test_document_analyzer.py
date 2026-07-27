@@ -149,6 +149,26 @@ def test_font_size_uses_source_pitch_capped_by_ink_height() -> None:
     assert role.font_size_pt == 13.5
 
 
+def test_heading_font_size_counts_overlapping_ocr_lines_as_one_visual_row() -> None:
+    element = SemanticElement(
+        "chapter",
+        "heading",
+        Rect(100, 100, 900, 250),
+        1,
+        ("raw",),
+        text="2 Chapter title Continued",
+        payload={
+            "lines": ("2", "Chapter title", "Continued"),
+            "line_tops_px": (100, 120, 180),
+            "line_heights_px": (80, 60, 50),
+        },
+    )
+
+    roles, _assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, (element,)),))
+
+    assert roles[0].font_size_pt > 35
+
+
 def test_style_clustering_absorbs_an_isolated_font_prediction() -> None:
     elements = tuple(
         SemanticElement(
@@ -259,3 +279,23 @@ def test_style_clustering_raises_a_clipped_single_line_paragraph_to_body_consens
 
     assert by_id[assignments["clipped"]].font_size_pt == 13.0
     assert by_id[assignments["clipped-heading"]].font_size_pt == 13.0
+
+
+def test_style_clustering_unifies_moderate_body_size_noise() -> None:
+    elements = tuple(
+        SemanticElement(
+            f"body-{index}",
+            "paragraph_group",
+            Rect(100, 100 + index * 100, 900, 160 + index * 100),
+            index,
+            (f"r{index}",),
+            text="正文段落内容" * 10,
+            payload={"lines": ("第一行", "第二行", "第三行"), "line_heights_px": (height,) * 3},
+        )
+        for index, height in enumerate((18, 20, 22))
+    )
+
+    roles, assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, elements),))
+
+    assert len(set(assignments.values())) == 1
+    assert len(roles) == 1
