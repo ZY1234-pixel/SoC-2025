@@ -307,7 +307,8 @@ class ReflowDocxRenderer:
         table.style = "Table Grid"
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         column_weights = get_table_column_weights(source)
-        column_widths = [container_width * weight / sum(column_weights) for weight in column_weights]
+        table_width = container_width * float(element.payload.get("width_fraction", 1.0))
+        column_widths = [table_width * weight / sum(column_weights) for weight in column_weights]
         set_table_col_widths(table, column_widths)
         role = roles.get(element.role_id) or self._body_role(roles)
         base_size = float(element.payload.get("table_font_size_pt") or (role.font_size_pt if role else 10.5))

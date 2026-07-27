@@ -43,6 +43,12 @@ def clear_table_borders(table) -> None:
 
 def set_table_col_widths(table, widths_pt) -> None:
     widths = [int(width * 20) for width in widths_pt]
+    table_width = table._tbl.tblPr.find(qn("w:tblW"))
+    if table_width is None:
+        table_width = OxmlElement("w:tblW")
+        table._tbl.tblPr.insert(0, table_width)
+    table_width.set(qn("w:w"), str(sum(widths)))
+    table_width.set(qn("w:type"), "dxa")
     for old in table._tbl.findall(qn("w:tblGrid")):
         table._tbl.remove(old)
     grid = OxmlElement("w:tblGrid")

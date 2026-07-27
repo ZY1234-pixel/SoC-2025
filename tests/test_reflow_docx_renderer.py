@@ -11,7 +11,7 @@ from docx.oxml.ns import qn
 from PIL import Image
 from bs4 import BeautifulSoup
 
-from docflow.model.stages import AnalysisPage, DocumentAnalysis, Rect, SemanticElement, TypographicRole
+from docflow.model.stages import AnalysisPage, DocumentAnalysis, PlannedElement, Rect, SemanticElement, TypographicRole
 from docflow.planning import ReflowPlanner
 from docflow.renderer.reflow_docx_renderer import ReflowDocxRenderer
 from docflow.renderer.docx_utils.html_table import get_table_column_weights
@@ -68,6 +68,25 @@ def test_sparse_grid_keeps_valid_empty_cells() -> None:
     grid = document.tables[0].cell(0, 0).tables[0]
 
     assert all(cell.paragraphs or cell.tables for row in grid.rows for cell in row.cells)
+
+
+def test_native_table_respects_element_width_and_sets_fixed_table_width() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={"html": "<table><tr><td>A</td><td>B</td></tr></table>", "width_fraction": 0.75},
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 0.8, 100)
+
+    grid = container.tables[0]._tbl.tblGrid
+    assert sum(int(column.get(qn("w:w"))) for column in grid.gridCol_lst) == pytest.approx(75 * 20, abs=2)
+    table_width = container.tables[0]._tbl.tblPr.find(qn("w:tblW"))
+    assert table_width.get(qn("w:type")) == "dxa"
+    assert int(table_width.get(qn("w:w"))) == pytest.approx(75 * 20, abs=2)
 
 
 def test_reflow_docx_keeps_text_tables_and_equation_numbers_editable(tmp_path) -> None:

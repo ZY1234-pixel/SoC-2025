@@ -565,7 +565,8 @@ class ReflowPlanner:
                 for _source_row, column, _row_span, span, cell in placements:
                     if _source_row != row_index:
                         continue
-                    cell_width = width * sum(weights[column : column + span]) / max(sum(weights), 1.0)
+                    table_width = width * float(element.payload.get("width_fraction", 1.0))
+                    cell_width = table_width * sum(weights[column : column + span]) / max(sum(weights), 1.0)
                     units = sum(1.0 if ord(char) >= 0x2E80 else 0.52 for char in cell.get_text(" ", strip=True))
                     lines = max(1, math.ceil(units * font_size / max(cell_width, 1.0)))
                     row_height = max(row_height, lines * font_size * 1.2)
