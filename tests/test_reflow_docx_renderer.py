@@ -203,7 +203,8 @@ def test_reflow_docx_contains_each_source_page_in_an_exact_height_frame(tmp_path
     assert row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY
     assert row.height.pt == pytest.approx(usable_height * plan.word_safety_factor, abs=0.1)
     assert row._tr.xpath("./w:trPr/w:cantSplit")
-    assert document.paragraphs[-1].paragraph_format.line_spacing.pt == 1
+    assert document.paragraphs[-1]._p.xpath('./w:pPr/w:spacing[@w:line="1"]')
+    assert document.paragraphs[-1]._p.xpath("./w:pPr/w:rPr/w:vanish")
     assert document.element.body[-2].tag == qn("w:p")
     assert not document.element.body.xpath(".//w:sectPr/w:docGrid")
 
@@ -223,7 +224,8 @@ def test_nested_table_trailing_paragraph_is_collapsed() -> None:
 
     ReflowDocxRenderer._collapse_trailing_paragraph(cell)
 
-    assert cell.paragraphs[-1].paragraph_format.line_spacing.pt == 1
+    assert cell.paragraphs[-1]._p.xpath('./w:pPr/w:spacing[@w:line="1"]')
+    assert cell.paragraphs[-1]._p.xpath("./w:pPr/w:rPr/w:vanish")
 
 
 def test_reflow_docx_writes_planned_vertical_spacing(tmp_path) -> None:

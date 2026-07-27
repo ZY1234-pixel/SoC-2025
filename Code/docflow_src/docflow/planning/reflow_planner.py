@@ -576,6 +576,16 @@ class ReflowPlanner:
                     if current.kind in structural_kinds or previous.kind in structural_kinds:
                         spacing[identifier] = (current.bbox.y1 - previous.bbox.y2) * source_scale
                 previous_by_column[column].append(current)
+            if section.kind == FlowKind.GRID and any(cell.column_span > 1 for cell in section.grid_cells):
+                row_by_id = {
+                    identifier: cell.row
+                    for cell in section.grid_cells
+                    for identifier in cell.element_ids
+                }
+                for identifier in set(section.element_ids) & spacing.keys():
+                    row = row_by_id[identifier]
+                    if any(previous_row < row for previous_row in row_by_id.values()):
+                        spacing[identifier] = 0.0
         return spacing
 
     def _fit_scale(self, sections, elements, roles, usable_width: float, usable_height: float) -> float:

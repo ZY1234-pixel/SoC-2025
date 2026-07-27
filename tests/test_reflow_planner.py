@@ -103,6 +103,24 @@ def test_partial_width_elements_span_grid_columns_without_splitting_the_section(
     assert cells["image"].row == cells["right-bridge"].row
 
 
+def test_grid_rows_do_not_duplicate_structural_paragraph_spacing() -> None:
+    elements = (
+        _element("left-top", (100, 50, 300, 80), 1),
+        _element("middle-top", (400, 50, 600, 80), 2),
+        _element("right-top", (700, 50, 900, 80), 3),
+        _element("left-anchor", (100, 82, 300, 95), 4),
+        _element("heading", (100, 100, 300, 200), 5, kind="heading"),
+        _element("middle", (400, 100, 600, 300), 6),
+        _element("right", (700, 100, 900, 300), 7),
+        _element("bridge", (100, 350, 600, 400), 8),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+    planned = {element.element_id: element for element in page.elements}
+
+    assert planned["bridge"].payload["space_before_pt"] == 0.0
+
+
 def test_grid_assigns_narrow_elements_by_self_coverage() -> None:
     elements = (
         _element("left-1", (100, 100, 350, 250), 1),

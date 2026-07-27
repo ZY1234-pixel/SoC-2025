@@ -194,3 +194,43 @@ def test_style_clustering_absorbs_a_noisy_long_paragraph_size() -> None:
     assert len(roles) == 1
     assert roles[0].font_size_pt == 13.0
     assert len(set(assignments.values())) == 1
+
+
+def test_style_clustering_raises_a_clipped_single_line_paragraph_to_body_consensus() -> None:
+    elements = tuple(
+        SemanticElement(
+            f"body-{index}",
+            "paragraph_group",
+            Rect(100, 100 + index * 100, 900, 169 + index * 100),
+            index,
+            (f"r{index}",),
+            text="Body paragraph content " * 5,
+            payload={"lines": ("first", "second", "third"), "line_heights_px": (23, 23, 23)},
+        )
+        for index in range(3)
+    ) + (
+        SemanticElement(
+            "clipped",
+            "paragraph_group",
+            Rect(100, 500, 500, 508),
+            4,
+            ("clipped-raw",),
+            text="Return to never-ever land",
+            payload={"lines": ("Return to never-ever land",), "text_color": "#DE000D"},
+        ),
+        SemanticElement(
+            "clipped-heading",
+            "heading",
+            Rect(100, 550, 500, 558),
+            5,
+            ("clipped-heading-raw",),
+            text="Virtual reality",
+            payload={"lines": ("Virtual reality",), "text_color": "#DE000D"},
+        ),
+    )
+
+    roles, assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, elements),))
+    by_id = {role.role_id: role for role in roles}
+
+    assert by_id[assignments["clipped"]].font_size_pt == 13.0
+    assert by_id[assignments["clipped-heading"]].font_size_pt == 13.0

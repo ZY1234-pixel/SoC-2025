@@ -87,10 +87,19 @@ class ReflowDocxRenderer:
         paragraph.paragraph_format.space_after = Pt(0)
         paragraph.paragraph_format.line_spacing = Pt(1)
         paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+        properties = paragraph._p.get_or_add_pPr()
+        spacing = properties.find(qn("w:spacing"))
+        spacing.set(qn("w:line"), "1")
+        mark_properties = properties.find(qn("w:rPr"))
+        if mark_properties is None:
+            mark_properties = OxmlElement("w:rPr")
+            properties.append(mark_properties)
+        mark_properties.append(OxmlElement("w:vanish"))
         if not paragraph.runs:
             paragraph.add_run()
         for run in paragraph.runs:
-            run.font.size = Pt(1)
+            run.font.size = Pt(0.5)
+            run._r.get_or_add_rPr().append(OxmlElement("w:vanish"))
 
     @staticmethod
     def _set_page_geometry(section, geometry) -> None:
@@ -443,7 +452,4 @@ class ReflowDocxRenderer:
     def _collapse_trailing_paragraph(container) -> None:
         if not container.paragraphs or container.paragraphs[-1].text:
             return
-        paragraph = container.paragraphs[-1]
-        paragraph.paragraph_format.space_before = Pt(0)
-        paragraph.paragraph_format.space_after = Pt(0)
-        paragraph.paragraph_format.line_spacing = Pt(1)
+        ReflowDocxRenderer._collapse_section_break(container.paragraphs[-1])
