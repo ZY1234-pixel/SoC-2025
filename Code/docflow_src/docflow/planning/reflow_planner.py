@@ -360,17 +360,50 @@ class ReflowPlanner:
         cells = defaultdict(list)
         for item in elements:
             cells[(rows[item.element_id], placement[item.element_id], spans[item.element_id])].append(item.element_id)
-        grid_cells = tuple(
+        grid_cells = [
             GridCell(row, column, tuple(ids), column_span=column_span)
             for (row, column, column_span), ids in sorted(cells.items())
-        )
+        ]
+        for anchor_row in sorted({cell.row for cell in grid_cells if cell.column_span > 1}):
+            covered = {
+                column
+                for cell in grid_cells
+                if cell.row == anchor_row and cell.column_span > 1
+                for column in range(cell.column, cell.column + cell.column_span)
+            }
+            for lower in tuple(
+                cell
+                for cell in grid_cells
+                if cell.row == anchor_row and cell.column_span == 1 and cell.column not in covered
+            ):
+                upper = next(
+                    (
+                        cell
+                        for cell in grid_cells
+                        if cell.column == lower.column
+                        and cell.column_span == 1
+                        and cell.row + cell.row_span == anchor_row
+                    ),
+                    None,
+                )
+                if upper is not None:
+                    grid_cells.remove(upper)
+                    grid_cells.remove(lower)
+                    grid_cells.append(
+                        GridCell(
+                            upper.row,
+                            upper.column,
+                            upper.element_ids + lower.element_ids,
+                            row_span=upper.row_span + lower.row_span,
+                        )
+                    )
         return FlowSection(
             section_id,
             FlowKind.GRID,
             element_ids,
             column_widths_pt=column_widths,
             gutter_pt=gutter,
-            grid_cells=grid_cells,
+            grid_cells=tuple(sorted(grid_cells, key=lambda cell: (cell.row, cell.column))),
         ), placement
 
     @staticmethod
@@ -627,7 +660,8 @@ class ReflowPlanner:
         for cell in section.grid_cells:
             width = sum(widths[cell.column : cell.column + cell.column_span]) + section.gutter_pt * (cell.column_span - 1)
             height = sum(self._element_height(by_id[identifier], roles, width, fit_scale) for identifier in cell.element_ids)
-            row_heights[cell.row] = max(row_heights[cell.row], height)
+            for row in range(cell.row, cell.row + cell.row_span):
+                row_heights[row] = max(row_heights[row], height / cell.row_span)
         return sum(row_heights.values())
 
     @staticmethod

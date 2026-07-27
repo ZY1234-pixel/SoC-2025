@@ -165,15 +165,20 @@ class ReflowDocxRenderer:
                     self._render_element(cell, element, roles, fit_scale, flow.column_widths_pt[column])
 
     def _render_grid(self, container, flow, elements, roles, fit_scale) -> None:
-        row_count = max(cell.row for cell in flow.grid_cells) + 1
+        row_count = max(cell.row + cell.row_span for cell in flow.grid_cells)
         column_count = len(flow.column_widths_pt)
         table = container.add_table(rows=row_count, cols=column_count)
         self._format_layout_table(table, flow.column_widths_pt, flow.gutter_pt)
         target_cells = {}
         for grid_cell in flow.grid_cells:
             cell = table.cell(grid_cell.row, grid_cell.column)
-            if grid_cell.column_span > 1:
-                cell = cell.merge(table.cell(grid_cell.row, grid_cell.column + grid_cell.column_span - 1))
+            if grid_cell.row_span > 1 or grid_cell.column_span > 1:
+                cell = cell.merge(
+                    table.cell(
+                        grid_cell.row + grid_cell.row_span - 1,
+                        grid_cell.column + grid_cell.column_span - 1,
+                    )
+                )
             target_cells[(grid_cell.row, grid_cell.column)] = cell
         for row in table.rows:
             for cell in row.cells:

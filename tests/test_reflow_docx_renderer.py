@@ -85,21 +85,28 @@ def test_sparse_grid_keeps_valid_empty_cells() -> None:
     assert all(cell.paragraphs or cell.tables for row in grid.rows for cell in row.cells)
 
 
-def test_grid_renderer_merges_column_spans() -> None:
+def test_grid_renderer_merges_column_and_row_spans() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     flow = FlowSection(
         "grid",
         FlowKind.GRID,
-        ("span",),
+        ("span", "side"),
         (100, 100, 100),
-        grid_cells=(GridCell(0, 0, ("span",), column_span=2),),
+        grid_cells=(
+            GridCell(0, 2, ("side",), row_span=2),
+            GridCell(1, 0, ("span",), column_span=2),
+        ),
     )
-    element = PlannedElement("span", "paragraph_group", "body", "text")
+    elements = {
+        "span": PlannedElement("span", "paragraph_group", "body", "image area"),
+        "side": PlannedElement("side", "paragraph_group", "body", "side flow"),
+    }
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
 
-    ReflowDocxRenderer()._render_grid(container, flow, {"span": element}, {"body": role}, 1.0)
+    ReflowDocxRenderer()._render_grid(container, flow, elements, {"body": role}, 1.0)
 
     assert container.tables[0]._tbl.xpath('.//w:gridSpan[@w:val="2"]')
+    assert container.tables[0]._tbl.xpath(".//w:vMerge")
 
 
 def test_native_table_respects_element_width_and_sets_fixed_table_width() -> None:

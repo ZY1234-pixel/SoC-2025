@@ -100,7 +100,9 @@ def test_partial_width_elements_span_grid_columns_without_splitting_the_section(
     assert page.sections[0].kind == FlowKind.GRID
     assert cells["title"].column_span == 2
     assert cells["image"].column_span == 2
-    assert cells["image"].row == cells["right-bridge"].row
+    assert cells["right-bridge"].row_span == 2
+    assert cells["right-bridge"].row <= cells["image"].row < cells["right-bridge"].row + cells["right-bridge"].row_span
+    assert page.fit_scale > 0.8
 
 
 def test_grid_rows_do_not_duplicate_structural_paragraph_spacing() -> None:
