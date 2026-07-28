@@ -273,14 +273,17 @@ class ReflowDocxRenderer:
         self._format_layout_table(table, flow.column_widths_pt, flow.gutter_pt)
         for row, height in zip(table.rows, flow.row_heights_pt):
             row.height = Pt(height * fit_scale)
-            row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+            row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
         target_cells = {}
         for grid_cell in flow.grid_cells:
             cell = table.cell(grid_cell.row, grid_cell.column)
+            floats_across_rows = grid_cell.row_span > 1 and any(
+                elements[identifier].kind == "figure_group" for identifier in grid_cell.element_ids
+            )
             if grid_cell.row_span > 1 or grid_cell.column_span > 1:
                 cell = cell.merge(
                     table.cell(
-                        grid_cell.row + grid_cell.row_span - 1,
+                        grid_cell.row if floats_across_rows else grid_cell.row + grid_cell.row_span - 1,
                         grid_cell.column + grid_cell.column_span - 1,
                     )
                 )
@@ -308,7 +311,10 @@ class ReflowDocxRenderer:
                 + flow.gutter_pt * (grid_cell.column_span - 1)
             )
             for identifier in grid_cell.element_ids:
-                self._render_element(cell, elements[identifier], roles, fit_scale, container_width)
+                element = elements[identifier]
+                if element.kind == "figure_group" and grid_cell.row_span > 1:
+                    element = replace(element, payload={**element.payload, "float_in_grid": True})
+                self._render_element(cell, element, roles, fit_scale, container_width)
         for row in table.rows:
             for cell in row.cells:
                 if not cell.paragraphs and not cell.tables:
@@ -520,7 +526,21 @@ class ReflowDocxRenderer:
         paragraph.alignment = _ALIGNMENT.get(element.payload.get("alignment"), WD_ALIGN_PARAGRAPH.CENTER)
         paragraph.paragraph_format.space_before = Pt(0)
         paragraph.paragraph_format.space_after = Pt(0)
-        paragraph.add_run().add_picture(io.BytesIO(data), width=Pt(max(width, 0.5)))
+        picture = paragraph.add_run().add_picture(io.BytesIO(data), width=Pt(max(width, 0.5)))
+        if element.payload.get("float_in_grid"):
+            self._float_picture(picture._inline, element.payload.get("alignment"))
+            paragraph.paragraph_format.line_spacing = Pt(1)
+            paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+
+    @classmethod
+    def _float_picture(cls, inline, alignment) -> None:
+        cls._anchor_picture(inline, 0.0, 0.0)
+        horizontal = inline.find(qn("wp:positionH"))
+        horizontal.set("relativeFrom", "column")
+        position = horizontal[0]
+        position.tag = qn("wp:align")
+        position.text = alignment if alignment in {"left", "center", "right"} else "left"
+        inline.find(qn("wp:positionV")).set("relativeFrom", "paragraph")
 
     def _write_equation(self, container, element, roles, fit_scale: float, container_width: float) -> None:
         number = str(element.payload.get("number") or "")

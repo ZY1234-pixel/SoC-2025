@@ -153,6 +153,48 @@ def test_grid_renderer_merges_column_and_row_spans() -> None:
     assert container.tables[0].cell(1, 0)._tc.xpath("./w:tcPr/w:tcMar/w:end/@w:w") == ["100"]
 
 
+def test_row_spanning_grid_figure_floats_without_expanding_its_start_row() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    flow = FlowSection(
+        "grid",
+        FlowKind.GRID,
+        ("figure", "top", "bottom"),
+        (120, 120),
+        grid_cells=(
+            GridCell(0, 0, ("figure",), row_span=2),
+            GridCell(0, 1, ("top",)),
+            GridCell(1, 1, ("bottom",)),
+        ),
+        row_heights_pt=(40, 40),
+    )
+    elements = {
+        "figure": PlannedElement(
+            "figure",
+            "figure_group",
+            "body",
+            payload={
+                "image_base64": _png_base64(),
+                "source_bbox": (0, 0, 120, 80),
+                "source_scale": 1.0,
+                "width_fraction": 1.0,
+                "alignment": "left",
+            },
+        ),
+        "top": PlannedElement("top", "paragraph_group", "body", "top"),
+        "bottom": PlannedElement("bottom", "paragraph_group", "body", "bottom"),
+    }
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._render_grid(container, flow, elements, {"body": role}, 1.0)
+
+    table = container.tables[0]
+    assert table._tbl.xpath(".//wp:anchor")
+    assert not table._tbl.xpath(".//wp:inline")
+    assert not table._tbl.xpath(".//w:vMerge")
+    assert table._tbl.xpath(".//wp:positionH[@relativeFrom='column']/wp:align[text()='left']")
+    assert all(row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY for row in table.rows)
+
+
 def test_header_with_image_payload_renders_as_image() -> None:
     document = Document()
     header = document.sections[0].header

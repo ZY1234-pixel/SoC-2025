@@ -461,6 +461,42 @@ def test_grid_height_treats_row_span_as_a_total_height_constraint() -> None:
     assert height == pytest.approx(200)
 
 
+def test_grid_tracks_materialize_content_height_for_word() -> None:
+    element = PlannedElement("text", "paragraph_group", "body", "x" * 100)
+    section = FlowSection(
+        "grid",
+        FlowKind.GRID,
+        ("text",),
+        (100, 100),
+        grid_cells=(GridCell(0, 0, ("text",), row_span=2),),
+        row_heights_pt=(10, 10),
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    tracks = ReflowPlanner()._grid_row_heights(section, (element,), {"body": role}, 1.0)
+
+    assert sum(tracks) == pytest.approx(ReflowPlanner()._section_height(section, (element,), {"body": role}, 200, 1.0))
+    assert sum(tracks) > sum(section.row_heights_pt)
+
+
+def test_grid_fit_reserves_word_layout_table_overhead() -> None:
+    element = PlannedElement(
+        "image",
+        "figure_group",
+        payload={"source_bbox": (0, 0, 100, 92), "source_scale": 1.0},
+    )
+    section = FlowSection(
+        "grid",
+        FlowKind.GRID,
+        ("image",),
+        (100,),
+        grid_cells=(GridCell(0, 0, ("image",)),),
+        row_heights_pt=(92,),
+    )
+
+    assert ReflowPlanner()._fit_scale((section,), (element,), {}, 100, 100) < 1.0
+
+
 def test_default_page_budget_reserves_incremental_text_box_wrap_error() -> None:
     compact = ReflowPlanner().plan(_analysis((_element("compact", (100, 100, 900, 500), 1, "x" * 1760),))).pages[0]
     fragmented = ReflowPlanner().plan(

@@ -30,6 +30,8 @@ from docflow.planning.text_metrics import (
 
 
 class ReflowPlanner:
+    GRID_WORD_SAFETY_FACTOR = 0.90
+
     def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.94) -> None:
         self.page_long_edge_pt = float(page_long_edge_pt)
         self.word_safety_factor = float(word_safety_factor)
@@ -163,6 +165,18 @@ class ReflowPlanner:
         )
         usable_height = geometry.height_pt - geometry.margin_top_pt - geometry.margin_bottom_pt
         fit_scale = self._fit_scale(sections, planned, role_by_id, usable_width, usable_height)
+        sections = tuple(
+            replace(
+                section,
+                row_heights_pt=tuple(
+                    height / fit_scale
+                    for height in self._grid_row_heights(section, planned, role_by_id, fit_scale)
+                ),
+            )
+            if section.kind == FlowKind.GRID
+            else section
+            for section in sections
+        )
         header_ids = tuple(
             element.element_id
             for element in furniture
@@ -993,7 +1007,10 @@ class ReflowPlanner:
         return spacing
 
     def _fit_scale(self, sections, elements, roles, usable_width: float, usable_height: float) -> float:
-        target = max(usable_height * self.word_safety_factor, 1.0)
+        safety_factor = min(self.word_safety_factor, self.GRID_WORD_SAFETY_FACTOR) if any(
+            section.kind == FlowKind.GRID for section in sections
+        ) else self.word_safety_factor
+        target = max(usable_height * safety_factor, 1.0)
         section_overhead = sum(section.kind != FlowKind.SINGLE for section in sections) * 0.05
 
         def content_height(scale: float) -> float:
@@ -1058,10 +1075,16 @@ class ReflowPlanner:
                 totals[column] += self._element_height(element, roles, widths[column], fit_scale)
             source_height = section.row_heights_pt[0] * fit_scale if section.row_heights_pt else 0.0
             return max(max(totals, default=0.0), source_height)
-        row_heights = defaultdict(
-            float,
-            {row: height * fit_scale for row, height in enumerate(section.row_heights_pt)},
-        )
+        return sum(self._grid_row_heights(section, elements, roles, fit_scale))
+
+    def _grid_row_heights(self, section, elements, roles, fit_scale: float) -> tuple[float, ...]:
+        by_id = {element.element_id: element for element in elements}
+        widths = section.column_widths_pt
+        row_count = max(cell.row + cell.row_span for cell in section.grid_cells)
+        row_heights = [
+            section.row_heights_pt[row] * fit_scale if row < len(section.row_heights_pt) else 0.0
+            for row in range(row_count)
+        ]
         measured_cells = []
         for cell in section.grid_cells:
             width = sum(widths[cell.column : cell.column + cell.column_span]) + section.gutter_pt * (cell.column_span - 1)
@@ -1072,7 +1095,7 @@ class ReflowPlanner:
             deficit = max(height - sum(row_heights[row] for row in rows), 0.0) / cell.row_span
             for row in rows:
                 row_heights[row] += deficit
-        return sum(row_heights.values())
+        return tuple(row_heights)
 
     def _with_vertical_tracks(self, section, elements, source_scale: float):
         if section.kind == FlowKind.SINGLE:
