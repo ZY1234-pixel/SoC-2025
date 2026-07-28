@@ -172,6 +172,7 @@ class SemanticElement:
     child_ids: Tuple[str, ...] = ()
     payload: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     text_structure: TextStructure = field(default_factory=TextStructure)
+    content_bbox: Optional[Rect] = None
 
     def __post_init__(self) -> None:
         if not self.source_ids:
@@ -305,6 +306,7 @@ class PlannedElement:
     text: str = ""
     payload: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     text_structure: TextStructure = field(default_factory=TextStructure)
+    content_bbox: Optional[Rect] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "payload", _freeze(self.payload))

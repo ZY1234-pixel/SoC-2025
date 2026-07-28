@@ -14,7 +14,7 @@ from bs4 import BeautifulSoup
 from PIL import Image
 
 from docflow.appearance.color_inferrer import infer_crop_style, infer_table_row_fills, infer_table_rule_style
-from docflow.appearance.font_classifier import FONT_FAMILY_BY_LABEL
+from docflow.appearance.font_classifier import FONT_FAMILY_BY_LABEL, FONT_INK_HEIGHT_RATIO
 from docflow.model.stages import (
     AnalysisDiagnostic,
     AnalysisPage,
@@ -224,6 +224,9 @@ class DocumentAnalyzer:
         if kind == "heading":
             text = self._normalize_heading(text)
         visible_lines = self._visible_lines(primary)
+        line_boxes = tuple(bbox for _line, _value, bbox in visible_lines if bbox is not None)
+        visual_rows = self._visual_row_boxes(line_boxes)
+        content_bbox = self._union(visual_rows) if visual_rows else primary.bbox
         caption_lines = [
             line
             for caption in captions
@@ -247,6 +250,11 @@ class DocumentAnalyzer:
             "line_widths_px": tuple(
                 bbox.width for _line, _value, bbox in visible_lines if bbox is not None
             ),
+            "line_pitches_px": tuple(
+                following.y1 - current.y1
+                for current, following in zip(visual_rows, visual_rows[1:])
+            ),
+            "visual_line_count": len(visual_rows),
             "caption": self._merge_caption_text(captions),
             "caption_line_heights_px": tuple(
                 self._line_height(line, bbox) for line, _value, bbox in caption_lines if bbox is not None
@@ -294,6 +302,7 @@ class DocumentAnalyzer:
             text=text,
             payload=payload,
             text_structure=self._text_structure(primary, visible_lines),
+            content_bbox=content_bbox,
         )
 
     @staticmethod
@@ -667,9 +676,11 @@ class DocumentAnalyzer:
             for element in page.elements:
                 if element.kind in {"figure_group", "table_group", "equation_group"}:
                     continue
+                content_bbox = element.content_bbox or element.bbox
                 line_count = max(len(element.payload.get("lines") or ()), 1)
                 line_heights = element.payload.get("line_heights_px") or ()
                 line_tops = element.payload.get("line_tops_px") or ()
+                line_pitches = element.payload.get("line_pitches_px") or ()
                 if len(line_tops) == len(line_heights) and line_tops:
                     row_bottoms = []
                     for top, height in sorted(zip(line_tops, line_heights)):
@@ -680,11 +691,19 @@ class DocumentAnalyzer:
                     line_count = len(row_bottoms)
                 if element.text_structure.orientation == "vertical":
                     line_count = max(sum(not char.isspace() for char in element.text), 1)
-                source_height = element.bbox.height / line_count
-                if line_heights:
-                    ink_height = median(line_heights)
-                    source_height = min(source_height, ink_height * 1.2)
-                raw_size = source_height * scale / 1.05
+                    raw_size = content_bbox.height / line_count * scale / 1.05
+                elif line_heights and element.content_bbox is not None:
+                    font = element.payload.get("font_family") or (
+                        "黑体" if element.kind == "heading" else "宋体"
+                    )
+                    raw_size = median(line_heights) * scale / FONT_INK_HEIGHT_RATIO[font]
+                    if line_pitches:
+                        raw_size = min(raw_size, median(line_pitches) * scale / 1.05)
+                else:
+                    source_height = content_bbox.height / line_count
+                    if line_heights:
+                        source_height = min(source_height, median(line_heights) * 1.2)
+                    raw_size = source_height * scale / 1.05
                 raw_size = round(max(raw_size, 1.0) * 2.0) / 2.0
                 base = "heading" if element.kind == "heading" else "caption" if element.kind == "caption" else "body"
                 font = element.payload.get("font_family") or ("黑体" if base == "heading" else "宋体")
@@ -808,6 +827,16 @@ class DocumentAnalyzer:
             for left, right in zip(points, points[1:] + points[:1])
         ]
         return min((edge for edge in edges if edge > 0), default=bbox.height)
+
+    @staticmethod
+    def _visual_row_boxes(boxes: Iterable[Rect]) -> tuple[Rect, ...]:
+        rows = []
+        for box in sorted(boxes, key=lambda value: (value.y1, value.x1)):
+            if rows and box.y1 < rows[-1].y2 - min(box.height, rows[-1].height) * 0.10:
+                rows[-1] = DocumentAnalyzer._union((rows[-1], box))
+            else:
+                rows.append(box)
+        return tuple(rows)
 
     @staticmethod
     def _union(rectangles: Iterable[Rect]) -> Rect:

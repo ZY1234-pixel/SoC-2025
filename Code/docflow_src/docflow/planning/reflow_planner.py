@@ -21,10 +21,11 @@ from docflow.model.stages import (
     ReflowLayoutPlan,
     ReflowPagePlan,
 )
-from docflow.renderer.docx_utils.html_table import (
+from docflow.renderer.docx_utils.html_table import get_table_cell_placements, get_table_column_weights
+from docflow.planning.text_metrics import (
     estimate_text_units,
-    get_table_cell_placements,
-    get_table_column_weights,
+    estimate_wrapped_lines,
+    infer_occupancy_line_height,
 )
 
 
@@ -115,7 +116,8 @@ class ReflowPlanner:
                     **dict(element.payload),
                     "source_bbox": (element.bbox.x1, element.bbox.y1, element.bbox.x2, element.bbox.y2),
                     "width_fraction": min(
-                        self._visual_width(element) / container_widths.get(element.element_id, max(bounds.width, 1.0)),
+                        self._content_bbox(element).width
+                        / container_widths.get(element.element_id, max(bounds.width, 1.0)),
                         1.0,
                     ),
                     "column": placement.get(element.element_id, 0),
@@ -155,6 +157,7 @@ class ReflowPlanner:
                         else None
                     ),
                 },
+                content_bbox=element.content_bbox,
             )
             for element in page.elements
         )
@@ -393,8 +396,9 @@ class ReflowPlanner:
             left, right = frames[element.element_id]
             source_width = max(right - left, 1.0)
             source_lines = element.payload.get("lines") or ()
-            centered = abs((element.bbox.x1 + element.bbox.x2 - left - right) / 2.0) <= source_width * 0.04
-            width_fraction = element.bbox.width / source_width
+            content_bbox = ReflowPlanner._content_bbox(element)
+            centered = abs((content_bbox.x1 + content_bbox.x2 - left - right) / 2.0) <= source_width * 0.04
+            width_fraction = content_bbox.width / source_width
             section_kind = section_kinds[element.element_id]
             single_flow_uses_full_width = element.element_id in wrapped_figure_ids or (
                 section_kind == FlowKind.SINGLE and (element.kind == "heading" or width_fraction > 0.85)
@@ -410,7 +414,7 @@ class ReflowPlanner:
                 result[element.element_id] = (
                     0.0
                     if centered or width_fraction > 0.85
-                    else max(element.bbox.x1 - left, 0.0) / source_width * target_widths[element.element_id],
+                    else max(content_bbox.x1 - left, 0.0) / source_width * target_widths[element.element_id],
                     0.0,
                 )
                 continue
@@ -418,11 +422,11 @@ class ReflowPlanner:
                 result[element.element_id] = (0.0, 0.0)
                 continue
             target_width = target_widths[element.element_id]
-            right_indent = max(right - element.bbox.x2, 0.0) / source_width * target_width
+            right_indent = max(right - content_bbox.x2, 0.0) / source_width * target_width
             if element.text_structure.preserve_source_lines:
                 right_indent = 0.0
             result[element.element_id] = (
-                max(element.bbox.x1 - left, 0.0) / source_width * target_width,
+                max(content_bbox.x1 - left, 0.0) / source_width * target_width,
                 right_indent,
             )
         return result
@@ -433,8 +437,12 @@ class ReflowPlanner:
 
     @staticmethod
     def _layout_bbox(element) -> Rect:
-        bbox = element.payload.get("primary_bbox")
-        return Rect.from_sequence(bbox) if bbox else element.bbox
+        bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox")
+        return Rect.from_sequence(bbox) if bbox else getattr(element, "bbox", Rect(0, 0, 1, 1))
+
+    @staticmethod
+    def _content_bbox(element) -> Rect:
+        return element.content_bbox or ReflowPlanner._layout_bbox(element)
 
     def _narrow_section(self, elements, bounds: Rect, usable_width: float, section_index: int, fallback_lanes=()):
         if len(elements) == 1:
@@ -1152,21 +1160,37 @@ class ReflowPlanner:
             font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
             source_lines = element.payload.get("lines") or ()
             line_height = element.payload.get("line_height_pt")
-            cjk_count = sum(1 for char in element.text if ord(char) >= 0x2E80)
-            units = estimate_text_units(element.text)
-            content_lines = max(1, math.ceil(units * font_size / max(width, 1.0)))
+            content_bbox = ReflowPlanner._content_bbox(element)
+            source_line_count = int(element.payload.get("visual_line_count") or len(source_lines))
+            source_width = content_bbox.width * float(element.payload.get("source_scale", 1.0))
             if element.text_structure.preserve_source_lines:
                 lines = len(source_lines)
-            elif source_lines:
-                source_bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
-                source_width = (float(source_bbox[2]) - float(source_bbox[0])) * float(element.payload["source_scale"])
-                observed_lines = max(1, round(len(source_lines) * source_width / max(width, 1.0) * fit_scale))
-                lines = max(observed_lines, content_lines)
             else:
-                lines = content_lines
+                lines = estimate_wrapped_lines(
+                    element.text,
+                    font_size,
+                    width,
+                    source_line_count,
+                    source_width,
+                    fit_scale,
+                )
             if source_lines and line_height:
-                rendered_line_height = max(float(line_height) * fit_scale, font_size * 1.05)
-                return spacing + lines * rendered_line_height + min(font_size * 0.15, 2.0)
+                measured_line_height = max(float(line_height) * fit_scale, font_size * 1.05)
+                if (
+                    element.kind == "paragraph_group"
+                    and not element.text_structure.preserve_source_lines
+                    and element.text_structure.orientation == "horizontal"
+                ):
+                    target_height = content_bbox.height * float(element.payload.get("source_scale", 1.0)) * fit_scale
+                    measured_line_height = infer_occupancy_line_height(
+                        font_size,
+                        measured_line_height,
+                        target_height,
+                        lines,
+                    )
+                    return spacing + lines * measured_line_height
+                return spacing + lines * measured_line_height + min(font_size * 0.15, 2.0)
+            cjk_count = sum(1 for char in element.text if ord(char) >= 0x2E80)
             paragraph_boundary = font_size if cjk_count else font_size / 4.0
             return spacing + lines * font_size * role.line_spacing * 1.05 + paragraph_boundary
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
@@ -1195,7 +1219,8 @@ class ReflowPlanner:
             if element.bbox.x2 >= right - width * 0.08:
                 return "right"
             return "center"
-        element_center = (element.bbox.x1 + element.bbox.x2) / 2.0
+        content_bbox = ReflowPlanner._content_bbox(element)
+        element_center = (content_bbox.x1 + content_bbox.x2) / 2.0
         centered = abs(element_center - (left + right) / 2.0) <= width * 0.04
         source_lines = element.payload.get("lines") or ()
         if element.kind == "paragraph_group" and element.text_structure.is_list:
@@ -1207,11 +1232,11 @@ class ReflowPlanner:
             for source_left, line_width in zip(lefts, widths)
         ):
             return "center"
-        if element.kind == "heading" and len(source_lines) > 1 and element.bbox.x1 <= left + width * 0.05:
+        if element.kind == "heading" and len(source_lines) > 1 and content_bbox.x1 <= left + width * 0.05:
             return "left"
-        if centered and (element.kind == "heading" or element.bbox.width <= width * 0.75):
+        if centered and (element.kind == "heading" or content_bbox.width <= width * 0.75):
             return "center"
-        if element.bbox.x2 >= right - width * 0.03 and element.bbox.x1 > left + width * 0.25 and len(source_lines) <= 2:
+        if content_bbox.x2 >= right - width * 0.03 and content_bbox.x1 > left + width * 0.25 and len(source_lines) <= 2:
             return "right"
         return "justify" if element.kind == "paragraph_group" and len(source_lines) >= 3 and len(element.text) >= 40 else "left"
 
@@ -1236,11 +1261,11 @@ class ReflowPlanner:
         if not lines or role is None:
             return None
         line_heights = element.payload.get("line_heights_px") or ()
-        line_tops = element.payload.get("line_tops_px") or ()
-        if len(line_tops) >= 2:
-            observed = median(right - left for left, right in zip(line_tops, line_tops[1:])) * source_scale
+        line_pitches = element.payload.get("line_pitches_px") or ()
+        if line_pitches:
+            observed = median(line_pitches) * source_scale
         else:
-            observed = median(line_heights) * source_scale if line_heights else element.bbox.height * source_scale / len(lines)
+            observed = median(line_heights) * source_scale if line_heights else ReflowPlanner._content_bbox(element).height * source_scale / len(lines)
         return min(max(observed, role.font_size_pt * 1.05), role.font_size_pt * 1.5)
 
     @staticmethod

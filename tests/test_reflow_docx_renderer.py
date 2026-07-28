@@ -24,8 +24,13 @@ from docflow.model.stages import (
     TypographicRole,
 )
 from docflow.planning import ReflowPlanner
+from docflow.planning.text_metrics import (
+    estimate_text_units,
+    estimate_wrapped_lines,
+    infer_occupancy_line_height,
+)
 from docflow.renderer.reflow_docx_renderer import ReflowDocxRenderer
-from docflow.renderer.docx_utils.html_table import estimate_text_units, get_table_column_weights
+from docflow.renderer.docx_utils.html_table import get_table_column_weights
 
 
 def _png_base64() -> str:
@@ -46,6 +51,13 @@ def test_table_column_weights_follow_cell_content() -> None:
 def test_text_width_units_match_latin_and_cjk_font_metrics() -> None:
     assert estimate_text_units("AAAA") == pytest.approx(1.68)
     assert estimate_text_units("中文") == 2.0
+
+
+def test_text_occupancy_uses_rendered_lines_to_fill_tight_content_height() -> None:
+    lines = estimate_wrapped_lines("正文" * 20, 10, 100, 6, 80, 1.0)
+
+    assert lines == 5
+    assert infer_occupancy_line_height(10, 10.5, 60, lines) == 12
 
 
 def test_single_line_text_is_sized_to_its_source_width() -> None:

@@ -366,7 +366,30 @@ def test_font_size_uses_source_pitch_capped_by_ink_height() -> None:
 
     role = DocumentAnalyzer().analyze(RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))).roles[0]
 
-    assert role.font_size_pt == 13.5
+    assert role.font_size_pt == 14.0
+
+
+def test_analyzer_keeps_layout_and_tight_text_geometry_separate() -> None:
+    item = RecognitionItem(
+        "body",
+        "text",
+        Rect(90, 90, 910, 230),
+        1,
+        text_lines=(
+            TextEvidence("first", polygon=((120, 100), (880, 100), (880, 120), (120, 120))),
+            TextEvidence("second", polygon=((130, 145), (870, 145), (870, 165), (130, 165))),
+            TextEvidence("third", polygon=((150, 190), (800, 190), (800, 210), (150, 210))),
+        ),
+    )
+
+    element = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))
+    ).pages[0].elements[0]
+
+    assert element.bbox == Rect(90, 90, 910, 230)
+    assert element.content_bbox == Rect(120, 100, 880, 210)
+    assert element.payload["line_pitches_px"] == (45, 45)
+    assert element.payload["visual_line_count"] == 3
 
 
 def test_heading_font_size_counts_overlapping_ocr_lines_as_one_visual_row() -> None:

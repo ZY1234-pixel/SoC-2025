@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-
-def estimate_text_units(text: str) -> float:
-    return sum(1.0 if ord(char) >= 0x2E80 else 0.42 for char in text)
+from docflow.planning.text_metrics import estimate_text_units
 
 
 def get_table_rows(table_soup) -> list:

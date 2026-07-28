@@ -17,6 +17,7 @@ FONT_FAMILY_BY_LABEL: Dict[str, Optional[str]] = {
     "黑体": "黑体",
     "其他": None,
 }
+FONT_INK_HEIGHT_RATIO = {"宋体": 0.86, "黑体": 0.90, "楷体": 0.84, "仿宋": 0.86}
 
 
 @dataclass(frozen=True)

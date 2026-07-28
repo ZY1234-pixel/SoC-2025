@@ -16,9 +16,13 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
-from docflow.model.stages import FlowKind, ReflowLayoutPlan
-from docflow.renderer.docx_utils.html_table import (
+from docflow.model.stages import FlowKind, Rect, ReflowLayoutPlan
+from docflow.planning.text_metrics import (
     estimate_text_units,
+    estimate_wrapped_lines,
+    infer_occupancy_line_height,
+)
+from docflow.renderer.docx_utils.html_table import (
     get_table_cell_placements,
     get_table_column_weights,
     get_table_dimensions,
@@ -29,8 +33,6 @@ from docflow.renderer.docx_utils.table_fmt import (
     set_horizontal_table_borders,
     set_table_col_widths,
 )
-
-
 _ALIGNMENT = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
     "center": WD_ALIGN_PARAGRAPH.CENTER,
@@ -381,7 +383,32 @@ class ReflowDocxRenderer:
             font_size = min(font_size, visual_width * 0.90 / max(units, 1.0))
         line_height = element.payload.get("line_height_pt")
         if role and line_height:
-            paragraph.paragraph_format.line_spacing = Pt(max(float(line_height) * fit_scale, font_size * 1.05))
+            rendered_line_height = max(float(line_height) * fit_scale, font_size * 1.05)
+            if (
+                container_width
+                and element.kind == "paragraph_group"
+                and not element.text_structure.preserve_source_lines
+                and element.text_structure.orientation == "horizontal"
+            ):
+                left_indent = paragraph.paragraph_format.left_indent.pt if paragraph.paragraph_format.left_indent else 0.0
+                right_indent = paragraph.paragraph_format.right_indent.pt if paragraph.paragraph_format.right_indent else 0.0
+                width = max(container_width - left_indent - right_indent, 1.0)
+                content_bbox = self._content_bbox(element)
+                lines = estimate_wrapped_lines(
+                    element.text,
+                    font_size,
+                    width,
+                    int(element.payload.get("visual_line_count") or len(source_lines)),
+                    content_bbox.width * float(element.payload.get("source_scale", 1.0)),
+                    fit_scale,
+                )
+                rendered_line_height = infer_occupancy_line_height(
+                    font_size,
+                    rendered_line_height,
+                    content_bbox.height * float(element.payload.get("source_scale", 1.0)) * fit_scale,
+                    lines,
+                )
+            paragraph.paragraph_format.line_spacing = Pt(rendered_line_height)
             paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
         elif role:
             paragraph.paragraph_format.line_spacing = role.line_spacing
@@ -652,6 +679,12 @@ class ReflowDocxRenderer:
             output += ("\n" if float(top) >= row_bottom - min(float(height), row_bottom - float(tops[0])) * 0.10 else " ") + str(line)
             row_bottom = max(row_bottom, float(top) + float(height))
         return output
+
+    @staticmethod
+    def _content_bbox(element) -> Rect:
+        if element.content_bbox is not None:
+            return element.content_bbox
+        return Rect.from_sequence(element.payload.get("source_bbox") or (0, 0, 1, 1))
 
     @staticmethod
     def _decode_image(value):
