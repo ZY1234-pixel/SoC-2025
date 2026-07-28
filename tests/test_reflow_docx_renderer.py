@@ -20,6 +20,7 @@ from docflow.model.stages import (
     PlannedElement,
     Rect,
     SemanticElement,
+    TextStructure,
     TypographicRole,
 )
 from docflow.planning import ReflowPlanner
@@ -224,7 +225,7 @@ def test_native_table_respects_source_left_anchor() -> None:
     assert table._tbl.tblPr.find(qn("w:tblInd")).get(qn("w:w")) == "480"
 
 
-def test_native_table_collapses_sparse_cells_under_one_spanning_header() -> None:
+def test_native_table_preserves_sparse_source_columns_and_header_span() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     element = PlannedElement(
         "table",
@@ -243,9 +244,10 @@ def test_native_table_collapses_sparse_cells_under_one_spanning_header() -> None
     ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
 
     table = container.tables[0]
-    assert len(table.columns) == 2
+    assert len(table.columns) == 4
     assert table.cell(1, 1).text == "kite"
-    assert table.cell(2, 1).text == "lion"
+    assert table.cell(2, 3).text == "lion"
+    assert table._tbl.xpath('.//w:gridSpan[@w:val="3"]')
 
 
 def test_numbered_equation_clears_word_default_cell_paragraph_spacing() -> None:
@@ -319,6 +321,7 @@ def test_question_block_preserves_option_rows() -> None:
         "body",
         text="1 Question A. First B. Second C. Third",
         payload={"lines": ("1 Question", "A. First", "B. Second", "C. Third")},
+        text_structure=TextStructure(preserve_source_lines=True, is_list=True),
     )
 
     assert ReflowDocxRenderer._visual_text(element) == "1 Question\nA. First\nB. Second\nC. Third"
@@ -327,6 +330,24 @@ def test_question_block_preserves_option_rows() -> None:
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
     ReflowDocxRenderer()._write_text(paragraph, element, {"body": role}, 1.0, 100)
     assert paragraph.alignment == WD_ALIGN_PARAGRAPH.LEFT
+
+
+def test_vertical_text_remains_editable_in_a_vertical_cell() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "aside",
+        "paragraph_group",
+        "body",
+        text="公司证券研究报告",
+        payload={"lines": ("公司证券研究报告",), "source_bbox": (20, 100, 60, 700), "source_scale": 0.5},
+        text_structure=TextStructure(orientation="vertical"),
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._render_element(container, element, {"body": role}, 1.0, 100)
+
+    assert container.tables[0].cell(0, 0).text == "公司证券研究报告"
+    assert container.tables[0]._tbl.xpath('.//w:textDirection[@w:val="tbRl"]')
 
 
 def test_multiline_heading_font_fits_each_preserved_source_line() -> None:

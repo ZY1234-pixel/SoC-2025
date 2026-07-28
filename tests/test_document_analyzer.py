@@ -228,8 +228,49 @@ def test_vertical_cjk_sidebar_keeps_visual_orientation() -> None:
 
     element = DocumentAnalyzer().analyze(evidence).pages[0].elements[0]
 
-    assert element.kind == "figure_group"
-    assert element.text == ""
+    assert element.kind == "paragraph_group"
+    assert element.text == "公司证券研究报告"
+    assert element.text_structure.orientation == "vertical"
+
+
+def test_analyzer_records_list_lines_and_geometry_once() -> None:
+    item = RecognitionItem(
+        "question",
+        "text",
+        Rect(100, 100, 900, 300),
+        1,
+        text_lines=(
+            TextEvidence("Question", polygon=((100, 100), (300, 100), (300, 130), (100, 130))),
+            TextEvidence("A. First", polygon=((140, 150), (300, 150), (300, 180), (140, 180))),
+            TextEvidence("B. Second", polygon=((140, 200), (320, 200), (320, 230), (140, 230))),
+        ),
+    )
+
+    element = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))
+    ).pages[0].elements[0]
+
+    assert element.text_structure.preserve_source_lines is True
+    assert element.text_structure.is_list is True
+    assert element.text_structure.hanging_indent_px == 40
+
+
+def test_analyzer_uses_polygon_thickness_for_rotated_text_height() -> None:
+    item = RecognitionItem(
+        "rotated",
+        "text",
+        Rect(0, 497, 116, 623),
+        1,
+        text_lines=(
+            TextEvidence("星学", polygon=((0, 558), (77, 497), (116, 562), (13, 623))),
+        ),
+    )
+
+    element = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))
+    ).pages[0].elements[0]
+
+    assert element.payload["line_heights_px"][0] < element.bbox.height
 
 
 def test_ocr_lines_are_clipped_to_their_layout_region() -> None:
@@ -401,6 +442,75 @@ def test_style_clustering_raises_a_clipped_single_line_paragraph_to_body_consens
 
     assert by_id[assignments["clipped"]].font_size_pt == 13.0
     assert by_id[assignments["clipped-heading"]].font_size_pt == 13.0
+
+
+def test_style_clustering_preserves_reliably_measured_small_text() -> None:
+    elements = tuple(
+        SemanticElement(
+            f"body-{index}",
+            "paragraph_group",
+            Rect(100, 100 + index * 100, 900, 169 + index * 100),
+            index,
+            (f"r{index}",),
+            text="Body paragraph content " * 5,
+            payload={"lines": ("first", "second", "third"), "line_heights_px": (23, 23, 23)},
+        )
+        for index in range(3)
+    ) + (
+        SemanticElement(
+            "footnote",
+            "paragraph_group",
+            Rect(100, 500, 500, 512),
+            4,
+            ("footnote-raw",),
+            text="Measured footnote",
+            payload={"lines": ("Measured footnote",), "line_heights_px": (11,), "text_color": "#555555"},
+        ),
+    )
+
+    roles, assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, elements),))
+    by_id = {role.role_id: role for role in roles}
+
+    assert by_id[assignments["footnote"]].font_size_pt < by_id[assignments["body-0"]].font_size_pt
+
+
+def test_style_clustering_preserves_a_distinct_confident_font_role() -> None:
+    elements = tuple(
+        SemanticElement(
+            f"heading-{index}",
+            "heading",
+            Rect(100, 100 + index * 50, 900, 140 + index * 50),
+            index,
+            (f"r{index}",),
+            text="标题文本",
+            payload={
+                "lines": ("标题文本",),
+                "font_family": "楷体",
+                "font_prediction": {"accepted": True, "margin": 0.9},
+            },
+        )
+        for index in range(3)
+    ) + (
+        SemanticElement(
+            "accent",
+            "heading",
+            Rect(100, 300, 900, 340),
+            4,
+            ("accent-raw",),
+            text="独立标题",
+            payload={
+                "lines": ("独立标题",),
+                "font_family": "仿宋",
+                "text_color": "#335577",
+                "font_prediction": {"accepted": True, "margin": 0.9},
+            },
+        ),
+    )
+
+    roles, assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, elements),))
+    by_id = {role.role_id: role for role in roles}
+
+    assert by_id[assignments["accent"]].font_family == "仿宋"
 
 
 def test_style_clustering_unifies_moderate_body_size_noise() -> None:

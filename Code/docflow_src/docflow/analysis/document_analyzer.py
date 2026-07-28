@@ -23,6 +23,7 @@ from docflow.model.stages import (
     RecognitionItem,
     Rect,
     SemanticElement,
+    TextStructure,
     TypographicRole,
 )
 
@@ -48,6 +49,9 @@ _TEXT_CATEGORIES = {
     "title",
 }
 _FURNITURE = {"header", "footer", "page_number"}
+_LIST_MARKER_RE = re.compile(
+    r"^\s*(?:[\u2022\u25cf\u25aa\u25e6]|[\u2460-\u2473]|(?:\(?\d{1,3}\)?|[A-Za-z])[.)\u3001\uff0e])"
+)
 
 
 def _join_text_segments(left: str, right: str) -> str:
@@ -230,7 +234,7 @@ class DocumentAnalyzer:
             "latex": primary.latex,
             "lines": tuple(value for _line, value, _bbox in visible_lines),
             "line_heights_px": tuple(
-                bbox.height for _line, _value, bbox in visible_lines if bbox is not None
+                self._line_height(line, bbox) for line, _value, bbox in visible_lines if bbox is not None
             ),
             "line_tops_px": tuple(
                 bbox.y1 for _line, _value, bbox in visible_lines if bbox is not None
@@ -240,7 +244,7 @@ class DocumentAnalyzer:
             ),
             "caption": self._merge_caption_text(captions),
             "caption_line_heights_px": tuple(
-                bbox.height for _line, _value, bbox in caption_lines if bbox is not None
+                self._line_height(line, bbox) for line, _value, bbox in caption_lines if bbox is not None
             ),
             "caption_alignment": self._caption_alignment(primary, captions),
             "caption_position": (
@@ -284,6 +288,31 @@ class DocumentAnalyzer:
             source_ids=tuple(item.evidence_id for item in related),
             text=text,
             payload=payload,
+            text_structure=self._text_structure(primary, visible_lines),
+        )
+
+    @staticmethod
+    def _text_structure(primary: RecognitionItem, visible_lines) -> TextStructure:
+        lines = tuple(value for _line, value, _bbox in visible_lines)
+        marked = tuple(bool(_LIST_MARKER_RE.match(str(line))) for line in lines)
+        preserve_lines = len(lines) >= 2 and sum(marked) >= 2 and (
+            all(marked) or not marked[0] and all(marked[1:])
+        )
+        lefts = tuple(bbox.x1 for _line, _value, bbox in visible_lines if bbox is not None)
+        hanging_indent = 0.0
+        if preserve_lines and not marked[0] and len(lefts) == len(lines):
+            hanging_indent = max(median(lefts[1:]) - lefts[0], 0.0)
+        text = DocumentAnalyzer._text(primary)
+        vertical = primary.raw_type == "vertical_text" or (
+            primary.category == "text"
+            and primary.bbox.height >= primary.bbox.width * 2.5
+            and sum("\u4e00" <= char <= "\u9fff" for char in text) >= 3
+        )
+        return TextStructure(
+            preserve_source_lines=preserve_lines,
+            is_list=any(marked),
+            hanging_indent_px=hanging_indent,
+            orientation="vertical" if vertical else "horizontal",
         )
 
     def _infer_visual_style(self, item: RecognitionItem) -> dict:
@@ -370,13 +399,6 @@ class DocumentAnalyzer:
         if item.raw_type == "footer_image":
             return "footer"
         category = item.category
-        text = DocumentAnalyzer._text(item)
-        if (
-            category == "text"
-            and item.bbox.height >= item.bbox.width * 2.5
-            and sum("\u4e00" <= char <= "\u9fff" for char in text) >= 3
-        ):
-            return "figure_group"
         if category == "title":
             return "heading"
         if category == "figure":
@@ -651,27 +673,20 @@ class DocumentAnalyzer:
                 local_consensus = paragraph_consensus.get((base, color_bucket))
                 if local_consensus is not None and abs(size - local_consensus) <= max(1.0, local_consensus * 0.40):
                     size = local_consensus
-                if body_consensus is not None and size < body_consensus * 0.85:
+                if body_consensus is not None and not element.payload.get("line_heights_px") and size < body_consensus * 0.60:
                     size = body_consensus
-            elif base == "heading" and body_consensus is not None and size < body_consensus:
+            elif (
+                base == "heading"
+                and body_consensus is not None
+                and not element.payload.get("line_heights_px")
+                and size < body_consensus * 0.60
+            ):
                 size = body_consensus
             normalized_samples.append((element, size, base, font, color))
         samples = normalized_samples
 
         clusters = {}
         assignments: dict[str, str] = {}
-        font_votes = {}
-        for element, _size, base, font, _color in samples:
-            prediction = element.payload.get("font_prediction") or {}
-            if prediction.get("accepted") and float(prediction.get("margin", 0.0)) >= 0.8:
-                votes = font_votes.setdefault(base, {})
-                votes[font] = votes.get(font, 0) + 1
-        font_consensus = {}
-        for base, votes in font_votes.items():
-            dominant = max(votes, key=votes.get)
-            if sum(votes.values()) >= 3 and votes[dominant] * 2 > sum(votes.values()):
-                font_consensus[base] = dominant
-
         for element, size, base, font, color in sorted(samples, key=lambda item: (item[2], item[4], item[1])):
             color_bucket = tuple(int(color[index : index + 2], 16) // 32 for index in (1, 3, 5))
             groups = clusters.setdefault((base, color_bucket), [])
@@ -689,10 +704,7 @@ class DocumentAnalyzer:
                 for _element, font, _color in group["samples"]:
                     font_counts[font] = font_counts.get(font, 0) + 1
                 default_font = "黑体" if base == "heading" else "宋体"
-                dominant_font = font_consensus.get(
-                    base,
-                    max(font_counts, key=lambda font: (font_counts[font], font == default_font, font)),
-                )
+                dominant_font = max(font_counts, key=lambda font: (font_counts[font], font == default_font, font))
                 colors = [color for _element, _font, color in group["samples"]]
                 cluster_color = "#" + "".join(
                     f"{round(median(int(color[index : index + 2], 16) for color in colors)):02X}"
@@ -741,6 +753,17 @@ class DocumentAnalyzer:
             max(point[0] for point in polygon),
             max(point[1] for point in polygon),
         )
+
+    @staticmethod
+    def _line_height(line: TextEvidence, bbox: Rect) -> float:
+        points = tuple(line.polygon)
+        if len(points) < 4:
+            return bbox.height
+        edges = [
+            ((right[0] - left[0]) ** 2 + (right[1] - left[1]) ** 2) ** 0.5
+            for left, right in zip(points, points[1:] + points[:1])
+        ]
+        return min((edge for edge in edges if edge > 0), default=bbox.height)
 
     @staticmethod
     def _union(rectangles: Iterable[Rect]) -> Rect:

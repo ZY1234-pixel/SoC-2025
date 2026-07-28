@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import re
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import replace
@@ -23,18 +22,14 @@ from docflow.model.stages import (
     ReflowPagePlan,
 )
 from docflow.renderer.docx_utils.html_table import (
-    collapse_sparse_header_spans,
     estimate_text_units,
     get_table_cell_placements,
     get_table_column_weights,
 )
 
 
-_CROSS_ENGINE_PAGE_RESERVE_PT = 12.0
-
-
 class ReflowPlanner:
-    def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.96) -> None:
+    def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.94) -> None:
         self.page_long_edge_pt = float(page_long_edge_pt)
         self.word_safety_factor = float(word_safety_factor)
 
@@ -61,7 +56,7 @@ class ReflowPlanner:
         edge_candidates = [
             element
             for element in page.elements
-            if element.kind == "figure_group"
+            if (element.kind == "figure_group" or element.text_structure.orientation == "vertical")
             and element.bbox.width <= page.width_px * 0.08
             and element.bbox.height >= element.bbox.width * 2.5
             and (element.bbox.x2 <= page.width_px * 0.12 or element.bbox.x1 >= page.width_px * 0.88)
@@ -84,7 +79,6 @@ class ReflowPlanner:
         )
         usable_width = geometry.width_pt - geometry.margin_left_pt - geometry.margin_right_pt
         sections, placement = self._build_sections(body, bounds, usable_width)
-        sections, placement = self._promote_margin_notes(sections, body, placement, bounds, scale)
         sections, placement = self._promote_wrapped_media(sections, body, placement, scale)
         sections = tuple(self._with_vertical_tracks(section, body, scale) for section in sections)
         container_frames = self._container_frames(body, sections, placement, bounds)
@@ -102,9 +96,7 @@ class ReflowPlanner:
             for element in page.elements
         }
         option_indents = {
-            element.element_id: self._option_hanging_indent(element, scale)
-            if self._preserve_line_breaks(element)
-            else 0.0
+            element.element_id: element.text_structure.hanging_indent_px * scale
             for element in page.elements
         }
         body_font_size = role_by_id[default_body_role].font_size_pt if default_body_role in role_by_id else 10.5
@@ -118,6 +110,7 @@ class ReflowPlanner:
                 element.kind,
                 role_id=element.role_id or default_body_role,
                 text=element.text,
+                text_structure=element.text_structure,
                 payload={
                     **dict(element.payload),
                     "source_bbox": (element.bbox.x1, element.bbox.y1, element.bbox.x2, element.bbox.y2),
@@ -127,7 +120,6 @@ class ReflowPlanner:
                     ),
                     "column": placement.get(element.element_id, 0),
                     "alignment": alignments[element.element_id],
-                    "preserve_line_breaks": self._preserve_line_breaks(element),
                     "first_line_indent_pt": (
                         self._first_line_indent(element, scale)
                         - hanging_indents[element.element_id]
@@ -189,7 +181,9 @@ class ReflowPlanner:
     def _build_sections(self, elements, bounds: Rect, usable_width: float):
         sections = []
         placement = {}
-        anchor_lanes = self._anchor_lanes(elements, bounds.width) or self._local_visual_lanes(elements, bounds.width)
+        anchor_lanes = self._anchor_lanes(elements, bounds.width)
+        if len(anchor_lanes) < 2:
+            anchor_lanes = self._local_visual_lanes(elements, bounds.width) or anchor_lanes
         lane_bounds = [
             (median(self._layout_bbox(item).x1 for item in lane), median(self._layout_bbox(item).x2 for item in lane))
             for lane in anchor_lanes
@@ -238,102 +232,6 @@ class ReflowPlanner:
                 sections.append(FlowSection(section_id, FlowKind.SINGLE, (element.element_id,)))
                 placement[element.element_id] = 0
         return tuple(sections), placement
-
-    @staticmethod
-    def _promote_margin_notes(sections, elements, placement, bounds: Rect, source_scale: float):
-        by_id = {element.element_id: element for element in elements}
-        main_text = [
-            element
-            for element in elements
-            if element.kind == "paragraph_group" and element.bbox.width >= bounds.width * 0.55
-        ]
-        if len(main_text) < 2:
-            return sections, placement
-        main_left = median(element.bbox.x1 for element in main_text)
-        main_right = median(element.bbox.x2 for element in main_text)
-        main_width = max(main_right - main_left, 1.0)
-        section_by_id = {
-            identifier: index
-            for index, section in enumerate(sections)
-            for identifier in section.element_ids
-        }
-        replacements = {}
-        removed = set()
-        updated_placement = dict(placement)
-        for note in elements:
-            if (
-                note.kind != "paragraph_group"
-                or note.bbox.width > main_width * 0.20
-                or not (note.bbox.x2 <= main_left + main_width * 0.03 or note.bbox.x1 >= main_right - main_width * 0.03)
-            ):
-                continue
-            note_section_index = section_by_id[note.element_id]
-            note_section = sections[note_section_index]
-            if note_section.kind != FlowKind.SINGLE:
-                continue
-            anchors = [
-                element
-                for element in main_text
-                if max(0.0, min(note.bbox.y2, element.bbox.y2) - max(note.bbox.y1, element.bbox.y1))
-                / max(min(note.bbox.height, element.bbox.height), 1.0)
-                >= 0.20
-                and sections[section_by_id[element.element_id]].kind == FlowKind.SINGLE
-            ]
-            if not anchors:
-                continue
-            anchor = max(anchors, key=lambda element: min(note.bbox.y2, element.bbox.y2) - max(note.bbox.y1, element.bbox.y1))
-            anchor_section_index = section_by_id[anchor.element_id]
-            if anchor_section_index in replacements:
-                continue
-            anchor_section = sections[anchor_section_index]
-            side = "left" if note.bbox.x2 <= main_left + main_width * 0.03 else "right"
-            element_ids = (
-                anchor_section.element_ids
-                if note_section_index == anchor_section_index
-                else anchor_section.element_ids + (note.element_id,)
-            )
-            rail_ids = tuple(
-                identifier
-                for identifier in element_ids
-                if by_id[identifier].bbox.width <= main_width * 0.30
-                and (
-                    by_id[identifier].bbox.x2 <= main_left + main_width * 0.03
-                    if side == "left"
-                    else by_id[identifier].bbox.x1 >= main_right - main_width * 0.03
-                )
-            )
-            main_ids = tuple(identifier for identifier in element_ids if identifier not in rail_ids)
-            if not rail_ids or not main_ids:
-                continue
-            split = main_left if side == "left" else main_right
-            first_width = max((split - bounds.x1) * source_scale, 1.0)
-            total_width = bounds.width * source_scale
-            second_width = max(total_width - first_width, 1.0)
-            if side == "left":
-                cells = (GridCell(0, 0, rail_ids), GridCell(0, 1, main_ids))
-                columns = (first_width, second_width)
-                rail_column, main_column = 0, 1
-            else:
-                cells = (GridCell(0, 0, main_ids), GridCell(0, 1, rail_ids))
-                columns = (first_width, second_width)
-                rail_column, main_column = 1, 0
-            replacements[anchor_section_index] = FlowSection(
-                anchor_section.section_id,
-                FlowKind.GRID,
-                element_ids,
-                columns,
-                grid_cells=cells,
-            )
-            updated_placement.update((identifier, rail_column) for identifier in rail_ids)
-            updated_placement.update((identifier, main_column) for identifier in main_ids)
-            if note_section_index != anchor_section_index:
-                removed.add(note_section_index)
-        promoted = tuple(
-            replacements.get(index, section)
-            for index, section in enumerate(sections)
-            if index not in removed
-        )
-        return promoted, updated_placement
 
     @staticmethod
     def _promote_wrapped_media(sections, elements, placement, source_scale: float):
@@ -521,7 +419,7 @@ class ReflowPlanner:
                 continue
             target_width = target_widths[element.element_id]
             right_indent = max(right - element.bbox.x2, 0.0) / source_width * target_width
-            if ReflowPlanner._preserve_line_breaks(element):
+            if element.text_structure.preserve_source_lines:
                 right_indent = 0.0
             result[element.element_id] = (
                 max(element.bbox.x1 - left, 0.0) / source_width * target_width,
@@ -542,8 +440,13 @@ class ReflowPlanner:
         if len(elements) == 1:
             section_id = f"section_{section_index}"
             return FlowSection(section_id, FlowKind.SINGLE, (elements[0].element_id,)), {elements[0].element_id: 0}
-        lanes = self._anchor_lanes(elements, bounds.width) or list(fallback_lanes)
-        for rail in self._side_rail_lanes(elements, bounds):
+        lanes = self._anchor_lanes(elements, bounds.width)
+        if len(lanes) < 2:
+            lanes = (
+                self._local_visual_lanes(elements, bounds.width)
+                or (list(fallback_lanes) if len(fallback_lanes) >= 2 else lanes)
+            )
+        for rail in self._side_rail_lanes(elements, bounds, lanes):
             rail_center = median((item.bbox.x1 + item.bbox.x2) / 2.0 for item in rail)
             if all(
                 abs(rail_center - median((item.bbox.x1 + item.bbox.x2) / 2.0 for item in lane)) > bounds.width * 0.08
@@ -655,6 +558,26 @@ class ReflowPlanner:
                 gutter_pt=gutter,
             ), placement
 
+        lane_sizes = [sum(placement[item.element_id] == column for item in elements) for column in range(len(lanes))]
+        if (
+            max(spans.values(), default=1) == 1
+            and min(widths) <= max(widths) * 0.50
+            and min(lane_sizes) == 1
+        ):
+            cells = tuple(
+                GridCell(0, column, tuple(item.element_id for item in elements if placement[item.element_id] == column))
+                for column in range(len(lanes))
+                if any(placement[item.element_id] == column for item in elements)
+            )
+            return FlowSection(
+                section_id,
+                FlowKind.GRID,
+                element_ids,
+                column_widths_pt=column_widths,
+                gutter_pt=gutter,
+                grid_cells=cells,
+            ), placement
+
         rows = (
             self._spanning_grid_rows(elements, placement, spans)
             if max(spans.values(), default=1) > 1
@@ -710,11 +633,11 @@ class ReflowPlanner:
         ), placement
 
     @staticmethod
-    def _side_rail_lanes(elements, bounds: Rect):
+    def _side_rail_lanes(elements, bounds: Rect, main_lanes=()):
         candidates = [
             item
             for item in elements
-            if item.kind == "figure_group"
+            if (item.kind == "figure_group" or item.text_structure.orientation == "vertical")
             and item.bbox.width <= bounds.width * 0.08
             and (
                 item.bbox.x2 <= bounds.x1 + bounds.width * 0.12
@@ -736,11 +659,34 @@ class ReflowPlanner:
                 groups.append([item])
             else:
                 target.append(item)
-        return [
+        rails = [
             group
             for group in groups
             if len(group) >= 2 and sum(item.bbox.height for item in group) >= bounds.height * 0.30
         ]
+        lane_ids = {item.element_id for lane in main_lanes for item in lane}
+        for lane in main_lanes:
+            if len(lane) < 2:
+                continue
+            left = median(ReflowPlanner._layout_bbox(item).x1 for item in lane)
+            right = median(ReflowPlanner._layout_bbox(item).x2 for item in lane)
+            lane_width = max(right - left, 1.0)
+            for item in elements:
+                bbox = ReflowPlanner._layout_bbox(item)
+                if (
+                    item.element_id in lane_ids
+                    or bbox.width > lane_width * 0.30
+                    or not (bbox.x2 <= left or bbox.x1 >= right)
+                ):
+                    continue
+                if any(
+                    max(0.0, min(bbox.y2, ReflowPlanner._layout_bbox(peer).y2) - max(bbox.y1, ReflowPlanner._layout_bbox(peer).y1))
+                    / max(min(bbox.height, ReflowPlanner._layout_bbox(peer).height), 1.0)
+                    >= 0.20
+                    for peer in lane
+                ):
+                    rails.append([item])
+        return rails
 
     @staticmethod
     def _anchor_lanes(elements, page_width: float):
@@ -761,7 +707,7 @@ class ReflowPlanner:
         ]
         candidate_lanes = []
         for candidate_index, candidates in enumerate(candidate_sets):
-            if len(candidates) < 4:
+            if len(candidates) < 2:
                 candidate_lanes.append([])
                 continue
             lanes = []
@@ -818,7 +764,12 @@ class ReflowPlanner:
             ]
             if all(abs(text - visual) <= tolerance for text, visual in zip(text_centers, visual_centers)):
                 return text_lanes
-        return []
+        dominant = max(
+            (lane for lanes in candidate_lanes for lane in lanes),
+            key=len,
+            default=None,
+        )
+        return [dominant] if dominant else []
 
     @staticmethod
     def _local_visual_lanes(elements, page_width: float):
@@ -1007,7 +958,7 @@ class ReflowPlanner:
         return spacing
 
     def _fit_scale(self, sections, elements, roles, usable_width: float, usable_height: float) -> float:
-        target = max(usable_height * self.word_safety_factor - _CROSS_ENGINE_PAGE_RESERVE_PT, 1.0)
+        target = max(usable_height * self.word_safety_factor, 1.0)
         section_overhead = sum(section.kind != FlowKind.SINGLE for section in sections) * 0.05
 
         def content_height(scale: float) -> float:
@@ -1015,7 +966,6 @@ class ReflowPlanner:
                 self._section_height(section, elements, roles, usable_width, scale) for section in sections
             )
 
-        # Reserve vertical capacity without shrinking pages that already fit inside it.
         upper = 1.0
         if content_height(upper) <= target:
             return upper
@@ -1126,8 +1076,6 @@ class ReflowPlanner:
         if element.kind == "table_group" and element.payload.get("html"):
             soup = BeautifulSoup(str(element.payload["html"]), "html.parser")
             table = soup.find("table")
-            if table:
-                collapse_sparse_header_spans(table)
             rows = table.find_all("tr") if table else []
             weights = get_table_column_weights(table) if table else (1.0,)
             base_size = float(element.payload.get("table_font_size_pt") or (role.font_size_pt if role else 10.5))
@@ -1175,7 +1123,7 @@ class ReflowPlanner:
             cjk_count = sum(1 for char in element.text if ord(char) >= 0x2E80)
             units = estimate_text_units(element.text)
             content_lines = max(1, math.ceil(units * font_size / max(width, 1.0)))
-            if element.payload.get("preserve_line_breaks"):
+            if element.text_structure.preserve_source_lines:
                 lines = len(source_lines)
             elif source_lines:
                 source_bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
@@ -1194,15 +1142,6 @@ class ReflowPlanner:
         source_width = (float(bbox[2]) - float(bbox[0])) * float(element.payload.get("source_scale", 1.0))
         visual_width = min(width * float(element.payload.get("width_fraction", 1.0)), source_width) * fit_scale
         return spacing + visual_width * aspect + ReflowPlanner._caption_height(element, fit_scale)
-
-    @staticmethod
-    def _preserve_line_breaks(element) -> bool:
-        lines = element.payload.get("lines") or ()
-        return (
-            element.kind == "paragraph_group"
-            and len(lines) >= 3
-            and all(re.match(r"^[A-Z][.)\u3001\uff0e]", str(line).lstrip()) for line in lines[1:])
-        )
 
     @staticmethod
     def _caption_height(element, fit_scale: float) -> float:
@@ -1227,7 +1166,7 @@ class ReflowPlanner:
         element_center = (element.bbox.x1 + element.bbox.x2) / 2.0
         centered = abs(element_center - (left + right) / 2.0) <= width * 0.04
         source_lines = element.payload.get("lines") or ()
-        if element.kind == "paragraph_group" and element.text.lstrip().startswith(("•", "●", "▪")):
+        if element.kind == "paragraph_group" and element.text_structure.is_list:
             return "left"
         if element.kind == "heading" and len(source_lines) > 1 and element.bbox.x1 <= left + width * 0.05:
             return "left"
@@ -1244,13 +1183,6 @@ class ReflowPlanner:
             return 0.0
         indent = float(lefts[0]) - median(float(value) for value in lefts[1:])
         return max(indent * source_scale, 0.0)
-
-    @staticmethod
-    def _option_hanging_indent(element, source_scale: float) -> float:
-        lefts = element.payload.get("line_lefts_px") or ()
-        if len(lefts) < 2:
-            return 0.0
-        return max(median(float(value) for value in lefts[1:]) - float(lefts[0]), 0.0) * source_scale
 
     @staticmethod
     def _heading_hanging_indent(element, source_scale: float) -> float:

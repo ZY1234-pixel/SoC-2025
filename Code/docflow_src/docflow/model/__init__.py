@@ -17,6 +17,7 @@ from docflow.model.stages import (
     ReflowPagePlan,
     SemanticElement,
     TextEvidence,
+    TextStructure,
     TypographicRole,
 )
 

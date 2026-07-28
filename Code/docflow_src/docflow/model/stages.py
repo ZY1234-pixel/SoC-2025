@@ -145,6 +145,22 @@ class TypographicRole:
 
 
 @dataclass(frozen=True)
+class TextStructure:
+    """Semantic text geometry inferred once and consumed by later stages."""
+
+    preserve_source_lines: bool = False
+    is_list: bool = False
+    hanging_indent_px: float = 0.0
+    orientation: str = "horizontal"
+
+    def __post_init__(self) -> None:
+        if self.hanging_indent_px < 0:
+            raise ValueError("text hanging indent must not be negative")
+        if self.orientation not in {"horizontal", "vertical"}:
+            raise ValueError("invalid text orientation")
+
+
+@dataclass(frozen=True)
 class SemanticElement:
     element_id: str
     kind: str
@@ -155,6 +171,7 @@ class SemanticElement:
     role_id: Optional[str] = None
     child_ids: Tuple[str, ...] = ()
     payload: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    text_structure: TextStructure = field(default_factory=TextStructure)
 
     def __post_init__(self) -> None:
         if not self.source_ids:
@@ -287,6 +304,7 @@ class PlannedElement:
     role_id: Optional[str] = None
     text: str = ""
     payload: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    text_structure: TextStructure = field(default_factory=TextStructure)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "payload", _freeze(self.payload))

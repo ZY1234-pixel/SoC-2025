@@ -49,40 +49,6 @@ def get_table_cell_placements(table_soup) -> list[tuple[int, int, int, int, obje
     return placements
 
 
-def collapse_sparse_header_spans(table_soup) -> None:
-    for row_index, column, _row_span, column_span, header in tuple(get_table_cell_placements(table_soup)):
-        if column_span <= 1:
-            continue
-        rows = get_table_rows(table_soup)
-        region_rows = []
-        for target_row in range(row_index + 1, len(rows)):
-            cells = [
-                (cell_column, span, cell)
-                for source_row, cell_column, _span_rows, span, cell in get_table_cell_placements(table_soup)
-                if source_row == target_row and column <= cell_column < column + column_span
-            ]
-            if (
-                not cells
-                or sum(span for _cell_column, span, _cell in cells) != column_span
-                or any(cell_column + span > column + column_span for cell_column, span, _cell in cells)
-                or sum(bool(cell.get_text(" ", strip=True)) for _cell_column, _span, cell in cells) > 1
-            ):
-                region_rows = []
-                break
-            region_rows.append(cells)
-        if not region_rows or not any(len(cells) > 1 for cells in region_rows):
-            continue
-        header.attrs.pop("colspan", None)
-        for cells in region_rows:
-            tags = [cell for _column, _span, cell in cells]
-            text = next((cell.get_text(" ", strip=True) for cell in tags if cell.get_text(" ", strip=True)), "")
-            tags[0].string = text
-            tags[0].attrs.pop("colspan", None)
-            for cell in tags[1:]:
-                cell.decompose()
-        break
-
-
 def get_table_column_weights(table_soup) -> tuple[float, ...]:
     _rows, columns = get_table_dimensions(table_soup)
     weights = [1.0] * columns

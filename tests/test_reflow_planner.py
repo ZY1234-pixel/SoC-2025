@@ -10,12 +10,13 @@ from docflow.model.stages import (
     PlannedElement,
     Rect,
     SemanticElement,
+    TextStructure,
     TypographicRole,
 )
 from docflow.planning import ReflowPlanner
 
 
-def _element(identifier, bbox, order, text="text", kind="paragraph_group", role="body", payload=None):
+def _element(identifier, bbox, order, text="text", kind="paragraph_group", role="body", payload=None, text_structure=None):
     return SemanticElement(
         identifier,
         kind,
@@ -25,6 +26,7 @@ def _element(identifier, bbox, order, text="text", kind="paragraph_group", role=
         text=text,
         role_id=role,
         payload=payload or {},
+        text_structure=text_structure or TextStructure(),
     )
 
 
@@ -378,6 +380,7 @@ def test_bullet_paragraph_at_right_edge_is_left_aligned() -> None:
         1,
         "• A list item",
         payload={"lines": ("• A list item",)},
+        text_structure=TextStructure(is_list=True),
     )
     anchor = _element("anchor", (100, 300, 900, 400), 2)
 
@@ -406,11 +409,12 @@ def test_option_rows_are_planned_as_explicit_line_breaks() -> None:
             "lines": ("Question", "A. First", "B. Second", "C. Third"),
             "line_lefts_px": (100, 140, 140, 140),
         },
+        text_structure=TextStructure(preserve_source_lines=True, is_list=True, hanging_indent_px=40),
     )
 
     planned = ReflowPlanner().plan(_analysis((question,))).pages[0].elements[0]
 
-    assert planned.payload["preserve_line_breaks"] is True
+    assert planned.text_structure.preserve_source_lines is True
     assert planned.payload["left_indent_pt"] > 0
     assert planned.payload["first_line_indent_pt"] < 0
     assert planned.payload["right_indent_pt"] == 0
