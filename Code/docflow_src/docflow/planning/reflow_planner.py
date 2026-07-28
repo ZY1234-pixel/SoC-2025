@@ -1185,7 +1185,7 @@ class ReflowPlanner:
                     units = estimate_text_units(cell.get_text(" ", strip=True))
                     lines = max(1, math.ceil(units * font_size / max((cell_width - 2.0) * 0.96, 1.0)))
                     row_height = max(row_height, lines * font_size * 1.2)
-                height += row_height + 2.0
+                height += row_height + 3.0
             height = max(height, float(element.payload.get("table_height_pt") or 0.0) * fit_scale)
             return spacing + height + ReflowPlanner._caption_height(element, fit_scale)
         if role is not None and element.text:

@@ -361,6 +361,24 @@ def test_table_font_size_excludes_grouped_caption_height() -> None:
     assert planned.payload["table_font_size_pt"] == pytest.approx(200 * 841.89 / 1400 / 10 / 1.45)
 
 
+def test_table_height_budget_reserves_word_row_box_drift() -> None:
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": "<table><tr><td>A</td></tr><tr><td>B</td></tr></table>",
+            "table_font_size_pt": 8,
+            "width_fraction": 1.0,
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    height = ReflowPlanner._element_height(element, {"body": role}, 100, 1.0)
+
+    assert height == pytest.approx(25.2)
+
+
 def test_default_page_budget_reserves_incremental_text_box_wrap_error() -> None:
     compact = ReflowPlanner().plan(_analysis((_element("compact", (100, 100, 900, 500), 1, "x" * 1760),))).pages[0]
     fragmented = ReflowPlanner().plan(
