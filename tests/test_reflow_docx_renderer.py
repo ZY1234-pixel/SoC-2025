@@ -230,6 +230,27 @@ def test_heading_preserves_visual_rows_but_joins_overlapping_lines() -> None:
     assert ReflowDocxRenderer._visual_text(element) == "2 Chapter title\nContinued"
 
 
+def test_multiline_heading_font_fits_each_preserved_source_line() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "heading",
+        "heading",
+        "heading",
+        text="A deliberately long heading Continued",
+        payload={
+            "lines": ("A deliberately long heading", "Continued"),
+            "line_tops_px": (0, 20),
+            "line_heights_px": (18, 18),
+            "alignment": "left",
+        },
+    )
+    role = TypographicRole("heading", "宋体", "Times New Roman", 20, 1.0)
+
+    ReflowDocxRenderer()._render_element(container, element, {"heading": role}, 1.0, 100)
+
+    assert container.paragraphs[-1].runs[0].font.size.pt < role.font_size_pt
+
+
 def test_column_layout_collapses_word_trailing_paragraph() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)

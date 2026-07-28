@@ -85,6 +85,16 @@ class ReflowPlanner:
         container_widths = {identifier: max(right - left, 1.0) for identifier, (left, right) in container_frames.items()}
         horizontal_indents = self._horizontal_indents(body, sections, placement, container_frames, usable_width)
         vertical_spacing = self._vertical_spacing(body, sections, placement, scale)
+        alignments = {
+            element.element_id: self._alignment(element, container_frames.get(element.element_id, (bounds.x1, bounds.x2)))
+            for element in page.elements
+        }
+        hanging_indents = {
+            element.element_id: self._heading_hanging_indent(element, scale)
+            if alignments[element.element_id] == "left"
+            else 0.0
+            for element in page.elements
+        }
         body_font_size = role_by_id[default_body_role].font_size_pt if default_body_role in role_by_id else 10.5
         table_font_sizes = {
             element.element_id: self._table_font_size(element, scale, body_font_size)
@@ -104,12 +114,12 @@ class ReflowPlanner:
                         1.0,
                     ),
                     "column": placement.get(element.element_id, 0),
-                    "alignment": self._alignment(element, container_frames.get(element.element_id, (bounds.x1, bounds.x2))),
-                    "first_line_indent_pt": self._first_line_indent(element, scale),
+                    "alignment": alignments[element.element_id],
+                    "first_line_indent_pt": self._first_line_indent(element, scale) - hanging_indents[element.element_id],
                     "left_indent_pt": horizontal_indents.get(
                         element.element_id,
                         (max(element.bbox.x1 * scale - geometry.margin_left_pt, 0.0), 0.0),
-                    )[0],
+                    )[0] + hanging_indents[element.element_id],
                     "right_indent_pt": horizontal_indents.get(
                         element.element_id,
                         (0.0, max((page.width_px - element.bbox.x2) * scale - geometry.margin_right_pt, 0.0)),
@@ -1071,6 +1081,8 @@ class ReflowPlanner:
         element_center = (element.bbox.x1 + element.bbox.x2) / 2.0
         centered = abs(element_center - (left + right) / 2.0) <= width * 0.04
         source_lines = element.payload.get("lines") or ()
+        if element.kind == "heading" and len(source_lines) > 1 and element.bbox.x1 <= left + width * 0.05:
+            return "left"
         if centered and (element.kind == "heading" or element.bbox.width <= width * 0.75):
             return "center"
         if element.bbox.x2 >= right - width * 0.03 and element.bbox.x1 > left + width * 0.25 and len(source_lines) <= 2:
@@ -1084,6 +1096,13 @@ class ReflowPlanner:
             return 0.0
         indent = float(lefts[0]) - median(float(value) for value in lefts[1:])
         return max(indent * source_scale, 0.0)
+
+    @staticmethod
+    def _heading_hanging_indent(element, source_scale: float) -> float:
+        lefts = element.payload.get("line_lefts_px") or ()
+        if element.kind != "heading" or len(lefts) < 2:
+            return 0.0
+        return max(median(float(value) for value in lefts[1:]) - float(lefts[0]), 0.0) * source_scale
 
     @staticmethod
     def _source_line_height(element, role, source_scale: float):

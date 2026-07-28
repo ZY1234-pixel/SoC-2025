@@ -301,7 +301,21 @@ class ReflowDocxRenderer:
         role = roles.get(element.role_id) or self._body_role(roles)
         font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5) if role else None
         source_lines = element.payload.get("lines") or ()
-        if font_size and container_width and len(source_lines) == 1:
+        if font_size and container_width and element.kind == "heading" and len(source_lines) > 1:
+            left_indent = paragraph.paragraph_format.left_indent.pt if paragraph.paragraph_format.left_indent else 0.0
+            right_indent = paragraph.paragraph_format.right_indent.pt if paragraph.paragraph_format.right_indent else 0.0
+            first_indent = paragraph.paragraph_format.first_line_indent.pt if paragraph.paragraph_format.first_line_indent else 0.0
+            line_widths = (container_width - left_indent - right_indent - first_indent,) + (
+                container_width - left_indent - right_indent,
+            ) * (len(source_lines) - 1)
+            font_size = min(
+                font_size,
+                min(
+                    width * 0.98 / max(estimate_text_units(line), 1.0)
+                    for line, width in zip(source_lines, line_widths)
+                ),
+            )
+        elif font_size and container_width and len(source_lines) == 1:
             units = estimate_text_units(element.text)
             visual_width = container_width * float(element.payload.get("width_fraction", 1.0))
             font_size = min(font_size, visual_width * 0.90 / max(units, 1.0))
@@ -438,7 +452,7 @@ class ReflowDocxRenderer:
         )
         if fit_size >= minimum_size:
             font_size = min(font_size, fit_size)
-        row_height = max(float(element.payload.get("table_height_pt") or 0.0) * fit_scale / rows, font_size * 1.2)
+        row_height = max(float(element.payload.get("table_height_pt") or 0.0) * fit_scale / rows, font_size * 1.2 + 2.0)
         for row in table.rows:
             row.height = Pt(row_height)
             row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
@@ -458,7 +472,7 @@ class ReflowDocxRenderer:
             paragraph.paragraph_format.widow_control = False
             paragraph.paragraph_format.keep_together = False
             paragraph.paragraph_format.keep_with_next = False
-            set_cell_margins(cell, top=0, bottom=0, start=20, end=20)
+            set_cell_margins(cell, top=20, bottom=20, start=20, end=20)
             run = paragraph.add_run(cell_source.get_text(" ", strip=True))
             self._style_run(
                 run,

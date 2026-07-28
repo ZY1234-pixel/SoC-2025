@@ -317,6 +317,26 @@ def test_wide_two_line_paragraph_is_left_aligned() -> None:
     assert planned.payload["alignment"] == "left"
 
 
+def test_multiline_heading_anchored_to_column_left_is_not_centered() -> None:
+    heading = _element(
+        "heading",
+        (100, 100, 880, 180),
+        1,
+        "3.1 Long heading continued on the next line",
+        kind="heading",
+        payload={
+            "lines": ("3.1 Long heading", "continued on the next line"),
+            "line_lefts_px": (100, 180),
+        },
+    )
+
+    planned = ReflowPlanner().plan(_analysis((heading,))).pages[0].elements[0]
+
+    assert planned.payload["alignment"] == "left"
+    assert planned.payload["left_indent_pt"] > 0
+    assert planned.payload["first_line_indent_pt"] < 0
+
+
 def test_single_flow_multiline_paragraph_does_not_use_bbox_as_column_width() -> None:
     element = _element(
         "body",
