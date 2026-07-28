@@ -3,7 +3,7 @@ import base64
 import cv2
 import numpy as np
 
-from docflow.layout.color_inferrer import infer_crop_style, infer_table_row_fills, infer_table_rule_style
+from docflow.appearance.color_inferrer import infer_crop_style, infer_table_row_fills, infer_table_rule_style
 
 
 def test_crop_style_and_table_fill_are_inferred_from_region_pixels():

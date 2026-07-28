@@ -4,7 +4,7 @@ import io
 from PIL import Image
 
 from docflow.analysis import DocumentAnalyzer
-from docflow.layout.font_classifier import FONT_FAMILY_BY_LABEL, FontClassifier, FontPrediction
+from docflow.appearance.font_classifier import FONT_FAMILY_BY_LABEL, FontClassifier, FontPrediction
 from docflow.model.stages import RecognitionEvidence, RecognitionItem, RecognitionPage, Rect, TextEvidence
 
 

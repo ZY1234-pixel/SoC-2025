@@ -27,7 +27,7 @@ from preprocess import expand_to_pages
 from utils import ensure_runtime_paths, find_libreoffice, parse_formats, print_list
 from docflow.adapters.paddle_adapter import PaddleAdapter
 from docflow.analysis import DocumentAnalyzer
-from docflow.layout.font_classifier import FontClassifier
+from docflow.appearance.font_classifier import FontClassifier
 from docflow.model.stages import RecognitionEvidence
 from docflow.planning import ReflowPlanner
 from docflow.renderer.reflow_docx_renderer import ReflowDocxRenderer

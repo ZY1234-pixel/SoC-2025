@@ -13,8 +13,8 @@ from typing import Iterable, Optional
 from bs4 import BeautifulSoup
 from PIL import Image
 
-from docflow.layout.color_inferrer import infer_crop_style, infer_table_row_fills, infer_table_rule_style
-from docflow.layout.font_classifier import FONT_FAMILY_BY_LABEL
+from docflow.appearance.color_inferrer import infer_crop_style, infer_table_row_fills, infer_table_rule_style
+from docflow.appearance.font_classifier import FONT_FAMILY_BY_LABEL
 from docflow.model.stages import (
     AnalysisDiagnostic,
     AnalysisPage,
