@@ -435,10 +435,22 @@ class DocumentAnalyzer:
                 None,
             )
             if contained is None:
-                parts.append((normalized, text))
+                parts.append((normalized, text, item.bbox))
             elif len(normalized) > len(parts[contained][0]):
-                parts[contained] = (normalized, text)
-        return "\n".join(text for _normalized, text in parts)
+                parts[contained] = (normalized, text, item.bbox)
+        rows = []
+        for _normalized, text, bbox in parts:
+            center = (bbox.y1 + bbox.y2) / 2.0
+            if rows and abs(center - rows[-1][0]) <= min(bbox.height, rows[-1][1]) * 0.35:
+                rows[-1][0] = (rows[-1][0] + center) / 2.0
+                rows[-1][1] = max(rows[-1][1], bbox.height)
+                rows[-1][2].append((bbox.x1, text))
+            else:
+                rows.append([center, bbox.height, [(bbox.x1, text)]])
+        return "\n".join(
+            "\t".join(text for _left, text in sorted(items))
+            for _center, _height, items in rows
+        )
 
     @classmethod
     def _caption_alignment(cls, primary: RecognitionItem, captions: Iterable[RecognitionItem]) -> str:

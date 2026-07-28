@@ -468,9 +468,35 @@ def test_reflow_docx_contains_each_source_page_in_an_exact_height_frame(tmp_path
     assert row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY
     assert row.height.pt == pytest.approx(usable_height * plan.word_safety_factor, abs=0.1)
     assert row._tr.xpath("./w:trPr/w:cantSplit")
-    assert not document.paragraphs
-    assert document.element.body[-2].tag == qn("w:tbl")
+    assert len(document.paragraphs) == 1
+    assert document.paragraphs[0]._p.xpath('./w:pPr/w:spacing[@w:line="1"]')
+    assert document.element.body[-3].tag == qn("w:tbl")
     assert not document.element.body.xpath(".//w:sectPr/w:docGrid")
+
+
+def test_scaled_page_does_not_add_a_trailing_body_paragraph() -> None:
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+    element = SemanticElement(
+        "body",
+        "paragraph_group",
+        Rect(100, 100, 900, 1300),
+        1,
+        ("r1",),
+        text="x" * 10000,
+        role_id="body",
+    )
+    plan = ReflowPlanner().plan(
+        DocumentAnalysis(
+            (AnalysisPage(0, 1000, 1400, (element,)),),
+            (role,),
+        )
+    )
+    page = plan.pages[0]
+
+    document = ReflowDocxRenderer().build(plan)
+
+    assert page.fit_scale < 1.0
+    assert not document.paragraphs
 
 
 def test_layout_table_gutter_preserves_planned_content_width() -> None:

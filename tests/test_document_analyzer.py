@@ -112,6 +112,15 @@ def test_analyzer_relates_short_caption_label_through_its_subtitle() -> None:
     assert tables[1].payload["caption"] == "TABLE II\nResults"
 
 
+def test_analyzer_keeps_same_baseline_caption_fragments_on_one_line() -> None:
+    captions = (
+        _item("label", "figure_caption", (100, 100, 150, 125), 1, "Table 7"),
+        _item("title", "figure_caption", (300, 99, 700, 126), 2, "Measured results"),
+    )
+
+    assert DocumentAnalyzer._merge_caption_text(captions) == "Table 7\tMeasured results"
+
+
 def test_analyzer_joins_visual_lines_and_groups_editable_formula_number() -> None:
     paragraph = RecognitionItem(
         "body",

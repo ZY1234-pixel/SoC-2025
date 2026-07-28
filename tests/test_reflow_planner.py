@@ -93,7 +93,7 @@ def test_full_width_paragraphs_do_not_become_a_third_column_lane() -> None:
     assert len(page.sections[-1].column_widths_pt) == 2
 
 
-def test_planner_uses_grid_when_model_order_alternates_parallel_lanes() -> None:
+def test_planner_uses_sequential_columns_when_model_order_alternates_independent_text_lanes() -> None:
     elements = (
         _element("left-1", (100, 100, 430, 300), 1),
         _element("right-1", (570, 100, 900, 300), 2),
@@ -103,7 +103,8 @@ def test_planner_uses_grid_when_model_order_alternates_parallel_lanes() -> None:
 
     page = ReflowPlanner(word_safety_factor=0.9).plan(_analysis(elements)).pages[0]
 
-    assert page.sections[0].kind.value == "grid_flow"
+    assert page.sections[0].kind.value == "sequential_columns"
+    assert page.sections[0].gutter_pt > 0
     assert page.fit_scale <= 1.0
     assert [element.element_id for element in page.elements] == [element.element_id for element in elements]
     planned = {element.element_id: element for element in page.elements}
@@ -173,6 +174,32 @@ def test_grid_rows_do_not_duplicate_structural_paragraph_spacing() -> None:
     assert planned["bridge"].payload["space_before_pt"] == 0.0
 
 
+def test_grid_cell_starts_do_not_repeat_row_track_spacing() -> None:
+    elements = (
+        _element("left-visual", (100, 100, 430, 300), 1, text="", kind="figure_group"),
+        _element("right-visual", (570, 100, 900, 300), 2, text="", kind="figure_group"),
+        _element("following-heading", (100, 400, 430, 450), 3, kind="heading"),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+    planned = {element.element_id: element for element in page.elements}
+
+    assert page.sections[0].kind == FlowKind.GRID
+    assert planned["following-heading"].payload["space_before_pt"] == 0.0
+
+
+def test_page_budget_compresses_whitespace_before_typography() -> None:
+    elements = (
+        _element("first", (100, 100, 900, 600), 1, "First " * 80, payload={"lines": ("a",) * 8}),
+        _element("second", (100, 900, 900, 1300), 2, "Second " * 60, payload={"lines": ("b",) * 6}),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+
+    assert page.fit_scale == 1.0
+    assert 0 < page.elements[1].payload["space_before_pt"] < 300 * 841.89 / 1400
+
+
 def test_grid_assigns_narrow_elements_by_self_coverage() -> None:
     elements = (
         _element("left-1", (100, 100, 350, 250), 1),
@@ -187,7 +214,7 @@ def test_grid_assigns_narrow_elements_by_self_coverage() -> None:
 
     assert page.sections[0].kind == FlowKind.GRID
     assert planned["right-heading"].payload["column"] == 1
-    assert planned["right-heading"].payload["space_before_pt"] == pytest.approx(50 * 841.89 / 1400)
+    assert planned["right-heading"].payload["space_before_pt"] == 0.0
 
 
 def test_grid_text_frame_ignores_a_wider_figure_in_the_same_column() -> None:

@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from docx import Document
 from docx.enum.section import WD_SECTION
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING, WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
@@ -71,6 +71,8 @@ class ReflowDocxRenderer:
                 else:
                     self._render_grid(body, flow, elements, roles, page.fit_scale)
             self._collapse_trailing_paragraph(body)
+        if plan.pages and plan.pages[-1].fit_scale == 1.0:
+            self._collapse_section_break(document.add_paragraph())
         return document
 
     def _add_page_frame(self, document, geometry, word_safety_factor):
@@ -285,20 +287,20 @@ class ReflowDocxRenderer:
         self._write_block_spacing(container, element, fit_scale)
         if element.kind == "figure_group":
             if element.payload.get("caption_position") == "before":
-                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"))
+                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"), container_width)
             self._write_image(container, element, fit_scale, container_width)
             if element.payload.get("caption_position") != "before":
-                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"))
+                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"), container_width)
             return
         if element.kind == "equation_group":
             self._write_equation(container, element, roles, fit_scale, container_width)
             return
         if element.kind == "table_group":
             if element.payload.get("caption_position") == "before":
-                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"))
+                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"), container_width)
             self._write_native_table(container, element, roles, fit_scale, container_width)
             if element.payload.get("caption_position") != "before":
-                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"))
+                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"), container_width)
 
     def _write_vertical_text(self, container, element, roles, fit_scale: float) -> None:
         table = container.add_table(rows=1, cols=1)
@@ -389,7 +391,7 @@ class ReflowDocxRenderer:
         paragraph.paragraph_format.space_after = Pt(max(spacing - 1.0, 0.0))
         paragraph.paragraph_format.line_spacing = Pt(1)
 
-    def _write_caption(self, container, text, roles, fit_scale: float, alignment=None, fallback_role=None, font_size_pt=None) -> None:
+    def _write_caption(self, container, text, roles, fit_scale: float, alignment=None, fallback_role=None, font_size_pt=None, container_width=None) -> None:
         if not text:
             return
         role = fallback_role or next((role for role_id, role in roles.items() if role_id.startswith("caption_")), None) or self._body_role(roles)
@@ -397,6 +399,8 @@ class ReflowDocxRenderer:
         paragraph.alignment = _ALIGNMENT.get(alignment, WD_ALIGN_PARAGRAPH.CENTER)
         paragraph.paragraph_format.space_before = Pt(0)
         paragraph.paragraph_format.space_after = Pt(0)
+        if "\t" in str(text) and container_width:
+            paragraph.paragraph_format.tab_stops.add_tab_stop(Pt(container_width / 2.0), WD_TAB_ALIGNMENT.CENTER)
         run = paragraph.add_run(str(text))
         font_size = max(round(float(font_size_pt) * fit_scale * 2) / 2.0, 0.5) if font_size_pt else None
         self._style_run(run, role, fit_scale if font_size is None else 1.0, font_size_pt=font_size)

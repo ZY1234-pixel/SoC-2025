@@ -160,6 +160,33 @@ class ReflowPlanner:
         )
         usable_height = geometry.height_pt - geometry.margin_top_pt - geometry.margin_bottom_pt
         fit_scale = self._fit_scale(sections, planned, role_by_id, usable_width, usable_height)
+        if fit_scale < 1.0 and any(float(element.payload.get("space_before_pt", 0.0)) > 0 for element in planned):
+            def scaled_spacing(factor):
+                return tuple(
+                    replace(
+                        element,
+                        payload={
+                            **element.payload,
+                            "space_before_pt": float(element.payload.get("space_before_pt", 0.0)) * factor,
+                        },
+                    )
+                    for element in planned
+                )
+
+            compact = scaled_spacing(0.0)
+            if self._fit_scale(sections, compact, role_by_id, usable_width, usable_height) == 1.0:
+                lower, upper = 0.0, 1.0
+                for _ in range(12):
+                    middle = (lower + upper) / 2.0
+                    candidate = scaled_spacing(middle)
+                    if self._fit_scale(sections, candidate, role_by_id, usable_width, usable_height) == 1.0:
+                        lower = middle
+                    else:
+                        upper = middle
+                planned = scaled_spacing(lower)
+            else:
+                planned = compact
+            fit_scale = self._fit_scale(sections, planned, role_by_id, usable_width, usable_height)
         header_ids = tuple(
             element.element_id
             for element in furniture
@@ -526,10 +553,14 @@ class ReflowPlanner:
                     )
                 )
             elif members:
+                visual_members = [
+                    item for item in members if item.kind in {"figure_group", "table_group"}
+                ]
+                frame_members = visual_members or members
                 updated_lane_bounds.append(
                     (
-                        min(self._layout_bbox(item).x1 for item in members),
-                        max(self._layout_bbox(item).x2 for item in members),
+                        min(self._layout_bbox(item).x1 for item in frame_members),
+                        max(self._layout_bbox(item).x2 for item in frame_members),
                     )
                 )
             else:
@@ -549,7 +580,75 @@ class ReflowPlanner:
         element_ids = tuple(item.element_id for item in elements)
 
         balanced_columns = max(widths) <= min(widths) * 1.5
-        if max(spans.values(), default=1) == 1 and collapsed == sorted(set(collapsed)) and len(collapsed) == len(lanes) and balanced_columns:
+        text_intervals = {}
+        for item in elements:
+            if item.kind not in {"paragraph_group", "heading", "caption"}:
+                continue
+            start = placement[item.element_id]
+            text_intervals[start] = max(text_intervals.get(start, 0), spans[item.element_id])
+        logical_columns = sorted((start, span) for start, span in text_intervals.items())
+        logical_widths = [
+            sum(column_widths[start : start + span]) + gutter * (span - 1)
+            for start, span in logical_columns
+        ]
+        independent_columns = (
+            len(logical_columns) >= 2
+            and max(logical_widths) <= min(logical_widths) * 1.5
+            and all(
+                left + span <= right
+                for (left, span), (right, _next_span) in zip(logical_columns, logical_columns[1:])
+            )
+            and all(
+                sum(
+                    item.kind in {"paragraph_group", "heading", "caption"}
+                    and start <= placement[item.element_id] < start + span
+                    for item in elements
+                ) >= 2
+                for start, span in logical_columns
+            )
+            and all(
+                sum(
+                    start <= placement[item.element_id]
+                    and placement[item.element_id] + spans[item.element_id] <= start + span
+                    for start, span in logical_columns
+                ) == 1
+                for item in elements
+            )
+        )
+        ordered_columns = (
+            max(spans.values(), default=1) == 1
+            and collapsed == sorted(set(collapsed))
+            and len(collapsed) == len(lanes)
+            and balanced_columns
+        )
+        if independent_columns or ordered_columns:
+            if independent_columns:
+                remapped = {}
+                logical_frames = []
+                for new_column, (start, span) in enumerate(logical_columns):
+                    members = [
+                        item
+                        for item in elements
+                        if start <= placement[item.element_id] < start + span
+                    ]
+                    logical_frames.append(
+                        (
+                            min(self._layout_bbox(item).x1 for item in members),
+                            max(self._layout_bbox(item).x2 for item in members),
+                        )
+                    )
+                    for item in elements:
+                        if start <= placement[item.element_id] < start + span:
+                            remapped[item.element_id] = new_column
+                placement = remapped
+                logical_gaps = [
+                    max(right[0] - left[1], 0.0)
+                    for left, right in zip(logical_frames, logical_frames[1:])
+                ]
+                gutter = median(logical_gaps) / max(bounds.width, 1.0) * usable_width
+                available = max(usable_width - gutter * (len(logical_frames) - 1), 1.0)
+                frame_widths = [right - left for left, right in logical_frames]
+                column_widths = tuple(width / max(sum(frame_widths), 1.0) * available for width in frame_widths)
             return FlowSection(
                 section_id,
                 FlowKind.SEQUENTIAL_COLUMNS,
@@ -921,40 +1020,47 @@ class ReflowPlanner:
                     previous = max(predecessors, key=lambda element: element.bbox.y2)
                     spacing[identifier] = (current.bbox.y1 - previous.bbox.y2) * source_scale
                 previous_by_column[column].append(current)
-            if section.kind == FlowKind.GRID and any(cell.column_span > 1 for cell in section.grid_cells):
-                row_by_id = {
-                    identifier: cell.row
-                    for cell in section.grid_cells
-                    for identifier in cell.element_ids
-                }
-                for identifier in set(section.element_ids) & spacing.keys():
-                    row = row_by_id[identifier]
-                    if any(previous_row < row for previous_row in row_by_id.values()):
-                        spacing[identifier] = 0.0
-        section_by_id = {
-            identifier: section_index
-            for section_index, section in enumerate(sections)
-            for identifier in section.element_ids
-        }
+            if section.kind == FlowKind.GRID:
+                for cell in section.grid_cells:
+                    first = min(cell.element_ids, key=lambda identifier: by_id[identifier].bbox.y1)
+                    spacing.pop(first, None)
         section_elements = [
             [by_id[identifier] for identifier in section.element_ids]
             for section in sections
         ]
-        for current in elements:
-            section_index = section_by_id.get(current.element_id, 0)
-            if section_index <= 0:
-                continue
+        for section_index, section in enumerate(sections[1:], start=1):
+            current_elements = section_elements[section_index]
             section_top = min(element.bbox.y1 for element in section_elements[section_index])
-            if current.bbox.y1 > section_top + max(current.bbox.height * 0.10, 2.0):
-                continue
             predecessors = [
                 previous
                 for previous in section_elements[section_index - 1]
-                if previous.bbox.y2 <= current.bbox.y1
+                if previous.bbox.y2 <= section_top
             ]
-            if predecessors:
-                previous = max(predecessors, key=lambda element: element.bbox.y2)
-                spacing[current.element_id] = (current.bbox.y1 - previous.bbox.y2) * source_scale
+            if not predecessors:
+                continue
+            gap = (section_top - max(previous.bbox.y2 for previous in predecessors)) * source_scale
+            if section.kind == FlowKind.SEQUENTIAL_COLUMNS:
+                first_ids = {
+                    min(
+                        (element for element in current_elements if placement.get(element.element_id, 0) == column),
+                        key=lambda element: element.bbox.y1,
+                    ).element_id
+                    for column in set(placement.get(element.element_id, 0) for element in current_elements)
+                }
+            elif section.kind == FlowKind.GRID:
+                first_row = min(cell.row for cell in section.grid_cells)
+                first_ids = {
+                    min(cell.element_ids, key=lambda identifier: by_id[identifier].bbox.y1)
+                    for cell in section.grid_cells
+                    if cell.row == first_row
+                }
+            else:
+                first_ids = {
+                    element.element_id
+                    for element in current_elements
+                    if element.bbox.y1 <= section_top + max(element.bbox.height * 0.10, 2.0)
+                }
+            spacing.update((identifier, gap) for identifier in first_ids)
         return spacing
 
     def _fit_scale(self, sections, elements, roles, usable_width: float, usable_height: float) -> float:
@@ -1061,8 +1167,7 @@ class ReflowPlanner:
             starts.append(min(by_id[identifier].bbox.y1 for identifier in identifiers) if identifiers else None)
         bottom = max(box.y2 for box in boxes)
         if any(value is None for value in starts) or any(left >= right for left, right in zip(starts, starts[1:])):
-            height = (bottom - min(box.y1 for box in boxes)) * source_scale / row_count
-            return replace(section, row_heights_pt=(height,) * row_count)
+            return section
         boundaries = starts + [bottom]
         return replace(
             section,
