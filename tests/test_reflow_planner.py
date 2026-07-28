@@ -402,12 +402,18 @@ def test_option_rows_are_planned_as_explicit_line_breaks() -> None:
         (100, 100, 900, 500),
         1,
         "Question A. First B. Second C. Third",
-        payload={"lines": ("Question", "A. First", "B. Second", "C. Third")},
+        payload={
+            "lines": ("Question", "A. First", "B. Second", "C. Third"),
+            "line_lefts_px": (100, 140, 140, 140),
+        },
     )
 
     planned = ReflowPlanner().plan(_analysis((question,))).pages[0].elements[0]
 
     assert planned.payload["preserve_line_breaks"] is True
+    assert planned.payload["left_indent_pt"] > 0
+    assert planned.payload["first_line_indent_pt"] < 0
+    assert planned.payload["right_indent_pt"] == 0
 
 
 def test_multiline_heading_anchored_to_column_left_is_not_centered() -> None:
@@ -471,7 +477,7 @@ def test_single_flow_off_center_heading_preserves_its_left_anchor_without_narrow
     assert planned.payload["right_indent_pt"] == 0
 
 
-def test_overlapping_margin_note_becomes_wrapped_flow() -> None:
+def test_overlapping_margin_note_becomes_stable_sidebar_grid() -> None:
     elements = (
         _element("body-1", (180, 100, 900, 300), 1, "Body " * 30, payload={"lines": ("a", "b", "c")}),
         _element("note", (80, 240, 160, 340), 2, "Margin note", payload={"lines": ("a", "b")}),
@@ -480,10 +486,10 @@ def test_overlapping_margin_note_becomes_wrapped_flow() -> None:
 
     page = ReflowPlanner().plan(_analysis(elements)).pages[0]
 
-    wrapped = next(section for section in page.sections if section.kind == FlowKind.WRAPPED)
-    assert wrapped.floating_element_id == "note"
-    assert wrapped.floating_side == "left"
-    assert wrapped.floating_offset_x_pt == 0
+    grid = next(section for section in page.sections if section.kind == FlowKind.GRID)
+    assert grid.column_widths_pt[0] < grid.column_widths_pt[1]
+    assert grid.grid_cells[0].element_ids == ("note",)
+    assert grid.grid_cells[1].element_ids == ("body-1", "body-2")
 
 
 def test_narrow_edge_visual_is_page_furniture() -> None:

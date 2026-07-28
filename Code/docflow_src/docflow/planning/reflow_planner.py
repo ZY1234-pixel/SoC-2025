@@ -101,6 +101,12 @@ class ReflowPlanner:
             else 0.0
             for element in page.elements
         }
+        option_indents = {
+            element.element_id: self._option_hanging_indent(element, scale)
+            if self._preserve_line_breaks(element)
+            else 0.0
+            for element in page.elements
+        }
         body_font_size = role_by_id[default_body_role].font_size_pt if default_body_role in role_by_id else 10.5
         table_font_sizes = {
             element.element_id: self._table_font_size(element, scale, body_font_size)
@@ -122,11 +128,15 @@ class ReflowPlanner:
                     "column": placement.get(element.element_id, 0),
                     "alignment": alignments[element.element_id],
                     "preserve_line_breaks": self._preserve_line_breaks(element),
-                    "first_line_indent_pt": self._first_line_indent(element, scale) - hanging_indents[element.element_id],
+                    "first_line_indent_pt": (
+                        self._first_line_indent(element, scale)
+                        - hanging_indents[element.element_id]
+                        - option_indents[element.element_id]
+                    ),
                     "left_indent_pt": horizontal_indents.get(
                         element.element_id,
                         (max(element.bbox.x1 * scale - geometry.margin_left_pt, 0.0), 0.0),
-                    )[0] + hanging_indents[element.element_id],
+                    )[0] + hanging_indents[element.element_id] + option_indents[element.element_id],
                     "right_indent_pt": horizontal_indents.get(
                         element.element_id,
                         (0.0, max((page.width_px - element.bbox.x2) * scale - geometry.margin_right_pt, 0.0)),
@@ -282,21 +292,40 @@ class ReflowPlanner:
                 if note_section_index == anchor_section_index
                 else anchor_section.element_ids + (note.element_id,)
             )
+            rail_ids = tuple(
+                identifier
+                for identifier in element_ids
+                if by_id[identifier].bbox.width <= main_width * 0.30
+                and (
+                    by_id[identifier].bbox.x2 <= main_left + main_width * 0.03
+                    if side == "left"
+                    else by_id[identifier].bbox.x1 >= main_right - main_width * 0.03
+                )
+            )
+            main_ids = tuple(identifier for identifier in element_ids if identifier not in rail_ids)
+            if not rail_ids or not main_ids:
+                continue
+            split = main_left if side == "left" else main_right
+            first_width = max((split - bounds.x1) * source_scale, 1.0)
+            total_width = bounds.width * source_scale
+            second_width = max(total_width - first_width, 1.0)
+            if side == "left":
+                cells = (GridCell(0, 0, rail_ids), GridCell(0, 1, main_ids))
+                columns = (first_width, second_width)
+                rail_column, main_column = 0, 1
+            else:
+                cells = (GridCell(0, 0, main_ids), GridCell(0, 1, rail_ids))
+                columns = (first_width, second_width)
+                rail_column, main_column = 1, 0
             replacements[anchor_section_index] = FlowSection(
                 anchor_section.section_id,
-                FlowKind.WRAPPED,
+                FlowKind.GRID,
                 element_ids,
-                gutter_pt=max((main_left - note.bbox.x2 if side == "left" else note.bbox.x1 - main_right) * source_scale, 0.0),
-                floating_element_id=note.element_id,
-                floating_width_pt=note.bbox.width * source_scale,
-                floating_side=side,
-                floating_offset_x_pt=max(note.bbox.x1 - bounds.x1, 0.0) * source_scale,
-                floating_offset_y_pt=max(
-                    note.bbox.y1 - min(by_id[identifier].bbox.y1 for identifier in element_ids if identifier != note.element_id),
-                    0.0,
-                ) * source_scale,
+                columns,
+                grid_cells=cells,
             )
-            updated_placement[note.element_id] = 0
+            updated_placement.update((identifier, rail_column) for identifier in rail_ids)
+            updated_placement.update((identifier, main_column) for identifier in main_ids)
             if note_section_index != anchor_section_index:
                 removed.add(note_section_index)
         promoted = tuple(
@@ -410,6 +439,23 @@ class ReflowPlanner:
                     left = min(ReflowPlanner._layout_bbox(item).x1 for item in members)
                     right = max(ReflowPlanner._layout_bbox(item).x2 for item in members)
                 column_frames[column] = (left, right)
+            edge_columns = sorted(column_frames)
+            for column, members in by_column.items():
+                text_members = [
+                    item
+                    for item in members
+                    if item.kind in {"paragraph_group", "heading", "caption"}
+                ]
+                if len(text_members) < 2 or min(item.bbox.x2 for item in text_members) > max(
+                    item.bbox.x1 for item in text_members
+                ):
+                    continue
+                if column == edge_columns[0] and len(edge_columns) > 1:
+                    column_frames[column] = (bounds.x1, column_frames[edge_columns[1]][0])
+                elif column == edge_columns[-1] and len(edge_columns) > 1:
+                    column_frames[column] = (column_frames[edge_columns[-2]][1], bounds.x2)
+            for column, members in by_column.items():
+                left, right = column_frames[column]
                 for item in members:
                     frames[item.element_id] = (left, right)
             for identifier, span in spans.items():
@@ -474,9 +520,12 @@ class ReflowPlanner:
                 result[element.element_id] = (0.0, 0.0)
                 continue
             target_width = target_widths[element.element_id]
+            right_indent = max(right - element.bbox.x2, 0.0) / source_width * target_width
+            if ReflowPlanner._preserve_line_breaks(element):
+                right_indent = 0.0
             result[element.element_id] = (
                 max(element.bbox.x1 - left, 0.0) / source_width * target_width,
-                max(right - element.bbox.x2, 0.0) / source_width * target_width,
+                right_indent,
             )
         return result
 
@@ -1195,6 +1244,13 @@ class ReflowPlanner:
             return 0.0
         indent = float(lefts[0]) - median(float(value) for value in lefts[1:])
         return max(indent * source_scale, 0.0)
+
+    @staticmethod
+    def _option_hanging_indent(element, source_scale: float) -> float:
+        lefts = element.payload.get("line_lefts_px") or ()
+        if len(lefts) < 2:
+            return 0.0
+        return max(median(float(value) for value in lefts[1:]) - float(lefts[0]), 0.0) * source_scale
 
     @staticmethod
     def _heading_hanging_indent(element, source_scale: float) -> float:
