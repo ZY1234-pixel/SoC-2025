@@ -21,7 +21,12 @@ from docflow.model.stages import (
     ReflowLayoutPlan,
     ReflowPagePlan,
 )
-from docflow.renderer.docx_utils.html_table import estimate_text_units, get_table_cell_placements, get_table_column_weights
+from docflow.renderer.docx_utils.html_table import (
+    collapse_sparse_header_spans,
+    estimate_text_units,
+    get_table_cell_placements,
+    get_table_column_weights,
+)
 
 
 _CROSS_ENGINE_PAGE_RESERVE_PT = 12.0
@@ -391,8 +396,17 @@ class ReflowPlanner:
                     by_column[placement[identifier]].append(by_id[identifier])
             column_frames = {}
             for column, members in by_column.items():
-                left = min(ReflowPlanner._layout_bbox(item).x1 for item in members)
-                right = max(ReflowPlanner._layout_bbox(item).x2 for item in members)
+                text_members = [
+                    item
+                    for item in members
+                    if item.kind in {"paragraph_group", "heading", "caption"}
+                ]
+                if len(text_members) >= 2:
+                    left = median(ReflowPlanner._layout_bbox(item).x1 for item in text_members)
+                    right = median(ReflowPlanner._layout_bbox(item).x2 for item in text_members)
+                else:
+                    left = min(ReflowPlanner._layout_bbox(item).x1 for item in members)
+                    right = max(ReflowPlanner._layout_bbox(item).x2 for item in members)
                 column_frames[column] = (left, right)
                 for item in members:
                     frames[item.element_id] = (left, right)
@@ -536,15 +550,30 @@ class ReflowPlanner:
             [item for item in elements if placement[item.element_id] == index and spans[item.element_id] == 1]
             for index in range(len(lane_bounds))
         ]
-        lane_bounds = [
-            (
-                min(self._layout_bbox(item).x1 for item in members),
-                max(self._layout_bbox(item).x2 for item in members),
-            )
-            if members
-            else lane_bounds[index]
-            for index, members in enumerate(lane_members)
-        ]
+        updated_lane_bounds = []
+        for index, members in enumerate(lane_members):
+            text_members = [
+                item
+                for item in members
+                if item.kind in {"paragraph_group", "heading", "caption"}
+            ]
+            if len(lane_members) >= 3 and len(text_members) >= 2:
+                updated_lane_bounds.append(
+                    (
+                        median(self._layout_bbox(item).x1 for item in text_members),
+                        median(self._layout_bbox(item).x2 for item in text_members),
+                    )
+                )
+            elif members:
+                updated_lane_bounds.append(
+                    (
+                        min(self._layout_bbox(item).x1 for item in members),
+                        max(self._layout_bbox(item).x2 for item in members),
+                    )
+                )
+            else:
+                updated_lane_bounds.append(lane_bounds[index])
+        lane_bounds = updated_lane_bounds
 
         lane_sequence = [placement[item.element_id] for item in elements]
         collapsed = [lane_sequence[0]]
@@ -831,8 +860,36 @@ class ReflowPlanner:
                 row_keys[item.element_id] = overlapping * 2 + 1
             else:
                 row_keys[item.element_id] = sum(bottom < center for _top, bottom, _columns in anchor_groups) * 2
-        compact_rows = {key: index for index, key in enumerate(sorted(set(row_keys.values())))}
-        return {identifier: compact_rows[key] for identifier, key in row_keys.items()}
+
+        expanded_keys = {identifier: (key, 0) for identifier, key in row_keys.items()}
+        for band_key in range(0, len(anchor_groups) * 2 + 1, 2):
+            band = [
+                item
+                for item in elements
+                if row_keys[item.element_id] == band_key and spans[item.element_id] == 1
+            ]
+            visual_columns = {
+                column
+                for column in set(placement[item.element_id] for item in band)
+                if sum(
+                    item.kind == "figure_group" and placement[item.element_id] == column
+                    for item in band
+                )
+                >= 2
+            }
+            has_text_lane = any(
+                placement[item.element_id] not in visual_columns and item.kind in {"paragraph_group", "heading"}
+                for item in band
+            )
+            if not visual_columns or not has_text_lane:
+                continue
+            local_rows = ReflowPlanner._grid_rows(band)
+            expanded_keys.update(
+                (item.element_id, (band_key, local_rows[item.element_id]))
+                for item in band
+            )
+        compact_rows = {key: index for index, key in enumerate(sorted(set(expanded_keys.values())))}
+        return {identifier: compact_rows[key] for identifier, key in expanded_keys.items()}
 
     @staticmethod
     def _vertical_spacing(elements, sections, placement, source_scale: float):
@@ -1006,6 +1063,8 @@ class ReflowPlanner:
         if element.kind == "table_group" and element.payload.get("html"):
             soup = BeautifulSoup(str(element.payload["html"]), "html.parser")
             table = soup.find("table")
+            if table:
+                collapse_sparse_header_spans(table)
             rows = table.find_all("tr") if table else []
             weights = get_table_column_weights(table) if table else (1.0,)
             base_size = float(element.payload.get("table_font_size_pt") or (role.font_size_pt if role else 10.5))
@@ -1055,7 +1114,8 @@ class ReflowPlanner:
             return spacing + lines * font_size * role.line_spacing * 1.05 + paragraph_boundary
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
         aspect = max(float(bbox[3]) - float(bbox[1]), 1.0) / max(float(bbox[2]) - float(bbox[0]), 1.0)
-        visual_width = width * float(element.payload.get("width_fraction", 1.0)) * fit_scale
+        source_width = (float(bbox[2]) - float(bbox[0])) * float(element.payload.get("source_scale", 1.0))
+        visual_width = min(width * float(element.payload.get("width_fraction", 1.0)), source_width) * fit_scale
         return spacing + visual_width * aspect + ReflowPlanner._caption_height(element, fit_scale)
 
     @staticmethod

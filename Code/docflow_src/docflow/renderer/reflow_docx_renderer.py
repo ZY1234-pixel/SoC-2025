@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import re
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -17,6 +18,7 @@ from docx.shared import Pt, RGBColor
 
 from docflow.model.stages import FlowKind, ReflowLayoutPlan
 from docflow.renderer.docx_utils.html_table import (
+    collapse_sparse_header_spans,
     estimate_text_units,
     get_table_cell_placements,
     get_table_column_weights,
@@ -71,7 +73,6 @@ class ReflowDocxRenderer:
                 else:
                     self._render_grid(body, flow, elements, roles, page.fit_scale)
             self._collapse_trailing_paragraph(body)
-        self._collapse_section_break(document.add_paragraph())
         return document
 
     def _add_page_frame(self, document, geometry, word_safety_factor):
@@ -294,6 +295,8 @@ class ReflowDocxRenderer:
 
     def _write_text(self, paragraph, element, roles, fit_scale: float, container_width: float | None = None) -> None:
         self._write_paragraph_geometry(paragraph, element, fit_scale)
+        if self._is_option_block(element):
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
         if element.payload.get("background_color") and container_width:
             left_indent = paragraph.paragraph_format.left_indent.pt if paragraph.paragraph_format.left_indent else 0.0
             visual_width = container_width * float(element.payload.get("width_fraction", 1.0)) * fit_scale
@@ -380,7 +383,9 @@ class ReflowDocxRenderer:
         data = self._decode_image(element.payload.get("image_base64"))
         if not data:
             return
-        width = container_width * float(element.payload.get("width_fraction", 1.0)) * fit_scale
+        bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
+        source_width = (float(bbox[2]) - float(bbox[0])) * float(element.payload.get("source_scale", 1.0))
+        width = min(container_width * float(element.payload.get("width_fraction", 1.0)), source_width) * fit_scale
         paragraph = container.add_paragraph()
         paragraph.alignment = _ALIGNMENT.get(element.payload.get("alignment"), WD_ALIGN_PARAGRAPH.CENTER)
         paragraph.paragraph_format.space_before = Pt(0)
@@ -425,6 +430,7 @@ class ReflowDocxRenderer:
         source = soup.find("table")
         if source is None:
             source = BeautifulSoup("<table><tr><td></td></tr></table>", "html.parser").find("table")
+        collapse_sparse_header_spans(source)
         rows, columns = get_table_dimensions(source)
         rows, columns = max(rows, 1), max(columns, 1)
         table = container.add_table(rows=rows, cols=columns)
@@ -546,6 +552,8 @@ class ReflowDocxRenderer:
     @staticmethod
     def _visual_text(element) -> str:
         lines = element.payload.get("lines") or ()
+        if ReflowDocxRenderer._is_option_block(element):
+            return "\n".join(str(line) for line in lines)
         tops = element.payload.get("line_tops_px") or ()
         heights = element.payload.get("line_heights_px") or ()
         if element.kind != "heading" or len(lines) < 2 or len(tops) != len(lines) or len(heights) != len(lines):
@@ -556,6 +564,15 @@ class ReflowDocxRenderer:
             output += ("\n" if float(top) >= row_bottom - min(float(height), row_bottom - float(tops[0])) * 0.10 else " ") + str(line)
             row_bottom = max(row_bottom, float(top) + float(height))
         return output
+
+    @staticmethod
+    def _is_option_block(element) -> bool:
+        lines = element.payload.get("lines") or ()
+        return (
+            element.kind == "paragraph_group"
+            and len(lines) >= 3
+            and all(re.match(r"^[A-Z][.)\u3001\uff0e]", str(line).lstrip()) for line in lines[1:])
+        )
 
     @staticmethod
     def _decode_image(value):

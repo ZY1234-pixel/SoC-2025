@@ -139,6 +139,25 @@ def test_wrapped_flow_uses_floating_editable_media_table() -> None:
     assert container.paragraphs[-1].text == "Editable body"
 
 
+def test_grid_image_does_not_exceed_its_source_physical_width() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "image",
+        "figure_group",
+        "body",
+        payload={
+            "image_base64": _png_base64(),
+            "source_bbox": (0, 0, 50, 20),
+            "source_scale": 0.5,
+            "width_fraction": 1.0,
+        },
+    )
+
+    ReflowDocxRenderer()._write_image(container, element, 1.0, 100)
+
+    assert container.paragraphs[-1].runs[0]._r.xpath(".//wp:extent")[0].get("cx") == str(int(25 * 12700))
+
+
 def test_left_wrapped_flow_uses_absolute_position_and_editable_text() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     flow = FlowSection(
@@ -181,6 +200,30 @@ def test_native_table_respects_element_width_and_sets_fixed_table_width() -> Non
     table_width = container.tables[0]._tbl.tblPr.find(qn("w:tblW"))
     assert table_width.get(qn("w:type")) == "dxa"
     assert int(table_width.get(qn("w:w"))) == pytest.approx(75 * 20, abs=2)
+
+
+def test_native_table_collapses_sparse_cells_under_one_spanning_header() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": (
+                "<table><tr><td>Letter</td><td colspan='3'>Use</td></tr>"
+                "<tr><td>K</td><td>kite</td><td></td><td></td></tr>"
+                "<tr><td>L</td><td></td><td></td><td>lion</td></tr></table>"
+            )
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
+
+    table = container.tables[0]
+    assert len(table.columns) == 2
+    assert table.cell(1, 1).text == "kite"
+    assert table.cell(2, 1).text == "lion"
 
 
 def test_numbered_equation_clears_word_default_cell_paragraph_spacing() -> None:
@@ -245,6 +288,23 @@ def test_heading_preserves_visual_rows_but_joins_overlapping_lines() -> None:
     )
 
     assert ReflowDocxRenderer._visual_text(element) == "2 Chapter title\nContinued"
+
+
+def test_question_block_preserves_option_rows() -> None:
+    element = PlannedElement(
+        "question",
+        "paragraph_group",
+        "body",
+        text="1 Question A. First B. Second C. Third",
+        payload={"lines": ("1 Question", "A. First", "B. Second", "C. Third")},
+    )
+
+    assert ReflowDocxRenderer._visual_text(element) == "1 Question\nA. First\nB. Second\nC. Third"
+
+    paragraph = Document().add_paragraph()
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+    ReflowDocxRenderer()._write_text(paragraph, element, {"body": role}, 1.0, 100)
+    assert paragraph.alignment == WD_ALIGN_PARAGRAPH.LEFT
 
 
 def test_multiline_heading_font_fits_each_preserved_source_line() -> None:
@@ -365,9 +425,8 @@ def test_reflow_docx_contains_each_source_page_in_an_exact_height_frame(tmp_path
     assert row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY
     assert row.height.pt == pytest.approx(usable_height * plan.word_safety_factor, abs=0.1)
     assert row._tr.xpath("./w:trPr/w:cantSplit")
-    assert document.paragraphs[-1]._p.xpath('./w:pPr/w:spacing[@w:line="1"]')
-    assert document.paragraphs[-1]._p.xpath("./w:pPr/w:rPr/w:vanish")
-    assert document.element.body[-2].tag == qn("w:p")
+    assert not document.paragraphs
+    assert document.element.body[-2].tag == qn("w:tbl")
     assert not document.element.body.xpath(".//w:sectPr/w:docGrid")
 
 

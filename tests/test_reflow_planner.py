@@ -133,6 +133,26 @@ def test_partial_width_elements_span_grid_columns_without_splitting_the_section(
     assert page.fit_scale > 0.8
 
 
+def test_repeated_icon_list_keeps_local_rows_between_spanning_blocks() -> None:
+    elements = (
+        _element("top", (100, 0, 900, 50), 1, kind="heading"),
+        _element("text-1", (200, 60, 800, 90), 2),
+        _element("icon-2", (100, 100, 150, 130), 3, text="", kind="figure_group"),
+        _element("text-2", (200, 100, 800, 130), 4),
+        _element("icon-3", (100, 140, 150, 170), 5, text="", kind="figure_group"),
+        _element("text-3", (200, 140, 800, 170), 6),
+        _element("bottom", (100, 200, 900, 250), 7, kind="heading"),
+    )
+    placement = {"top": 0, "bottom": 0, "icon-2": 0, "icon-3": 0, "text-1": 1, "text-2": 1, "text-3": 1}
+    spans = {identifier: (2 if identifier in {"top", "bottom"} else 1) for identifier in placement}
+
+    rows = ReflowPlanner._spanning_grid_rows(elements, placement, spans)
+
+    assert rows["text-1"] < rows["text-2"] < rows["text-3"]
+    assert rows["icon-2"] == rows["text-2"]
+    assert rows["icon-3"] == rows["text-3"]
+
+
 def test_grid_rows_do_not_duplicate_structural_paragraph_spacing() -> None:
     elements = (
         _element("left-top", (100, 50, 300, 80), 1),
@@ -166,6 +186,29 @@ def test_grid_assigns_narrow_elements_by_self_coverage() -> None:
     assert page.sections[0].kind == FlowKind.GRID
     assert planned["right-heading"].payload["column"] == 1
     assert planned["right-heading"].payload["space_before_pt"] == pytest.approx(50 * 841.89 / 1400)
+
+
+def test_grid_text_frame_ignores_a_wider_figure_in_the_same_column() -> None:
+    lines = {"lines": ("one", "two", "three")}
+    elements = (
+        _element("wide-figure", (680, 0, 980, 80), 1, text="", kind="figure_group"),
+        _element("left-1", (50, 100, 270, 250), 2, "Left text " * 8, payload=lines),
+        _element("middle-1", (390, 100, 610, 250), 3, "Middle text " * 8, payload=lines),
+        _element("right-1", (730, 100, 950, 250), 4, "Right text " * 8, payload=lines),
+        _element("left-2", (50, 300, 270, 450), 5, "Left text " * 8, payload=lines),
+        _element("middle-2", (390, 300, 610, 450), 6, "Middle text " * 8, payload=lines),
+        _element("right-2", (730, 300, 950, 450), 7, "Right text " * 8, payload=lines),
+        _element("spanning-figure", (50, 480, 610, 600), 8, text="", kind="figure_group"),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+    planned = {element.element_id: element for element in page.elements}
+    grid = next(section for section in page.sections if len(section.column_widths_pt) == 3)
+
+    assert planned["right-1"].payload["alignment"] == "justify"
+    assert planned["right-1"].payload["left_indent_pt"] == 0
+    assert planned["right-1"].payload["right_indent_pt"] == 0
+    assert grid.column_widths_pt[1] == pytest.approx(grid.column_widths_pt[2])
 
 
 def test_asymmetric_sidebar_and_main_lane_use_grid() -> None:
