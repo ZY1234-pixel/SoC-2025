@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import replace
@@ -120,6 +121,7 @@ class ReflowPlanner:
                     ),
                     "column": placement.get(element.element_id, 0),
                     "alignment": alignments[element.element_id],
+                    "preserve_line_breaks": self._preserve_line_breaks(element),
                     "first_line_indent_pt": self._first_line_indent(element, scale) - hanging_indents[element.element_id],
                     "left_indent_pt": horizontal_indents.get(
                         element.element_id,
@@ -453,6 +455,13 @@ class ReflowPlanner:
             single_flow_uses_full_width = element.element_id in wrapped_figure_ids or (
                 section_kind == FlowKind.SINGLE and (element.kind == "heading" or width_fraction > 0.85)
             )
+            if element.kind == "table_group":
+                target_width = target_widths[element.element_id]
+                result[element.element_id] = (
+                    max(element.bbox.x1 - left, 0.0) / source_width * target_width,
+                    max(right - element.bbox.x2, 0.0) / source_width * target_width,
+                )
+                continue
             if element.kind == "heading":
                 result[element.element_id] = (
                     0.0
@@ -894,7 +903,6 @@ class ReflowPlanner:
     @staticmethod
     def _vertical_spacing(elements, sections, placement, source_scale: float):
         by_id = {element.element_id: element for element in elements}
-        structural_kinds = {"heading", "caption", "figure_group", "equation_group", "table_group"}
         spacing = {}
         for section in sections:
             previous_by_column = defaultdict(list)
@@ -911,8 +919,7 @@ class ReflowPlanner:
                 ]
                 if predecessors:
                     previous = max(predecessors, key=lambda element: element.bbox.y2)
-                    if current.kind in structural_kinds or previous.kind in structural_kinds:
-                        spacing[identifier] = (current.bbox.y1 - previous.bbox.y2) * source_scale
+                    spacing[identifier] = (current.bbox.y1 - previous.bbox.y2) * source_scale
                 previous_by_column[column].append(current)
             if section.kind == FlowKind.GRID and any(cell.column_span > 1 for cell in section.grid_cells):
                 row_by_id = {
@@ -985,7 +992,8 @@ class ReflowPlanner:
                     by_id[identifier],
                     roles,
                     wrap_width
-                    if float((by_id[identifier].payload.get("source_bbox") or (0, 0, 1, 1))[1])
+                    if floating.kind == "figure_group"
+                    and float((by_id[identifier].payload.get("source_bbox") or (0, 0, 1, 1))[1])
                     < float(floating_bbox[3])
                     else usable_width,
                     fit_scale,
@@ -1000,6 +1008,12 @@ class ReflowPlanner:
                 section.floating_offset_y_pt + section.floating_width_pt * aspect
             ) * fit_scale + self._caption_height(floating, fit_scale)
             source_height = section.row_heights_pt[0] * fit_scale if section.row_heights_pt else 0.0
+            if source_height:
+                text_height -= sum(
+                    float(by_id[identifier].payload.get("space_before_pt", 0.0)) * fit_scale
+                    for identifier in section.element_ids
+                    if identifier != section.floating_element_id
+                )
             return max(text_height, floating_height, source_height)
         widths = section.column_widths_pt
         if section.kind == FlowKind.SEQUENTIAL_COLUMNS:
@@ -1074,12 +1088,24 @@ class ReflowPlanner:
             )
             height = 0.0
             placements = get_table_cell_placements(table) if table else []
+            table_width = width * float(element.payload.get("width_fraction", 1.0))
+            minimum_size = float(element.payload.get("table_min_font_size_pt", 0.5))
+            fit_size = min(
+                (
+                    (table_width * sum(weights[column : column + span]) / max(sum(weights), 1.0) - 2.0)
+                    * 0.96
+                    / max(estimate_text_units(cell.get_text(" ", strip=True)), 1.0)
+                    for _row, column, _row_span, span, cell in placements
+                ),
+                default=font_size,
+            )
+            if fit_size >= minimum_size:
+                font_size = min(font_size, fit_size)
             for row_index, _row in enumerate(rows):
                 row_height = font_size * 1.2
                 for _source_row, column, _row_span, span, cell in placements:
                     if _source_row != row_index:
                         continue
-                    table_width = width * float(element.payload.get("width_fraction", 1.0))
                     cell_width = table_width * sum(weights[column : column + span]) / max(sum(weights), 1.0)
                     units = estimate_text_units(cell.get_text(" ", strip=True))
                     lines = max(1, math.ceil(units * font_size / max(cell_width, 1.0)))
@@ -1100,7 +1126,9 @@ class ReflowPlanner:
             cjk_count = sum(1 for char in element.text if ord(char) >= 0x2E80)
             units = estimate_text_units(element.text)
             content_lines = max(1, math.ceil(units * font_size / max(width, 1.0)))
-            if source_lines:
+            if element.payload.get("preserve_line_breaks"):
+                lines = len(source_lines)
+            elif source_lines:
                 source_bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
                 source_width = (float(source_bbox[2]) - float(source_bbox[0])) * float(element.payload["source_scale"])
                 observed_lines = max(1, round(len(source_lines) * source_width / max(width, 1.0) * fit_scale))
@@ -1117,6 +1145,15 @@ class ReflowPlanner:
         source_width = (float(bbox[2]) - float(bbox[0])) * float(element.payload.get("source_scale", 1.0))
         visual_width = min(width * float(element.payload.get("width_fraction", 1.0)), source_width) * fit_scale
         return spacing + visual_width * aspect + ReflowPlanner._caption_height(element, fit_scale)
+
+    @staticmethod
+    def _preserve_line_breaks(element) -> bool:
+        lines = element.payload.get("lines") or ()
+        return (
+            element.kind == "paragraph_group"
+            and len(lines) >= 3
+            and all(re.match(r"^[A-Z][.)\u3001\uff0e]", str(line).lstrip()) for line in lines[1:])
+        )
 
     @staticmethod
     def _caption_height(element, fit_scale: float) -> float:
@@ -1141,6 +1178,8 @@ class ReflowPlanner:
         element_center = (element.bbox.x1 + element.bbox.x2) / 2.0
         centered = abs(element_center - (left + right) / 2.0) <= width * 0.04
         source_lines = element.payload.get("lines") or ()
+        if element.kind == "paragraph_group" and element.text.lstrip().startswith(("•", "●", "▪")):
+            return "left"
         if element.kind == "heading" and len(source_lines) > 1 and element.bbox.x1 <= left + width * 0.05:
             return "left"
         if centered and (element.kind == "heading" or element.bbox.width <= width * 0.75):

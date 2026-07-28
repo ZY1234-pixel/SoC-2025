@@ -5,7 +5,7 @@ import io
 
 import pytest
 from docx import Document
-from docx.enum.table import WD_ROW_HEIGHT_RULE
+from docx.enum.table import WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml.ns import qn
 from PIL import Image
@@ -200,6 +200,28 @@ def test_native_table_respects_element_width_and_sets_fixed_table_width() -> Non
     table_width = container.tables[0]._tbl.tblPr.find(qn("w:tblW"))
     assert table_width.get(qn("w:type")) == "dxa"
     assert int(table_width.get(qn("w:w"))) == pytest.approx(75 * 20, abs=2)
+    assert container.tables[0]._tbl.tblPr.find(qn("w:tblCaption")).get(qn("w:val")) == "docflow-native-table"
+
+
+def test_native_table_respects_source_left_anchor() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": "<table><tr><td>A</td></tr></table>",
+            "width_fraction": 0.5,
+            "left_indent_pt": 24,
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
+
+    table = container.tables[0]
+    assert table.alignment == WD_TABLE_ALIGNMENT.LEFT
+    assert table._tbl.tblPr.find(qn("w:tblInd")).get(qn("w:w")) == "480"
 
 
 def test_native_table_collapses_sparse_cells_under_one_spanning_header() -> None:

@@ -434,6 +434,9 @@ class ReflowDocxRenderer:
         rows, columns = get_table_dimensions(source)
         rows, columns = max(rows, 1), max(columns, 1)
         table = container.add_table(rows=rows, cols=columns)
+        native_marker = OxmlElement("w:tblCaption")
+        native_marker.set(qn("w:val"), "docflow-native-table")
+        table._tbl.tblPr.append(native_marker)
         rule_style = element.payload.get("table_rule_style") or "grid"
         if rule_style == "grid":
             table.style = "Table Grid"
@@ -442,7 +445,18 @@ class ReflowDocxRenderer:
             set_horizontal_table_borders(table, len(head.find_all("tr", recursive=False)) if head else 0)
         else:
             clear_table_borders(table)
-        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        left_indent = float(element.payload.get("left_indent_pt", 0.0))
+        if left_indent > 0:
+            table.alignment = WD_TABLE_ALIGNMENT.LEFT
+            table_indent = OxmlElement("w:tblInd")
+            table_indent.set(qn("w:w"), str(round(left_indent * 20)))
+            table_indent.set(qn("w:type"), "dxa")
+            table._tbl.tblPr.append(table_indent)
+        else:
+            table.alignment = {
+                "left": WD_TABLE_ALIGNMENT.LEFT,
+                "right": WD_TABLE_ALIGNMENT.RIGHT,
+            }.get(element.payload.get("alignment"), WD_TABLE_ALIGNMENT.CENTER)
         column_weights = get_table_column_weights(source)
         table_width = container_width * float(element.payload.get("width_fraction", 1.0))
         column_widths = [table_width * weight / sum(column_weights) for weight in column_weights]
@@ -569,7 +583,8 @@ class ReflowDocxRenderer:
     def _is_option_block(element) -> bool:
         lines = element.payload.get("lines") or ()
         return (
-            element.kind == "paragraph_group"
+            bool(element.payload.get("preserve_line_breaks"))
+            or element.kind == "paragraph_group"
             and len(lines) >= 3
             and all(re.match(r"^[A-Z][.)\u3001\uff0e]", str(line).lstrip()) for line in lines[1:])
         )

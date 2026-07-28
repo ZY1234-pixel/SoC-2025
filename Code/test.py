@@ -428,7 +428,12 @@ def _native_docx_table_count(path: Path) -> int:
     if not path.exists():
         raise RuntimeError(f"DOCX was not produced: {path}")
     document = DocxDocument(path)
-    return len(document.element.body.xpath('.//w:tbl[w:tblPr/w:tblStyle[@w:val="TableGrid"]]'))
+    return len(
+        document.element.body.xpath(
+            './/w:tbl[w:tblPr/w:tblCaption[@w:val="docflow-native-table"] or '
+            'w:tblPr/w:tblStyle[@w:val="TableGrid"]]'
+        )
+    )
 
 
 def _validate_content_integrity(evidence, analysis) -> None:

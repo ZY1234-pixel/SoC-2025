@@ -335,6 +335,17 @@ def test_planner_preserves_vertical_gap_from_nearest_overlapping_predecessor() -
     assert planned["left-body"].payload["space_before_pt"] == pytest.approx(100 * 841.89 / 1400)
 
 
+def test_planner_preserves_gap_between_text_blocks() -> None:
+    elements = (
+        _element("first", (100, 100, 900, 200), 1),
+        _element("second", (100, 240, 900, 340), 2),
+    )
+
+    planned = {element.element_id: element for element in ReflowPlanner().plan(_analysis(elements)).pages[0].elements}
+
+    assert planned["second"].payload["space_before_pt"] == pytest.approx(40 * 841.89 / 1400)
+
+
 def test_planner_maps_narrow_centered_text_bbox_to_paragraph_indents() -> None:
     element = _element("author", (300, 100, 700, 150), 1, "Author Name", payload={"lines": ("Author Name",)})
     body = _element("body", (100, 200, 900, 300), 2, "Body")
@@ -358,6 +369,45 @@ def test_wide_two_line_paragraph_is_left_aligned() -> None:
     planned = ReflowPlanner().plan(_analysis((element,))).pages[0].elements[0]
 
     assert planned.payload["alignment"] == "left"
+
+
+def test_bullet_paragraph_at_right_edge_is_left_aligned() -> None:
+    element = _element(
+        "bullet",
+        (400, 100, 900, 220),
+        1,
+        "• A list item",
+        payload={"lines": ("• A list item",)},
+    )
+    anchor = _element("anchor", (100, 300, 900, 400), 2)
+
+    planned = ReflowPlanner().plan(_analysis((element, anchor))).pages[0].elements[0]
+
+    assert planned.payload["alignment"] == "left"
+
+
+def test_partial_width_table_preserves_horizontal_anchor() -> None:
+    table = _element("table", (400, 100, 900, 500), 1, text="", kind="table_group")
+    anchor = _element("anchor", (100, 600, 900, 700), 2)
+
+    planned = ReflowPlanner().plan(_analysis((table, anchor))).pages[0].elements[0]
+
+    assert planned.payload["left_indent_pt"] > 0
+    assert planned.payload["right_indent_pt"] == 0
+
+
+def test_option_rows_are_planned_as_explicit_line_breaks() -> None:
+    question = _element(
+        "question",
+        (100, 100, 900, 500),
+        1,
+        "Question A. First B. Second C. Third",
+        payload={"lines": ("Question", "A. First", "B. Second", "C. Third")},
+    )
+
+    planned = ReflowPlanner().plan(_analysis((question,))).pages[0].elements[0]
+
+    assert planned.payload["preserve_line_breaks"] is True
 
 
 def test_multiline_heading_anchored_to_column_left_is_not_centered() -> None:
