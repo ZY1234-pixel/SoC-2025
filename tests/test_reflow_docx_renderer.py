@@ -130,6 +130,10 @@ def test_header_with_image_payload_renders_as_image() -> None:
     ReflowDocxRenderer()._render_furniture(header, ("logo",), {"logo": element}, {}, 1.0, 500)
 
     assert header._element.xpath(".//w:drawing")
+    assert header._element.xpath('.//wp:anchor/wp:positionH[@relativeFrom="page"]')
+    assert header._element.xpath('.//wp:anchor/wp:positionV[@relativeFrom="page"]')
+    assert header._element.xpath("string(.//wp:positionH/wp:posOffset)") == str(50 * 12700)
+    assert header._element.xpath("string(.//wp:positionV/wp:posOffset)") == str(10 * 12700)
     assert "OCR fallback" not in "\n".join(paragraph.text for paragraph in header.paragraphs)
 
 
@@ -382,15 +386,22 @@ def test_vertical_text_remains_editable_in_a_vertical_cell() -> None:
         "paragraph_group",
         "body",
         text="公司证券研究报告",
-        payload={"lines": ("公司证券研究报告",), "source_bbox": (20, 100, 60, 700), "source_scale": 0.5},
+        payload={
+            "lines": ("公司证券研究报告",),
+            "source_bbox": (20, 100, 60, 700),
+            "source_scale": 0.5,
+            "background_color": "#034579",
+        },
         text_structure=TextStructure(orientation="vertical"),
     )
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
 
     ReflowDocxRenderer()._render_element(container, element, {"body": role}, 1.0, 100)
 
-    assert container.tables[0].cell(0, 0).text == "公司证券研究报告"
-    assert container.tables[0]._tbl.xpath('.//w:textDirection[@w:val="tbRl"]')
+    assert container.tables[0].cell(0, 0).text == "公\n司\n证\n券\n研\n究\n报\n告"
+    assert not container.tables[0]._tbl.xpath('.//w:textDirection')
+    assert container._tc.xpath('./w:tcPr/w:shd[@w:fill="034579"]')
+    assert container.tables[0].cell(0, 0).paragraphs[0].runs[0].font.size.pt == role.font_size_pt
 
 
 def test_multiline_heading_font_fits_each_preserved_source_line() -> None:
@@ -411,7 +422,9 @@ def test_multiline_heading_font_fits_each_preserved_source_line() -> None:
 
     ReflowDocxRenderer()._render_element(container, element, {"heading": role}, 1.0, 100)
 
-    assert container.paragraphs[-1].runs[0].font.size.pt < role.font_size_pt
+    assert container.paragraphs[-1].runs[0].font.size.pt <= (
+        100 * 0.90 / estimate_text_units("A deliberately long heading") + 0.1
+    )
 
 
 def test_centered_source_rows_fit_without_word_adding_wraps() -> None:

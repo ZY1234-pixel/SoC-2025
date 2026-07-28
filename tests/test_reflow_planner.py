@@ -132,7 +132,6 @@ def test_partial_width_elements_span_grid_columns_without_splitting_the_section(
     assert page.sections[0].kind == FlowKind.GRID
     assert cells["title"].column_span == 2
     assert cells["image"].column_span == 2
-    assert cells["right-bridge"].row_span == 2
     assert cells["right-bridge"].row <= cells["image"].row < cells["right-bridge"].row + cells["right-bridge"].row_span
     assert page.fit_scale > 0.8
 
@@ -155,6 +154,23 @@ def test_repeated_icon_list_keeps_local_rows_between_spanning_blocks() -> None:
     assert rows["text-1"] < rows["text-2"] < rows["text-3"]
     assert rows["icon-2"] == rows["text-2"]
     assert rows["icon-3"] == rows["text-3"]
+
+
+def test_staggered_text_before_a_spanning_anchor_keeps_local_rows() -> None:
+    elements = (
+        _element("left-title", (100, 100, 450, 150), 1, kind="heading"),
+        _element("right-date", (700, 100, 900, 150), 2),
+        _element("left-subtitle", (100, 200, 450, 250), 3, kind="heading"),
+        _element("right-heading", (550, 300, 700, 350), 4, kind="heading"),
+        _element("right-body", (550, 400, 900, 600), 5),
+    )
+    placement = {"left-title": 0, "left-subtitle": 0, "right-heading": 1, "right-date": 2, "right-body": 1}
+    spans = {identifier: (2 if identifier == "right-body" else 1) for identifier in placement}
+
+    rows = ReflowPlanner._spanning_grid_rows(elements, placement, spans)
+
+    assert rows["left-title"] == rows["right-date"]
+    assert rows["left-title"] < rows["left-subtitle"] < rows["right-heading"] < rows["right-body"]
 
 
 def test_grid_rows_do_not_duplicate_structural_paragraph_spacing() -> None:
@@ -402,6 +418,32 @@ def test_table_height_budget_reserves_word_row_box_drift() -> None:
     height = ReflowPlanner._element_height(element, {"body": role}, 100, 1.0)
 
     assert height == pytest.approx(25.2)
+
+
+def test_grid_height_treats_row_span_as_a_total_height_constraint() -> None:
+    def image(identifier, height):
+        return PlannedElement(
+            identifier,
+            "figure_group",
+            payload={"source_bbox": (0, 0, 100, height), "source_scale": 1.0},
+        )
+
+    elements = (image("span", 200), image("top", 150), image("bottom", 50))
+    section = FlowSection(
+        "grid",
+        FlowKind.GRID,
+        tuple(element.element_id for element in elements),
+        (100, 100),
+        grid_cells=(
+            GridCell(0, 0, ("span",), row_span=2),
+            GridCell(0, 1, ("top",)),
+            GridCell(1, 1, ("bottom",)),
+        ),
+    )
+
+    height = ReflowPlanner()._section_height(section, elements, {}, 200, 1.0)
+
+    assert height == pytest.approx(200)
 
 
 def test_default_page_budget_reserves_incremental_text_box_wrap_error() -> None:
@@ -772,7 +814,7 @@ def test_repeated_small_icon_text_pairs_form_a_local_grid() -> None:
     assert len(section.grid_cells) == 6
 
 
-def test_grid_merges_a_text_lane_interrupted_only_by_other_columns() -> None:
+def test_grid_keeps_source_text_blocks_separate_across_other_columns() -> None:
     elements = (
         _element("left-top", (50, 100, 300, 250), 1),
         _element("right-top", (400, 100, 950, 250), 2),
@@ -784,9 +826,9 @@ def test_grid_merges_a_text_lane_interrupted_only_by_other_columns() -> None:
     section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
 
     assert section.kind == FlowKind.GRID
-    left = next(cell for cell in section.grid_cells if cell.column == 0)
-    assert left.element_ids == ("left-top", "left-bottom")
-    assert left.row_span > 1
+    left = [cell for cell in section.grid_cells if cell.column == 0]
+    assert [cell.element_ids for cell in left] == [("left-top",), ("left-bottom",)]
+    assert left[0].row + left[0].row_span == left[1].row
 
 
 def test_grid_cell_fills_unoccupied_rows_in_its_column() -> None:
@@ -804,10 +846,15 @@ def test_grid_cell_fills_unoccupied_rows_in_its_column() -> None:
 
     section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
     row_count = max(cell.row + cell.row_span for cell in section.grid_cells)
-    rail = next(cell for cell in section.grid_cells if "rail-top" in cell.element_ids)
+    rail = sorted(
+        (cell for cell in section.grid_cells if cell.column == 0),
+        key=lambda cell: cell.row,
+    )
 
     assert section.kind == FlowKind.GRID
-    assert rail.row + rail.row_span == row_count
+    assert [cell.element_ids for cell in rail] == [("rail-top",), ("rail-bottom",)]
+    assert rail[0].row + rail[0].row_span == rail[1].row
+    assert rail[1].row + rail[1].row_span == row_count
 
 
 def test_overlapping_adjacent_blocks_do_not_inherit_spacing_from_an_older_block() -> None:

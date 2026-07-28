@@ -678,6 +678,8 @@ class DocumentAnalyzer:
                         else:
                             row_bottoms[-1] = max(row_bottoms[-1], float(top) + float(height))
                     line_count = len(row_bottoms)
+                if element.text_structure.orientation == "vertical":
+                    line_count = max(sum(not char.isspace() for char in element.text), 1)
                 source_height = element.bbox.height / line_count
                 if line_heights:
                     ink_height = median(line_heights)

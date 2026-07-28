@@ -117,15 +117,25 @@ class ReflowDocxRenderer:
             if element.text_structure.orientation == "vertical":
                 self._write_vertical_text(container, element, roles, fit_scale)
                 return
-            paragraph = container.add_paragraph()
             if element.payload.get("image_base64"):
                 data = self._decode_image(element.payload.get("image_base64"))
                 if data:
-                    self._write_paragraph_geometry(paragraph, element, fit_scale)
                     bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
-                    width = (float(bbox[2]) - float(bbox[0])) * float(element.payload.get("source_scale", 1.0)) * fit_scale
-                    paragraph.add_run().add_picture(io.BytesIO(data), width=Pt(max(width, 0.5)))
+                    source_scale = float(element.payload.get("source_scale", 1.0))
+                    width = (float(bbox[2]) - float(bbox[0])) * source_scale
+                    paragraph = container.add_paragraph()
+                    picture = paragraph.add_run().add_picture(io.BytesIO(data), width=Pt(max(width, 0.5)))
+                    self._anchor_picture(
+                        picture._inline,
+                        float(bbox[0]) * source_scale,
+                        float(bbox[1]) * source_scale,
+                    )
+                    paragraph.paragraph_format.space_before = Pt(0)
+                    paragraph.paragraph_format.space_after = Pt(0)
+                    paragraph.paragraph_format.line_spacing = Pt(1)
+                    paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
                 return
+            paragraph = container.add_paragraph()
             self._write_text(paragraph, element, roles, fit_scale)
             return
         table = container.add_table(rows=1, cols=3, width=Pt(usable_width))
@@ -224,6 +234,35 @@ class ReflowDocxRenderer:
         positioning.set(qn("w:tblpY"), str(round(offset_y_pt * 20)))
         properties.append(positioning)
 
+    @staticmethod
+    def _anchor_picture(inline, x_pt: float, y_pt: float) -> None:
+        inline.tag = qn("wp:anchor")
+        for name, value in {
+            "distT": "0",
+            "distB": "0",
+            "distL": "0",
+            "distR": "0",
+            "simplePos": "0",
+            "relativeHeight": "0",
+            "behindDoc": "0",
+            "locked": "0",
+            "layoutInCell": "1",
+            "allowOverlap": "1",
+        }.items():
+            inline.set(name, value)
+        simple_position = OxmlElement("wp:simplePos")
+        simple_position.set("x", "0")
+        simple_position.set("y", "0")
+        inline.insert(0, simple_position)
+        for index, (axis, offset) in enumerate((("H", x_pt), ("V", y_pt)), start=1):
+            position = OxmlElement(f"wp:position{axis}")
+            position.set("relativeFrom", "page")
+            value = OxmlElement("wp:posOffset")
+            value.text = str(round(offset * 12700))
+            position.append(value)
+            inline.insert(index, position)
+        inline.insert(4, OxmlElement("wp:wrapNone"))
+
     def _render_grid(self, container, flow, elements, roles, fit_scale) -> None:
         row_count = max(cell.row + cell.row_span for cell in flow.grid_cells)
         column_count = len(flow.column_widths_pt)
@@ -289,14 +328,14 @@ class ReflowDocxRenderer:
                 self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"), container_width)
 
     def _write_vertical_text(self, container, element, roles, fit_scale: float) -> None:
-        table = container.add_table(rows=1, cols=1)
         bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
         width = max((float(bbox[2]) - float(bbox[0])) * float(element.payload.get("source_scale", 1.0)), 1.0)
+        if hasattr(container, "_tc"):
+            self._shade(container._tc.get_or_add_tcPr(), element.payload.get("background_color"))
+        table = container.add_table(rows=1, cols=1)
         self._format_layout_table(table, (width,))
         cell = table.cell(0, 0)
-        direction = OxmlElement("w:textDirection")
-        direction.set(qn("w:val"), "tbRl")
-        cell._tc.get_or_add_tcPr().append(direction)
+        self._shade(cell._tc.get_or_add_tcPr(), element.payload.get("background_color"))
         paragraph = cell.paragraphs[0]
         self._write_text(paragraph, element, roles, fit_scale, width)
         paragraph.paragraph_format.left_indent = Pt(0)
@@ -326,12 +365,17 @@ class ReflowDocxRenderer:
             font_size = min(
                 font_size,
                 min(
-                    width * (0.90 if element.text_structure.preserve_source_lines else 0.98)
+                    width * 0.90
                     / max(estimate_text_units(line), 1.0)
                     for line, width in zip(source_lines, line_widths)
                 ),
             )
-        elif font_size and container_width and len(source_lines) == 1:
+        elif (
+            font_size
+            and container_width
+            and len(source_lines) == 1
+            and element.text_structure.orientation != "vertical"
+        ):
             units = estimate_text_units(element.text)
             visual_width = container_width * float(element.payload.get("width_fraction", 1.0))
             font_size = min(font_size, visual_width * 0.90 / max(units, 1.0))
@@ -360,10 +404,12 @@ class ReflowDocxRenderer:
     @staticmethod
     def _set_furniture_distances(section, page, elements) -> None:
         if page.header_element_ids:
-            section.header_distance = Pt(
+            section.header_distance = Pt(0 if all(
+                elements[identifier].payload.get("image_base64") for identifier in page.header_element_ids
+            ) else (
                 min(float(elements[identifier].payload["source_bbox"][1]) for identifier in page.header_element_ids)
                 * float(elements[page.header_element_ids[0]].payload.get("source_scale", 1.0))
-            )
+            ))
         if page.footer_element_ids:
             reference = elements[page.footer_element_ids[0]]
             page_height = float(reference.payload.get("page_height_px", 1.0))
@@ -591,6 +637,8 @@ class ReflowDocxRenderer:
 
     @staticmethod
     def _visual_text(element) -> str:
+        if element.text_structure.orientation == "vertical":
+            return "\n".join(character for character in element.text if not character.isspace())
         lines = element.payload.get("lines") or ()
         if element.text_structure.preserve_source_lines:
             return "\n".join(str(line) for line in lines)

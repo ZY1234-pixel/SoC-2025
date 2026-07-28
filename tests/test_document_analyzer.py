@@ -278,14 +278,16 @@ def test_duplicate_semantic_element_keeps_all_evidence_provenance() -> None:
 
 def test_vertical_cjk_sidebar_keeps_visual_orientation() -> None:
     evidence = RecognitionEvidence(
-        (RecognitionPage(0, 1000, 1400, (_item("aside", "text", (20, 100, 60, 700), 1, "公司证券研究报告"),)),)
+        (RecognitionPage(0, 1000, 1400, (_item("aside", "text", (20, 100, 60, 420), 1, "公司证券研究报告"),)),)
     )
 
-    element = DocumentAnalyzer().analyze(evidence).pages[0].elements[0]
+    analysis = DocumentAnalyzer().analyze(evidence)
+    element = analysis.pages[0].elements[0]
 
     assert element.kind == "paragraph_group"
     assert element.text == "公司证券研究报告"
     assert element.text_structure.orientation == "vertical"
+    assert analysis.roles[0].font_size_pt == 23.0
 
 
 def test_analyzer_records_list_lines_and_geometry_once() -> None:

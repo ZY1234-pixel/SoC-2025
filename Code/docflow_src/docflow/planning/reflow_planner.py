@@ -662,49 +662,6 @@ class ReflowPlanner:
             GridCell(row, column, tuple(ids), column_span=column_span)
             for (row, column, column_span), ids in sorted(cells.items())
         ]
-        for column in range(len(lanes)):
-            while True:
-                lane = sorted(
-                    (cell for cell in grid_cells if cell.column == column and cell.column_span == 1),
-                    key=lambda cell: cell.row,
-                )
-                pair = next(
-                    (
-                        (upper, lower)
-                        for upper, lower in zip(lane, lane[1:])
-                        if upper.row + upper.row_span <= lower.row
-                        and (
-                            upper.row + upper.row_span < lower.row
-                            or any(
-                                cell.row == lower.row
-                                and cell.column_span > 1
-                                and not cell.column <= column < cell.column + cell.column_span
-                                for cell in grid_cells
-                            )
-                        )
-                        and not any(
-                            cell.column <= column < cell.column + cell.column_span
-                            and cell.row < lower.row
-                            and cell.row + cell.row_span > upper.row + upper.row_span
-                            for cell in grid_cells
-                            if cell not in {upper, lower}
-                        )
-                    ),
-                    None,
-                )
-                if pair is None:
-                    break
-                upper, lower = pair
-                grid_cells.remove(upper)
-                grid_cells.remove(lower)
-                grid_cells.append(
-                    GridCell(
-                        upper.row,
-                        upper.column,
-                        upper.element_ids + lower.element_ids,
-                        row_span=lower.row + lower.row_span - upper.row,
-                    )
-                )
         row_count = max(cell.row + cell.row_span for cell in grid_cells)
         grid_cells = [
             replace(
@@ -937,71 +894,17 @@ class ReflowPlanner:
         return result
 
     @staticmethod
-    def _spanning_grid_rows(elements, placement, spans):
-        anchor_groups = []
-        anchor_group_by_id = {}
-        for item in sorted(
-            (element for element in elements if spans[element.element_id] > 1),
-            key=lambda element: ReflowPlanner._layout_bbox(element).y1,
-        ):
-            bbox = ReflowPlanner._layout_bbox(item)
-            columns = set(range(placement[item.element_id], placement[item.element_id] + spans[item.element_id]))
-            if anchor_groups and bbox.y1 <= anchor_groups[-1][1] and columns.isdisjoint(anchor_groups[-1][2]):
-                anchor_groups[-1][1] = max(anchor_groups[-1][1], bbox.y2)
-                anchor_groups[-1][2].update(columns)
-            else:
-                anchor_groups.append([bbox.y1, bbox.y2, columns])
-            anchor_group_by_id[item.element_id] = len(anchor_groups) - 1
-
-        row_keys = {}
-        for item in elements:
-            if item.element_id in anchor_group_by_id:
-                row_keys[item.element_id] = anchor_group_by_id[item.element_id] * 2 + 1
-                continue
-            bbox = ReflowPlanner._layout_bbox(item)
-            center = (bbox.y1 + bbox.y2) / 2.0
-            overlapping = next(
-                (
-                    index
-                    for index, (top, bottom, columns) in enumerate(anchor_groups)
-                    if top <= center <= bottom and placement[item.element_id] not in columns
-                ),
-                None,
-            )
-            if overlapping is not None:
-                row_keys[item.element_id] = overlapping * 2 + 1
-            else:
-                row_keys[item.element_id] = sum(bottom < center for _top, bottom, _columns in anchor_groups) * 2
-
-        expanded_keys = {identifier: (key, 0) for identifier, key in row_keys.items()}
-        for band_key in range(0, len(anchor_groups) * 2 + 1, 2):
-            band = [
-                item
-                for item in elements
-                if row_keys[item.element_id] == band_key and spans[item.element_id] == 1
-            ]
-            visual_columns = {
-                column
-                for column in set(placement[item.element_id] for item in band)
-                if sum(
-                    item.kind == "figure_group" and placement[item.element_id] == column
-                    for item in band
-                )
-                >= 2
-            }
-            has_text_lane = any(
-                placement[item.element_id] not in visual_columns and item.kind in {"paragraph_group", "heading"}
-                for item in band
-            )
-            if not visual_columns or not has_text_lane:
-                continue
-            local_rows = ReflowPlanner._grid_rows(band)
-            expanded_keys.update(
-                (item.element_id, (band_key, local_rows[item.element_id]))
-                for item in band
-            )
-        compact_rows = {key: index for index, key in enumerate(sorted(set(expanded_keys.values())))}
-        return {identifier: compact_rows[key] for identifier, key in expanded_keys.items()}
+    def _spanning_grid_rows(elements, _placement, _spans):
+        ordered = sorted(elements, key=lambda element: ReflowPlanner._layout_bbox(element).y1)
+        tolerance = median(ReflowPlanner._layout_bbox(element).height for element in ordered) * 0.15
+        row_tops = []
+        rows = {}
+        for item in ordered:
+            top = ReflowPlanner._layout_bbox(item).y1
+            if not row_tops or top - row_tops[-1] > tolerance:
+                row_tops.append(top)
+            rows[item.element_id] = len(row_tops) - 1
+        return rows
 
     @staticmethod
     def _vertical_spacing(elements, sections, placement, source_scale: float):
@@ -1151,11 +1054,16 @@ class ReflowPlanner:
             float,
             {row: height * fit_scale for row, height in enumerate(section.row_heights_pt)},
         )
+        measured_cells = []
         for cell in section.grid_cells:
             width = sum(widths[cell.column : cell.column + cell.column_span]) + section.gutter_pt * (cell.column_span - 1)
             height = sum(self._element_height(by_id[identifier], roles, width, fit_scale) for identifier in cell.element_ids)
-            for row in range(cell.row, cell.row + cell.row_span):
-                row_heights[row] = max(row_heights[row], height / cell.row_span)
+            measured_cells.append((cell, height))
+        for cell, height in sorted(measured_cells, key=lambda item: item[0].row_span):
+            rows = range(cell.row, cell.row + cell.row_span)
+            deficit = max(height - sum(row_heights[row] for row in rows), 0.0) / cell.row_span
+            for row in rows:
+                row_heights[row] += deficit
         return sum(row_heights.values())
 
     def _with_vertical_tracks(self, section, elements, source_scale: float):
@@ -1163,12 +1071,13 @@ class ReflowPlanner:
             return section
         by_id = {element.element_id: element for element in elements}
         boxes = sorted((by_id[identifier].bbox for identifier in section.element_ids), key=lambda box: box.y1)
-        gap_limit = median(box.height for box in boxes)
-        covered_bottom = boxes[0].y2
-        for box in boxes[1:]:
-            if box.y1 - covered_bottom > gap_limit:
-                return section
-            covered_bottom = max(covered_bottom, box.y2)
+        if section.kind != FlowKind.GRID:
+            gap_limit = median(box.height for box in boxes)
+            covered_bottom = boxes[0].y2
+            for box in boxes[1:]:
+                if box.y1 - covered_bottom > gap_limit:
+                    return section
+                covered_bottom = max(covered_bottom, box.y2)
         if section.kind in {FlowKind.SEQUENTIAL_COLUMNS, FlowKind.WRAPPED}:
             height = (max(box.y2 for box in boxes) - min(box.y1 for box in boxes)) * source_scale
             return replace(section, row_heights_pt=(height,))
