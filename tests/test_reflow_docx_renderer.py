@@ -296,6 +296,28 @@ def test_native_table_uses_source_height_as_row_minimum() -> None:
     ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 0.8, 100)
 
     assert all(row.height.pt == pytest.approx(40) for row in container.tables[0].rows)
+    assert all(row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY for row in container.tables[0].rows)
+
+
+def test_native_table_fixed_row_height_accounts_for_wrapped_content() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": "<table><tr><td>content that cannot fit on one line</td></tr></table>",
+            "table_height_pt": 10,
+            "table_min_font_size_pt": 6.5,
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 40)
+
+    row = container.tables[0].rows[0]
+    assert row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY
+    assert row.height.pt > 20
 
 
 def test_heading_preserves_visual_rows_but_joins_overlapping_lines() -> None:

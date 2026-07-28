@@ -1183,7 +1183,7 @@ class ReflowPlanner:
                         continue
                     cell_width = table_width * sum(weights[column : column + span]) / max(sum(weights), 1.0)
                     units = estimate_text_units(cell.get_text(" ", strip=True))
-                    lines = max(1, math.ceil(units * font_size / max(cell_width, 1.0)))
+                    lines = max(1, math.ceil(units * font_size / max((cell_width - 2.0) * 0.96, 1.0)))
                     row_height = max(row_height, lines * font_size * 1.2)
                 height += row_height + 2.0
             height = max(height, float(element.payload.get("table_height_pt") or 0.0) * fit_scale)

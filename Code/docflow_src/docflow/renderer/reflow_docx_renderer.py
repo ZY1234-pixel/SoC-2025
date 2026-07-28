@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import math
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -486,6 +487,7 @@ class ReflowDocxRenderer:
         table_width = container_width * float(element.payload.get("width_fraction", 1.0))
         column_widths = [table_width * weight / sum(column_weights) for weight in column_weights]
         set_table_col_widths(table, column_widths)
+        placements = get_table_cell_placements(source)
         role = roles.get(element.role_id) or self._body_role(roles)
         base_size = float(element.payload.get("table_font_size_pt") or (role.font_size_pt if role else 10.5))
         minimum_size = float(element.payload.get("table_min_font_size_pt", 0.5))
@@ -495,21 +497,29 @@ class ReflowDocxRenderer:
                 (sum(column_widths[column : column + span]) - 2.0)
                 * 0.96
                 / max(estimate_text_units(cell.get_text(" ", strip=True)), 1.0)
-                for _row, column, _row_span, span, cell in get_table_cell_placements(source)
+                for _row, column, _row_span, span, cell in placements
             ),
             default=font_size,
         )
         if fit_size >= minimum_size:
             font_size = min(font_size, fit_size)
-        row_height = max(float(element.payload.get("table_height_pt") or 0.0) * fit_scale / rows, font_size * 1.2 + 2.0)
-        for row in table.rows:
+        source_row_height = float(element.payload.get("table_height_pt") or 0.0) * fit_scale / rows
+        row_heights = [max(source_row_height, font_size * 1.2 + 2.0) for _ in range(rows)]
+        for row_index, column, row_span, span, cell in placements:
+            cell_width = sum(column_widths[column : column + span])
+            available_width = max((cell_width - 2.0) * 0.96, 1.0)
+            lines = max(1, math.ceil(estimate_text_units(cell.get_text(" ", strip=True)) * font_size / available_width))
+            required_per_row = (lines * font_size * 1.2 + 2.0) / max(row_span, 1)
+            for target_row in range(row_index, min(row_index + row_span, rows)):
+                row_heights[target_row] = max(row_heights[target_row], required_per_row)
+        for row, row_height in zip(table.rows, row_heights):
             row.height = Pt(row_height)
-            row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+            row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
         row_styles = {
             int(row): (fill, text_color)
             for row, fill, text_color in element.payload.get("table_row_styles", ())
         }
-        for row_index, column_index, row_span, column_span, cell_source in get_table_cell_placements(source):
+        for row_index, column_index, row_span, column_span, cell_source in placements:
             cell = table.cell(row_index, column_index)
             if row_span > 1 or column_span > 1:
                 cell = cell.merge(table.cell(row_index + row_span - 1, column_index + column_span - 1))
