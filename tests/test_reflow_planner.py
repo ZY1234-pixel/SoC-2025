@@ -7,6 +7,7 @@ from docflow.model.stages import (
     DocumentAnalysis,
     FlowKind,
     FlowSection,
+    GridCell,
     PlannedElement,
     Rect,
     SemanticElement,
@@ -186,6 +187,30 @@ def test_grid_cell_starts_do_not_repeat_row_track_spacing() -> None:
 
     assert page.sections[0].kind == FlowKind.GRID
     assert planned["following-heading"].payload["space_before_pt"] == 0.0
+
+
+def test_grid_without_source_tracks_keeps_cell_start_spacing() -> None:
+    elements = (
+        _element("left", (50, 100, 350, 500), 1),
+        _element("right-top", (450, 100, 950, 200), 2),
+        _element("right-bottom", (450, 300, 950, 400), 3),
+    )
+    section = FlowSection(
+        "section",
+        FlowKind.GRID,
+        tuple(element.element_id for element in elements),
+        (200, 300),
+        grid_cells=(GridCell(0, 0, ("left",), row_span=2), GridCell(0, 1, ("right-top",)), GridCell(1, 1, ("right-bottom",))),
+    )
+
+    spacing = ReflowPlanner._vertical_spacing(
+        elements,
+        (section,),
+        {"left": 0, "right-top": 1, "right-bottom": 1},
+        1.0,
+    )
+
+    assert spacing["right-bottom"] == 100
 
 
 def test_page_budget_preserves_source_whitespace_while_scaling_typography() -> None:
@@ -410,6 +435,24 @@ def test_planner_preserves_gap_between_text_blocks() -> None:
     planned = {element.element_id: element for element in ReflowPlanner().plan(_analysis(elements)).pages[0].elements}
 
     assert planned["second"].payload["space_before_pt"] == pytest.approx(40 * 841.89 / 1400)
+
+
+def test_vertical_gap_uses_geometry_instead_of_model_order() -> None:
+    elements = (
+        _element("current", (100, 300, 900, 400), 1),
+        _element("previous", (100, 100, 900, 200), 2),
+    )
+    section = FlowSection(
+        "section",
+        FlowKind.GRID,
+        ("current", "previous"),
+        (500,),
+        grid_cells=(GridCell(1, 0, ("current",)), GridCell(0, 0, ("previous",))),
+    )
+
+    spacing = ReflowPlanner._vertical_spacing(elements, (section,), {"current": 0, "previous": 0}, 1.0)
+
+    assert spacing["current"] == 100
 
 
 def test_planner_maps_narrow_centered_text_bbox_to_paragraph_indents() -> None:
@@ -744,6 +787,27 @@ def test_grid_merges_a_text_lane_interrupted_only_by_other_columns() -> None:
     left = next(cell for cell in section.grid_cells if cell.column == 0)
     assert left.element_ids == ("left-top", "left-bottom")
     assert left.row_span > 1
+
+
+def test_grid_cell_fills_unoccupied_rows_in_its_column() -> None:
+    elements = (
+        _element("rail-top", (20, 50, 60, 150), 1, text_structure=TextStructure(orientation="vertical")),
+        _element("main-top", (100, 100, 600, 250), 2),
+        _element("right-label", (700, 100, 780, 150), 3),
+        _element("right-value", (850, 100, 950, 150), 4),
+        _element("rail-bottom", (20, 200, 60, 500), 5, text_structure=TextStructure(orientation="vertical")),
+        _element("main-bottom", (100, 270, 600, 900), 6),
+        _element("right-wide-1", (700, 200, 950, 300), 7),
+        _element("right-wide-2", (700, 350, 950, 450), 8),
+        _element("right-wide-3", (700, 500, 950, 600), 9),
+    )
+
+    section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
+    row_count = max(cell.row + cell.row_span for cell in section.grid_cells)
+    rail = next(cell for cell in section.grid_cells if "rail-top" in cell.element_ids)
+
+    assert section.kind == FlowKind.GRID
+    assert rail.row + rail.row_span == row_count
 
 
 def test_overlapping_adjacent_blocks_do_not_inherit_spacing_from_an_older_block() -> None:

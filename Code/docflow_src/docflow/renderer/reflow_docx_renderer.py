@@ -118,7 +118,7 @@ class ReflowDocxRenderer:
                 self._write_vertical_text(container, element, roles, fit_scale)
                 return
             paragraph = container.add_paragraph()
-            if element.kind == "figure_group" and element.payload.get("image_base64"):
+            if element.payload.get("image_base64"):
                 data = self._decode_image(element.payload.get("image_base64"))
                 if data:
                     self._write_paragraph_geometry(paragraph, element, fit_scale)
@@ -143,7 +143,7 @@ class ReflowDocxRenderer:
             if element.text_structure.orientation == "vertical":
                 self._write_vertical_text(cell, element, roles, fit_scale)
                 continue
-            if element.kind == "figure_group" and element.payload.get("image_base64"):
+            if element.payload.get("image_base64"):
                 data = self._decode_image(element.payload.get("image_base64"))
                 if data:
                     width = (float(bbox[2]) - float(bbox[0])) / page_width_px * usable_width * fit_scale

@@ -112,6 +112,27 @@ def test_grid_renderer_merges_column_and_row_spans() -> None:
     assert [row.height.pt for row in container.tables[0].rows] == pytest.approx((30, 40))
 
 
+def test_header_with_image_payload_renders_as_image() -> None:
+    document = Document()
+    header = document.sections[0].header
+    element = PlannedElement(
+        "logo",
+        "header",
+        "body",
+        text="OCR fallback",
+        payload={
+            "image_base64": _png_base64(),
+            "source_bbox": (100, 20, 300, 80),
+            "source_scale": 0.5,
+        },
+    )
+
+    ReflowDocxRenderer()._render_furniture(header, ("logo",), {"logo": element}, {}, 1.0, 500)
+
+    assert header._element.xpath(".//w:drawing")
+    assert "OCR fallback" not in "\n".join(paragraph.text for paragraph in header.paragraphs)
+
+
 def test_wrapped_flow_uses_floating_editable_media_table() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     flow = FlowSection(

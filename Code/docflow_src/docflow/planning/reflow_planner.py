@@ -705,6 +705,27 @@ class ReflowPlanner:
                         row_span=lower.row + lower.row_span - upper.row,
                     )
                 )
+        row_count = max(cell.row + cell.row_span for cell in grid_cells)
+        grid_cells = [
+            replace(
+                cell,
+                row_span=max(
+                    cell.row_span,
+                    min(
+                        (
+                            other.row
+                            for other in grid_cells
+                            if other.row >= cell.row + cell.row_span
+                            and cell.column < other.column + other.column_span
+                            and other.column < cell.column + cell.column_span
+                        ),
+                        default=row_count,
+                    )
+                    - cell.row,
+                ),
+            )
+            for cell in grid_cells
+        ]
         return FlowSection(
             section_id,
             FlowKind.GRID,
@@ -987,14 +1008,18 @@ class ReflowPlanner:
         by_id = {element.element_id: element for element in elements}
         spacing = {}
         for section in sections:
-            previous_by_column = defaultdict(list)
+            by_column = defaultdict(list)
+            if section.kind == FlowKind.GRID:
+                for identifier in section.element_ids:
+                    by_column[placement.get(identifier, 0)].append(by_id[identifier])
             for identifier in section.element_ids:
                 current = by_id[identifier]
                 column = placement.get(identifier, 0)
                 predecessors = [
                     previous
-                    for previous in previous_by_column[column]
-                    if previous.bbox.y1 <= current.bbox.y1
+                    for previous in by_column[column]
+                    if previous.element_id != current.element_id
+                    and previous.bbox.y1 <= current.bbox.y1
                     and max(0.0, min(previous.bbox.x2, current.bbox.x2) - max(previous.bbox.x1, current.bbox.x1))
                     / max(min(previous.bbox.width, current.bbox.width), 1.0)
                     >= 0.30
@@ -1002,11 +1027,21 @@ class ReflowPlanner:
                 if predecessors:
                     previous = max(predecessors, key=lambda element: element.bbox.y2)
                     spacing[identifier] = max(current.bbox.y1 - previous.bbox.y2, 0.0) * source_scale
-                previous_by_column[column].append(current)
+                if section.kind != FlowKind.GRID:
+                    by_column[column].append(current)
             if section.kind == FlowKind.GRID:
                 for cell in section.grid_cells:
                     first = min(cell.element_ids, key=lambda identifier: by_id[identifier].bbox.y1)
-                    spacing.pop(first, None)
+                    has_preceding_peer = any(
+                        other.column == cell.column
+                        and other.column_span == cell.column_span
+                        and max(by_id[identifier].bbox.y2 for identifier in other.element_ids)
+                        <= by_id[first].bbox.y1
+                        for other in section.grid_cells
+                        if other != cell
+                    )
+                    if section.row_heights_pt or not has_preceding_peer:
+                        spacing.pop(first, None)
         section_elements = [
             [by_id[identifier] for identifier in section.element_ids]
             for section in sections
