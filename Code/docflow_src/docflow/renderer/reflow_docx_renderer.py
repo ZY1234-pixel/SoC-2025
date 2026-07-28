@@ -202,6 +202,8 @@ class ReflowDocxRenderer:
                 roles,
                 fit_scale,
                 floating.payload.get("caption_alignment"),
+                roles.get(floating.role_id),
+                floating.payload.get("caption_font_size_pt"),
             )
         else:
             self._render_element(cell, floating, roles, fit_scale, width)
@@ -275,20 +277,20 @@ class ReflowDocxRenderer:
         self._write_block_spacing(container, element, fit_scale)
         if element.kind == "figure_group":
             if element.payload.get("caption_position") == "before":
-                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"))
+                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"))
             self._write_image(container, element, fit_scale, container_width)
             if element.payload.get("caption_position") != "before":
-                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"))
+                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"))
             return
         if element.kind == "equation_group":
             self._write_equation(container, element, roles, fit_scale, container_width)
             return
         if element.kind == "table_group":
             if element.payload.get("caption_position") == "before":
-                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"))
+                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"))
             self._write_native_table(container, element, roles, fit_scale, container_width)
             if element.payload.get("caption_position") != "before":
-                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"))
+                self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"))
 
     def _write_text(self, paragraph, element, roles, fit_scale: float, container_width: float | None = None) -> None:
         self._write_paragraph_geometry(paragraph, element, fit_scale)
@@ -348,16 +350,17 @@ class ReflowDocxRenderer:
         paragraph.paragraph_format.space_after = Pt(max(spacing - 1.0, 0.0))
         paragraph.paragraph_format.line_spacing = Pt(1)
 
-    def _write_caption(self, container, text, roles, fit_scale: float, alignment=None) -> None:
+    def _write_caption(self, container, text, roles, fit_scale: float, alignment=None, fallback_role=None, font_size_pt=None) -> None:
         if not text:
             return
-        role = next((role for role_id, role in roles.items() if role_id.startswith("caption_")), None) or self._body_role(roles)
+        role = fallback_role or next((role for role_id, role in roles.items() if role_id.startswith("caption_")), None) or self._body_role(roles)
         paragraph = container.add_paragraph()
         paragraph.alignment = _ALIGNMENT.get(alignment, WD_ALIGN_PARAGRAPH.CENTER)
         paragraph.paragraph_format.space_before = Pt(0)
         paragraph.paragraph_format.space_after = Pt(0)
         run = paragraph.add_run(str(text))
-        self._style_run(run, role, fit_scale)
+        font_size = max(round(float(font_size_pt) * fit_scale * 2) / 2.0, 0.5) if font_size_pt else None
+        self._style_run(run, role, fit_scale if font_size is None else 1.0, font_size_pt=font_size)
 
     def _write_image(self, container, element, fit_scale: float, container_width: float) -> None:
         data = self._decode_image(element.payload.get("image_base64"))

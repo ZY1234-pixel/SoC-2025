@@ -28,7 +28,7 @@ _CROSS_ENGINE_PAGE_RESERVE_PT = 12.0
 
 
 class ReflowPlanner:
-    def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.90) -> None:
+    def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.96) -> None:
         self.page_long_edge_pt = float(page_long_edge_pt)
         self.word_safety_factor = float(word_safety_factor)
 
@@ -124,6 +124,7 @@ class ReflowPlanner:
                     "page_width_px": page.width_px,
                     "page_height_px": page.height_px,
                     "table_font_size_pt": table_font_sizes[element.element_id],
+                    "caption_font_size_pt": self._caption_font_size(element, scale, body_font_size),
                     "table_height_pt": (
                         self._layout_bbox(element).height * scale
                         if element.kind == "table_group" and element.payload.get("html")
@@ -929,10 +930,8 @@ class ReflowPlanner:
                 float(floating_bbox[2]) - float(floating_bbox[0]), 1.0
             )
             floating_height = (
-                section.floating_offset_y_pt
-                + section.floating_width_pt * aspect
-                + (10.0 if floating.payload.get("caption") else 0.0)
-            ) * fit_scale
+                section.floating_offset_y_pt + section.floating_width_pt * aspect
+            ) * fit_scale + self._caption_height(floating, fit_scale)
             source_height = section.row_heights_pt[0] * fit_scale if section.row_heights_pt else 0.0
             return max(text_height, floating_height, source_height)
         widths = section.column_widths_pt
@@ -1018,7 +1017,7 @@ class ReflowPlanner:
                     row_height = max(row_height, lines * font_size * 1.2)
                 height += row_height + 2.0
             height = max(height, float(element.payload.get("table_height_pt") or 0.0) * fit_scale)
-            return spacing + height + (10.0 * fit_scale if element.payload.get("caption") else 0.0)
+            return spacing + height + ReflowPlanner._caption_height(element, fit_scale)
         if role is not None and element.text:
             width = max(
                 width
@@ -1047,8 +1046,15 @@ class ReflowPlanner:
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
         aspect = max(float(bbox[3]) - float(bbox[1]), 1.0) / max(float(bbox[2]) - float(bbox[0]), 1.0)
         visual_width = width * float(element.payload.get("width_fraction", 1.0)) * fit_scale
-        caption_lines = 1 if element.payload.get("caption") else 0
-        return spacing + visual_width * aspect + caption_lines * 10.0 * fit_scale
+        return spacing + visual_width * aspect + ReflowPlanner._caption_height(element, fit_scale)
+
+    @staticmethod
+    def _caption_height(element, fit_scale: float) -> float:
+        caption = str(element.payload.get("caption") or "")
+        if not caption:
+            return 0.0
+        font_size = float(element.payload.get("caption_font_size_pt") or 10.0)
+        return len(caption.splitlines()) * font_size * 1.1 * fit_scale
 
     @staticmethod
     def _alignment(element, frame) -> str:
@@ -1101,6 +1107,13 @@ class ReflowPlanner:
         if row_count == 0:
             return None
         return min(element.bbox.height * source_scale / row_count / 1.45, body_font_size)
+
+    @staticmethod
+    def _caption_font_size(element, source_scale: float, body_font_size: float):
+        heights = element.payload.get("caption_line_heights_px") or ()
+        if not heights:
+            return None
+        return min(median(float(height) for height in heights) * source_scale / 1.15, body_font_size)
 
     @staticmethod
     def _union(rectangles):

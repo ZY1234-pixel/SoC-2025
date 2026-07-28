@@ -129,7 +129,20 @@ class DocumentAnalyzer:
             target_category = self._caption_target(caption)
             if not target_category or caption.evidence_id in consumed:
                 continue
-            target = self._nearest_relation(caption, items, target_category, page.width_px, page.height_px)
+            text = self._text(caption).strip()
+            peer = next(
+                (
+                    item
+                    for item in items
+                    if item.evidence_id != caption.evidence_id
+                    and item.category in _CAPTION_TARGET
+                    and -page.height_px * 0.005 <= item.bbox.y1 - caption.bbox.y2 <= page.height_px * 0.03
+                    and abs((item.bbox.x1 + item.bbox.x2 - caption.bbox.x1 - caption.bbox.x2) / 2.0)
+                    <= max(item.bbox.width, caption.bbox.width) * 0.15
+                ),
+                None,
+            ) if re.match(r"^(?:table|fig(?:ure)?\.?)\s*\w+$", text, re.IGNORECASE) else None
+            target = self._nearest_relation(peer or caption, items, target_category, page.width_px, page.height_px)
             if target is None and caption.category in _CAPTION_TARGET:
                 nearby = filter(
                     None,
@@ -205,6 +218,11 @@ class DocumentAnalyzer:
         if kind == "heading":
             text = self._normalize_heading(text)
         visible_lines = self._visible_lines(primary)
+        caption_lines = [
+            line
+            for caption in captions
+            for line in self._visible_lines(caption)
+        ]
         payload = {
             "confidence": primary.confidence,
             "image_base64": primary.image_base64,
@@ -221,6 +239,9 @@ class DocumentAnalyzer:
                 bbox.x1 for _line, _value, bbox in visible_lines if bbox is not None
             ),
             "caption": self._merge_caption_text(captions),
+            "caption_line_heights_px": tuple(
+                bbox.height for _line, _value, bbox in caption_lines if bbox is not None
+            ),
             "caption_alignment": self._caption_alignment(primary, captions),
             "caption_position": (
                 "before"
@@ -383,7 +404,7 @@ class DocumentAnalyzer:
     def _merge_caption_text(cls, captions: Iterable[RecognitionItem]) -> str:
         parts = []
         for item in sorted(captions, key=lambda value: (value.bbox.y1, value.bbox.x1)):
-            text = cls._text(item)
+            text = "\n".join(value for _line, value, _bbox in cls._visible_lines(item))
             normalized = re.sub(r"\s+", "", text).casefold()
             if not normalized:
                 continue
@@ -395,7 +416,7 @@ class DocumentAnalyzer:
                 parts.append((normalized, text))
             elif len(normalized) > len(parts[contained][0]):
                 parts[contained] = (normalized, text)
-        return " ".join(text for _normalized, text in parts)
+        return "\n".join(text for _normalized, text in parts)
 
     @classmethod
     def _caption_alignment(cls, primary: RecognitionItem, captions: Iterable[RecognitionItem]) -> str:
@@ -404,6 +425,8 @@ class DocumentAnalyzer:
             return "center"
         bbox = cls._union(item.bbox for item in items)
         tolerance = max(primary.bbox.width * 0.08, 1.0)
+        if abs((bbox.x1 + bbox.x2 - primary.bbox.x1 - primary.bbox.x2) / 2.0) <= tolerance:
+            return "center"
         if abs(bbox.x1 - primary.bbox.x1) <= tolerance:
             return "left"
         if abs(bbox.x2 - primary.bbox.x2) <= tolerance:
@@ -492,6 +515,14 @@ class DocumentAnalyzer:
                 visible.append((line, text, None))
                 continue
             horizontal = line_bbox.width >= line_bbox.height
+            orthogonal_overlap = (
+                min(line_bbox.y2, item.bbox.y2) - max(line_bbox.y1, item.bbox.y1)
+                if horizontal
+                else min(line_bbox.x2, item.bbox.x2) - max(line_bbox.x1, item.bbox.x1)
+            )
+            orthogonal_span = line_bbox.height if horizontal else line_bbox.width
+            if orthogonal_overlap / max(orthogonal_span, 1.0) < 0.50:
+                continue
             start = line_bbox.x1 if horizontal else line_bbox.y1
             end = line_bbox.x2 if horizontal else line_bbox.y2
             clip_start = item.bbox.x1 if horizontal else item.bbox.y1
@@ -532,7 +563,7 @@ class DocumentAnalyzer:
                 continue
             distance = cls._rect_distance(source.bbox, target.bbox) / page_diagonal
             order_gap = abs(source.model_order - target.model_order)
-            score = distance + min(order_gap, 10.0) * 0.01
+            score = distance + min(order_gap, 10.0) * 0.003
             candidates.append((score, target))
         if not candidates:
             return None

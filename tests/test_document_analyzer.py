@@ -75,6 +75,43 @@ def test_analyzer_merges_split_misclassified_table_captions_without_moving_the_t
     assert set(tables[1].source_ids) == {"duplicate", "label", "caption", "table-seven"}
 
 
+def test_analyzer_discards_ocr_lines_outside_caption_box() -> None:
+    caption = RecognitionItem(
+        "caption",
+        "figure_caption",
+        Rect(100, 100, 200, 125),
+        1,
+        text_lines=(
+            TextEvidence("TABLE II", polygon=((100, 100), (200, 100), (200, 125), (100, 125))),
+            TextEvidence("SPILLED SUBTITLE", polygon=((20, 124), (300, 124), (300, 149), (20, 149))),
+        ),
+    )
+
+    assert DocumentAnalyzer._text(caption) == "TABLE II"
+
+
+def test_analyzer_relates_short_caption_label_through_its_subtitle() -> None:
+    evidence = RecognitionEvidence(
+        (
+            RecognitionPage(
+                0,
+                1000,
+                1400,
+                (
+                    _item("previous", "table", (500, 100, 900, 500), 1, html="<table><tr><td>A</td></tr></table>"),
+                    _item("label", "figure_caption", (650, 540, 750, 565), 2, "TABLE II"),
+                    _item("subtitle", "figure_caption", (500, 564, 900, 610), 3, "Results"),
+                    _item("target", "table", (500, 640, 900, 900), 4, html="<table><tr><td>B</td></tr></table>"),
+                ),
+            ),
+        )
+    )
+
+    tables = [element for element in DocumentAnalyzer().analyze(evidence).pages[0].elements if element.kind == "table_group"]
+
+    assert tables[1].payload["caption"] == "TABLE II\nResults"
+
+
 def test_analyzer_joins_visual_lines_and_groups_editable_formula_number() -> None:
     paragraph = RecognitionItem(
         "body",
