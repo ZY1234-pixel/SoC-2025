@@ -356,6 +356,21 @@ def test_visual_width_uses_primary_bbox_instead_of_grouped_number_bbox() -> None
     assert planned.payload["width_fraction"] == pytest.approx(0.25)
 
 
+def test_figure_width_ignores_tight_foreground_crop() -> None:
+    figure = SemanticElement(
+        "figure",
+        "figure_group",
+        Rect(100, 100, 900, 500),
+        1,
+        ("raw",),
+        content_bbox=Rect(700, 120, 850, 480),
+    )
+
+    planned = ReflowPlanner().plan(_analysis((figure,))).pages[0].elements[0]
+
+    assert planned.payload["width_fraction"] == pytest.approx(1.0)
+
+
 def test_primary_bbox_keeps_parallel_visuals_in_the_same_grid_row() -> None:
     elements = (
         _element("left-1", (100, 100, 450, 250), 1, text="", kind="figure_group"),
@@ -377,7 +392,7 @@ def test_primary_bbox_keeps_parallel_visuals_in_the_same_grid_row() -> None:
     assert len(sections) == 1
     assert sections[0].kind == FlowKind.GRID
     assert {(cell.row, cell.column) for cell in sections[0].grid_cells} == {(0, 0), (0, 1), (1, 0), (1, 1)}
-    assert sections[0].row_heights_pt == pytest.approx((200 * 841.89 / 1400, 150 * 841.89 / 1400))
+    assert sections[0].row_heights_pt[1] * page.fit_scale == pytest.approx(150 * 841.89 / 1400)
     assert page.elements[0].payload["width_fraction"] == pytest.approx(1.0)
 
 

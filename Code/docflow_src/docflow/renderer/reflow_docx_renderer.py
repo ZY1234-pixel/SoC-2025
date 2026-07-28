@@ -115,28 +115,33 @@ class ReflowDocxRenderer:
         self._clear_container(container)
         if not identifiers:
             return
+        if all(elements[identifier].payload.get("image_base64") for identifier in identifiers):
+            for identifier in identifiers:
+                element = elements[identifier]
+                data = self._decode_image(element.payload.get("image_base64"))
+                if not data:
+                    continue
+                bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
+                source_scale = float(element.payload.get("source_scale", 1.0))
+                paragraph = container.add_paragraph()
+                picture = paragraph.add_run().add_picture(
+                    io.BytesIO(data),
+                    width=Pt(max((float(bbox[2]) - float(bbox[0])) * source_scale, 0.5)),
+                )
+                self._anchor_picture(
+                    picture._inline,
+                    float(bbox[0]) * source_scale,
+                    float(bbox[1]) * source_scale,
+                )
+                paragraph.paragraph_format.space_before = Pt(0)
+                paragraph.paragraph_format.space_after = Pt(0)
+                paragraph.paragraph_format.line_spacing = Pt(1)
+                paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+            return
         if len(identifiers) == 1:
             element = elements[identifiers[0]]
             if element.text_structure.orientation == "vertical":
                 self._write_vertical_text(container, element, roles, fit_scale)
-                return
-            if element.payload.get("image_base64"):
-                data = self._decode_image(element.payload.get("image_base64"))
-                if data:
-                    bbox = element.payload.get("source_bbox") or (0, 0, 1, 1)
-                    source_scale = float(element.payload.get("source_scale", 1.0))
-                    width = (float(bbox[2]) - float(bbox[0])) * source_scale
-                    paragraph = container.add_paragraph()
-                    picture = paragraph.add_run().add_picture(io.BytesIO(data), width=Pt(max(width, 0.5)))
-                    self._anchor_picture(
-                        picture._inline,
-                        float(bbox[0]) * source_scale,
-                        float(bbox[1]) * source_scale,
-                    )
-                    paragraph.paragraph_format.space_before = Pt(0)
-                    paragraph.paragraph_format.space_after = Pt(0)
-                    paragraph.paragraph_format.line_spacing = Pt(1)
-                    paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
                 return
             paragraph = container.add_paragraph()
             self._write_text(paragraph, element, roles, fit_scale)
@@ -183,7 +188,7 @@ class ReflowDocxRenderer:
 
     def _render_wrapped(self, container, flow, elements, roles, fit_scale, container_width) -> None:
         floating = elements[flow.floating_element_id]
-        width = flow.floating_width_pt * fit_scale if floating.kind == "figure_group" else flow.floating_width_pt
+        width = flow.floating_width_pt * fit_scale
         table = container.add_table(rows=1, cols=1)
         self._format_layout_table(table, (width,))
         self._float_table(
@@ -521,7 +526,9 @@ class ReflowDocxRenderer:
             return
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
         source_width = (float(bbox[2]) - float(bbox[0])) * float(element.payload.get("source_scale", 1.0))
-        width = min(container_width * float(element.payload.get("width_fraction", 1.0)), source_width) * fit_scale
+        width = min(container_width * float(element.payload.get("width_fraction", 1.0)), source_width) * (
+            1.0 if element.kind == "figure_group" else fit_scale
+        )
         paragraph = container.add_paragraph()
         paragraph.alignment = _ALIGNMENT.get(element.payload.get("alignment"), WD_ALIGN_PARAGRAPH.CENTER)
         paragraph.paragraph_format.space_before = Pt(0)

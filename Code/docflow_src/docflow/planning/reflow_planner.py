@@ -118,7 +118,11 @@ class ReflowPlanner:
                     **dict(element.payload),
                     "source_bbox": (element.bbox.x1, element.bbox.y1, element.bbox.x2, element.bbox.y2),
                     "width_fraction": min(
-                        self._content_bbox(element).width
+                        (
+                            self._layout_bbox(element)
+                            if element.kind == "figure_group"
+                            else self._content_bbox(element)
+                        ).width
                         / container_widths.get(element.element_id, max(bounds.width, 1.0)),
                         1.0,
                     ),
@@ -1056,8 +1060,9 @@ class ReflowPlanner:
                 float(floating_bbox[2]) - float(floating_bbox[0]), 1.0
             )
             floating_height = (
-                section.floating_offset_y_pt + section.floating_width_pt * aspect
-            ) * fit_scale + self._caption_height(floating, fit_scale)
+                (section.floating_offset_y_pt + section.floating_width_pt * aspect) * fit_scale
+                + self._caption_height(floating, fit_scale)
+            )
             source_height = section.row_heights_pt[0] * fit_scale if section.row_heights_pt else 0.0
             if source_height:
                 text_height -= sum(
@@ -1219,7 +1224,9 @@ class ReflowPlanner:
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
         aspect = max(float(bbox[3]) - float(bbox[1]), 1.0) / max(float(bbox[2]) - float(bbox[0]), 1.0)
         source_width = (float(bbox[2]) - float(bbox[0])) * float(element.payload.get("source_scale", 1.0))
-        visual_width = min(width * float(element.payload.get("width_fraction", 1.0)), source_width) * fit_scale
+        visual_width = min(width * float(element.payload.get("width_fraction", 1.0)), source_width) * (
+            1.0 if element.kind == "figure_group" else fit_scale
+        )
         return spacing + visual_width * aspect + ReflowPlanner._caption_height(element, fit_scale)
 
     @staticmethod

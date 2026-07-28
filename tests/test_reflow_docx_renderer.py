@@ -220,6 +220,37 @@ def test_header_with_image_payload_renders_as_image() -> None:
     assert "OCR fallback" not in "\n".join(paragraph.text for paragraph in header.paragraphs)
 
 
+def test_multiple_header_images_preserve_independent_page_positions() -> None:
+    document = Document()
+    header = document.sections[0].header
+    elements = {
+        identifier: PlannedElement(
+            identifier,
+            "header",
+            "body",
+            payload={
+                "image_base64": _png_base64(),
+                "source_bbox": bbox,
+                "source_scale": 0.5,
+            },
+        )
+        for identifier, bbox in (("top", (20, 30, 120, 60)), ("bottom", (200, 100, 300, 140)))
+    }
+
+    ReflowDocxRenderer()._render_furniture(header, tuple(elements), elements, {}, 1.0, 500)
+
+    anchors = header._element.xpath(".//wp:anchor")
+    assert len(anchors) == 2
+    assert [anchor.xpath("string(./wp:positionH/wp:posOffset)") for anchor in anchors] == [
+        str(10 * 12700),
+        str(100 * 12700),
+    ]
+    assert [anchor.xpath("string(./wp:positionV/wp:posOffset)") for anchor in anchors] == [
+        str(15 * 12700),
+        str(50 * 12700),
+    ]
+
+
 def test_wrapped_flow_uses_floating_editable_media_table() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     flow = FlowSection(
@@ -240,10 +271,13 @@ def test_wrapped_flow_uses_floating_editable_media_table() -> None:
     }
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
 
-    ReflowDocxRenderer()._render_wrapped(container, flow, elements, {"body": role}, 1.0, 100)
+    ReflowDocxRenderer()._render_wrapped(container, flow, elements, {"body": role}, 0.5, 100)
 
     positioning = container.tables[0]._tbl.tblPr.find(qn("w:tblpPr"))
     assert positioning.get(qn("w:tblpXSpec")) == "right"
+    assert container.tables[0].cell(0, 0).paragraphs[0].runs[0]._r.xpath(".//wp:extent")[0].get("cx") == str(
+        int(20 * 12700)
+    )
     assert container.tables[0].cell(0, 0).paragraphs[-1].text == "Editable caption"
     assert container.paragraphs[-1].text == "Editable body"
 
@@ -262,7 +296,7 @@ def test_grid_image_does_not_exceed_its_source_physical_width() -> None:
         },
     )
 
-    ReflowDocxRenderer()._write_image(container, element, 1.0, 100)
+    ReflowDocxRenderer()._write_image(container, element, 0.5, 100)
 
     assert container.paragraphs[-1].runs[0]._r.xpath(".//wp:extent")[0].get("cx") == str(int(25 * 12700))
 
