@@ -60,7 +60,7 @@ class ReflowDocxRenderer:
             usable_width = self._usable_width(page.geometry)
             self._render_furniture(section.header, page.header_element_ids, elements, roles, page.fit_scale, usable_width)
             self._render_furniture(section.footer, page.footer_element_ids, elements, roles, page.fit_scale, usable_width)
-            body = self._add_page_frame(document, page.geometry)
+            body = document
             for flow in page.sections:
                 if flow.kind == FlowKind.SINGLE:
                     for identifier in flow.element_ids:
@@ -71,24 +71,9 @@ class ReflowDocxRenderer:
                     self._render_columns(body, flow, elements, roles, page.fit_scale)
                 else:
                     self._render_grid(body, flow, elements, roles, page.fit_scale)
-            self._collapse_trailing_paragraph(body)
-        if plan.pages and plan.pages[-1].fit_scale == 1.0:
+        if plan.pages:
             self._collapse_section_break(document.add_paragraph())
         return document
-
-    def _add_page_frame(self, document, geometry):
-        usable_width = self._usable_width(geometry)
-        usable_height = geometry.height_pt - geometry.margin_top_pt - geometry.margin_bottom_pt
-        table = document.add_table(rows=1, cols=1)
-        self._format_layout_table(table, (usable_width,))
-        row = table.rows[0]
-        row.height = Pt(max(usable_height, 1.0))
-        row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
-        row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
-        cell = row.cells[0]
-        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
-        self._clear_container(cell)
-        return cell
 
     @staticmethod
     def _collapse_section_break(paragraph) -> None:
@@ -405,6 +390,9 @@ class ReflowDocxRenderer:
         run = paragraph.add_run(str(text))
         font_size = max(round(float(font_size_pt) * fit_scale * 2) / 2.0, 0.5) if font_size_pt else None
         self._style_run(run, role, fit_scale if font_size is None else 1.0, font_size_pt=font_size)
+        rendered_size = font_size or max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
+        paragraph.paragraph_format.line_spacing = Pt(rendered_size * 1.1)
+        paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
 
     def _write_image(self, container, element, fit_scale: float, container_width: float) -> None:
         data = self._decode_image(element.payload.get("image_base64"))
@@ -634,4 +622,8 @@ class ReflowDocxRenderer:
     def _collapse_trailing_paragraph(container) -> None:
         if not container.paragraphs or container.paragraphs[-1].text:
             return
-        ReflowDocxRenderer._collapse_section_break(container.paragraphs[-1])
+        paragraph = container.paragraphs[-1]
+        following = paragraph._p.getnext()
+        if following is not None and following.tag != qn("w:sectPr"):
+            return
+        ReflowDocxRenderer._collapse_section_break(paragraph)

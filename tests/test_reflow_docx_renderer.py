@@ -63,7 +63,7 @@ def test_single_line_text_is_sized_to_its_source_width() -> None:
     plan = ReflowPlanner().plan(DocumentAnalysis((AnalysisPage(0, 1000, 1400, (element,)),), (role,)))
 
     document = ReflowDocxRenderer().build(plan)
-    paragraph = document.tables[0].cell(0, 0).paragraphs[0]
+    paragraph = document.paragraphs[0]
     run = paragraph.runs[0]
 
     assert run.font.size.pt < role.font_size_pt * plan.pages[0].fit_scale
@@ -81,7 +81,7 @@ def test_sparse_grid_keeps_valid_empty_cells() -> None:
     plan = ReflowPlanner().plan(DocumentAnalysis((AnalysisPage(0, 1000, 1400, elements),), (role,)))
 
     document = ReflowDocxRenderer().build(plan)
-    grid = document.tables[0].cell(0, 0).tables[0]
+    grid = document.tables[0]
 
     assert all(cell.paragraphs or cell.tables for row in grid.rows for cell in row.cells)
 
@@ -443,7 +443,7 @@ def test_reflow_docx_keeps_text_tables_and_equation_numbers_editable(tmp_path) -
     assert "Editable heading" in text
     assert "Name" in text and "Value" in text
     assert "(7)" in text
-    assert len(document.element.body.xpath(".//w:tbl")) >= 3
+    assert len(document.element.body.xpath(".//w:tbl")) >= 2
     native_table = document.element.body.xpath('.//w:tbl[w:tblPr/w:tblStyle[@w:val="TableGrid"]]')[0]
     assert native_table.xpath('.//w:pPr/w:spacing[@w:lineRule="exact"]')
 
@@ -475,7 +475,7 @@ def test_reflow_docx_creates_one_unlinked_section_per_source_page(tmp_path) -> N
     assert not document.sections[1].header.is_linked_to_previous
 
 
-def test_reflow_docx_contains_each_source_page_in_an_exact_height_frame(tmp_path) -> None:
+def test_reflow_docx_uses_body_flow_with_a_collapsed_end_mark(tmp_path) -> None:
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
     element = SemanticElement("body", "paragraph_group", Rect(100, 100, 900, 1200), 1, ("r1",), text="Body", role_id="body")
     plan = ReflowPlanner().plan(DocumentAnalysis((AnalysisPage(0, 1000, 1400, (element,)),), (role,)))
@@ -483,20 +483,14 @@ def test_reflow_docx_contains_each_source_page_in_an_exact_height_frame(tmp_path
 
     ReflowDocxRenderer().render(plan, str(output))
     document = Document(output)
-    frame = document.tables[0]
-    row = frame.rows[0]
-    usable_height = plan.pages[0].geometry.height_pt - plan.pages[0].geometry.margin_top_pt - plan.pages[0].geometry.margin_bottom_pt
-
-    assert row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY
-    assert row.height.pt == pytest.approx(usable_height, abs=0.1)
-    assert row._tr.xpath("./w:trPr/w:cantSplit")
-    assert len(document.paragraphs) == 1
-    assert document.paragraphs[0]._p.xpath('./w:pPr/w:spacing[@w:line="1"]')
-    assert document.element.body[-3].tag == qn("w:tbl")
+    assert not document.tables
+    assert document.paragraphs[0].text == "Body"
+    assert document.paragraphs[-1]._p.xpath('./w:pPr/w:spacing[@w:line="1"]')
+    assert document.paragraphs[-1]._p.xpath("./w:pPr/w:rPr/w:vanish")
     assert not document.element.body.xpath(".//w:sectPr/w:docGrid")
 
 
-def test_scaled_page_does_not_add_a_trailing_body_paragraph() -> None:
+def test_scaled_page_adds_only_a_collapsed_end_mark() -> None:
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
     element = SemanticElement(
         "body",
@@ -518,7 +512,8 @@ def test_scaled_page_does_not_add_a_trailing_body_paragraph() -> None:
     document = ReflowDocxRenderer().build(plan)
 
     assert page.fit_scale < 1.0
-    assert not document.paragraphs
+    assert document.paragraphs[-1]._p.xpath('./w:pPr/w:spacing[@w:line="1"]')
+    assert document.paragraphs[-1]._p.xpath("./w:pPr/w:rPr/w:vanish")
 
 
 def test_layout_table_gutter_preserves_planned_content_width() -> None:
@@ -550,7 +545,7 @@ def test_reflow_docx_writes_planned_vertical_spacing(tmp_path) -> None:
     output = tmp_path / "spacing.docx"
 
     ReflowDocxRenderer().render(plan, str(output))
-    paragraph = next(item for item in Document(output).tables[0].cell(0, 0).paragraphs if item.text == "Second")
+    paragraph = next(item for item in Document(output).paragraphs if item.text == "Second")
 
     assert plan.pages[0].elements[1].payload["space_before_pt"] > 0
     assert paragraph.paragraph_format.space_before.pt == pytest.approx(
@@ -592,7 +587,7 @@ def test_reflow_docx_writes_source_bbox_paragraph_indents(tmp_path) -> None:
     output = tmp_path / "indents.docx"
 
     ReflowDocxRenderer().render(plan, str(output))
-    paragraph = next(item for item in Document(output).tables[0].cell(0, 0).paragraphs if item.text == "Author Name")
+    paragraph = next(item for item in Document(output).paragraphs if item.text == "Author Name")
 
     assert paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER
     assert paragraph.paragraph_format.left_indent.pt == pytest.approx(paragraph.paragraph_format.right_indent.pt, abs=0.1)
@@ -614,7 +609,7 @@ def test_reflow_docx_uses_deterministic_line_height(tmp_path) -> None:
     output = tmp_path / "source-lines.docx"
 
     ReflowDocxRenderer().render(plan, str(output))
-    paragraph = next(item for item in Document(output).tables[0].cell(0, 0).paragraphs if "First line" in item.text)
+    paragraph = next(item for item in Document(output).paragraphs if "First line" in item.text)
 
     assert plan.pages[0].elements[0].payload["line_height_pt"] == pytest.approx(20 * 841.89 / 1400)
     assert paragraph.text == "First line Second line"
