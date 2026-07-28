@@ -160,33 +160,6 @@ class ReflowPlanner:
         )
         usable_height = geometry.height_pt - geometry.margin_top_pt - geometry.margin_bottom_pt
         fit_scale = self._fit_scale(sections, planned, role_by_id, usable_width, usable_height)
-        if fit_scale < 1.0 and any(float(element.payload.get("space_before_pt", 0.0)) > 0 for element in planned):
-            def scaled_spacing(factor):
-                return tuple(
-                    replace(
-                        element,
-                        payload={
-                            **element.payload,
-                            "space_before_pt": float(element.payload.get("space_before_pt", 0.0)) * factor,
-                        },
-                    )
-                    for element in planned
-                )
-
-            compact = scaled_spacing(0.0)
-            if self._fit_scale(sections, compact, role_by_id, usable_width, usable_height) == 1.0:
-                lower, upper = 0.0, 1.0
-                for _ in range(12):
-                    middle = (lower + upper) / 2.0
-                    candidate = scaled_spacing(middle)
-                    if self._fit_scale(sections, candidate, role_by_id, usable_width, usable_height) == 1.0:
-                        lower = middle
-                    else:
-                        upper = middle
-                planned = scaled_spacing(lower)
-            else:
-                planned = compact
-            fit_scale = self._fit_scale(sections, planned, role_by_id, usable_width, usable_height)
         header_ids = tuple(
             element.element_id
             for element in furniture
@@ -1317,7 +1290,7 @@ class ReflowPlanner:
         row_count = len(table.find_all("tr")) if table else 0
         if row_count == 0:
             return None
-        return min(element.bbox.height * source_scale / row_count / 1.45, body_font_size)
+        return min(ReflowPlanner._layout_bbox(element).height * source_scale / row_count / 1.45, body_font_size)
 
     @staticmethod
     def _caption_font_size(element, source_scale: float, body_font_size: float):

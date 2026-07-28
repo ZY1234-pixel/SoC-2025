@@ -188,16 +188,16 @@ def test_grid_cell_starts_do_not_repeat_row_track_spacing() -> None:
     assert planned["following-heading"].payload["space_before_pt"] == 0.0
 
 
-def test_page_budget_compresses_whitespace_before_typography() -> None:
+def test_page_budget_preserves_source_whitespace_while_scaling_typography() -> None:
     elements = (
-        _element("first", (100, 100, 900, 600), 1, "First " * 80, payload={"lines": ("a",) * 8}),
-        _element("second", (100, 900, 900, 1300), 2, "Second " * 60, payload={"lines": ("b",) * 6}),
+        _element("first", (100, 100, 900, 600), 1, "First " * 300, payload={"lines": ("a",) * 8}),
+        _element("second", (100, 900, 900, 1300), 2, "Second " * 300, payload={"lines": ("b",) * 6}),
     )
 
     page = ReflowPlanner().plan(_analysis(elements)).pages[0]
 
-    assert page.fit_scale == 1.0
-    assert 0 < page.elements[1].payload["space_before_pt"] < 300 * 841.89 / 1400
+    assert page.fit_scale < 1.0
+    assert page.elements[1].payload["space_before_pt"] == pytest.approx(300 * 841.89 / 1400)
 
 
 def test_grid_assigns_narrow_elements_by_self_coverage() -> None:
@@ -340,6 +340,25 @@ def test_single_row_table_uses_body_font_and_wrap_aware_fit() -> None:
     assert page.elements[0].payload["table_font_size_pt"] == pytest.approx(10.5)
     assert page.elements[0].payload["table_min_font_size_pt"] == pytest.approx(6.5)
     assert 0.5 < page.fit_scale < 0.85
+
+
+def test_table_font_size_excludes_grouped_caption_height() -> None:
+    table = _element(
+        "table",
+        (100, 100, 900, 600),
+        1,
+        text="",
+        kind="table_group",
+        payload={
+            "html": "<table>" + "<tr><td>value</td></tr>" * 10 + "</table>",
+            "primary_bbox": (100, 400, 900, 600),
+            "caption": "Table caption",
+        },
+    )
+
+    planned = ReflowPlanner().plan(_analysis((table,))).pages[0].elements[0]
+
+    assert planned.payload["table_font_size_pt"] == pytest.approx(200 * 841.89 / 1400 / 10 / 1.45)
 
 
 def test_default_page_budget_reserves_incremental_text_box_wrap_error() -> None:
