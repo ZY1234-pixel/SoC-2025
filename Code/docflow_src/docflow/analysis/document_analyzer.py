@@ -289,7 +289,11 @@ class DocumentAnalyzer:
                     for row in range(row_count)
                 ]
             else:
-                predictions = [self.font_classifier.predict_image(image)]
+                line_crops = self._text_line_crops(image, item)
+                predictions = [
+                    self.font_classifier.predict_image(crop)
+                    for crop in line_crops or (image,)
+                ]
         except Exception:
             self.font_classifier = None
             return result
@@ -310,6 +314,33 @@ class DocumentAnalyzer:
             "accepted": prediction.accepted,
         }
         return result
+
+    @classmethod
+    def _text_line_crops(cls, image: Image.Image, item: RecognitionItem):
+        scale_x = image.width / max(item.bbox.width, 1.0)
+        scale_y = image.height / max(item.bbox.height, 1.0)
+        crops = []
+        for line in item.text_lines:
+            bbox = cls._polygon_rect(line.polygon)
+            if bbox is None or bbox.width < bbox.height:
+                continue
+            left = max(bbox.x1, item.bbox.x1)
+            top = max(bbox.y1, item.bbox.y1)
+            right = min(bbox.x2, item.bbox.x2)
+            bottom = min(bbox.y2, item.bbox.y2)
+            if right <= left or bottom <= top:
+                continue
+            crop = image.crop(
+                (
+                    round((left - item.bbox.x1) * scale_x),
+                    round((top - item.bbox.y1) * scale_y),
+                    round((right - item.bbox.x1) * scale_x),
+                    round((bottom - item.bbox.y1) * scale_y),
+                )
+            )
+            if crop.width and crop.height:
+                crops.append(crop)
+        return tuple(crops)
 
     @staticmethod
     def _kind(item: RecognitionItem) -> str:

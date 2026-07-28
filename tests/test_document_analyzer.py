@@ -132,6 +132,36 @@ def test_analyzer_uses_consistent_table_row_font_predictions() -> None:
     assert style["font_family"] == "仿宋"
 
 
+def test_analyzer_classifies_multiline_text_one_line_at_a_time() -> None:
+    image = Image.new("RGB", (300, 90), "white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    labels = iter(("黑体", "黑体", "仿宋"))
+
+    class Classifier:
+        def predict_image(self, _image):
+            return SimpleNamespace(label=next(labels), confidence=0.9, margin=0.8, accepted=True)
+
+    item = RecognitionItem(
+        "body",
+        "text",
+        Rect(0, 0, 300, 90),
+        1,
+        text_lines=tuple(
+            TextEvidence(
+                text,
+                polygon=((0, top), (300, top), (300, top + 20), (0, top + 20)),
+            )
+            for text, top in zip(("第一行", "第二行", "第三行"), (0, 30, 60))
+        ),
+        image_base64=base64.b64encode(buffer.getvalue()).decode("ascii"),
+    )
+
+    style = DocumentAnalyzer(Classifier())._infer_visual_style(item)
+
+    assert style["font_family"] == "黑体"
+
+
 def test_duplicate_semantic_element_keeps_all_evidence_provenance() -> None:
     evidence = RecognitionEvidence(
         (
