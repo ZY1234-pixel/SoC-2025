@@ -60,6 +60,33 @@ def test_text_occupancy_uses_rendered_lines_to_fill_tight_content_height() -> No
     assert infer_occupancy_line_height(10, 10.5, 60, lines) == 12
 
 
+def test_split_text_rows_render_with_right_aligned_fields() -> None:
+    cell = Document().add_table(rows=1, cols=1).cell(0, 0)
+    cell.text = ""
+    element = PlannedElement(
+        "contact",
+        "paragraph_group",
+        "body",
+        "phone email license number",
+        payload={
+            "alignment": "left",
+            "lines": ("phone", "email", "license", "number"),
+            "split_text_rows": (("phone", "email"), ("license", "number")),
+            "line_height_pt": 12,
+        },
+        text_structure=TextStructure(preserve_source_lines=True),
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    renderer = ReflowDocxRenderer()
+    renderer._clear_container(cell)
+    renderer._render_element(cell, element, {"body": role}, 1.0, 200)
+
+    assert [paragraph.text for paragraph in cell.paragraphs] == ["phone\temail", "license\tnumber"]
+    assert all(paragraph.alignment == WD_ALIGN_PARAGRAPH.LEFT for paragraph in cell.paragraphs)
+    assert all(paragraph._p.xpath("./w:pPr/w:tabs/w:tab[@w:val='right']") for paragraph in cell.paragraphs)
+
+
 def test_single_line_text_is_sized_to_its_source_width() -> None:
     role = TypographicRole("heading", "黑体", "Times New Roman", 16, 1.0)
     element = SemanticElement(
@@ -105,6 +132,7 @@ def test_grid_renderer_merges_column_and_row_spans() -> None:
         FlowKind.GRID,
         ("span", "side"),
         (100, 100, 100),
+        gutter_pt=10,
         grid_cells=(
             GridCell(0, 2, ("side",), row_span=2),
             GridCell(1, 0, ("span",), column_span=2),
@@ -122,6 +150,7 @@ def test_grid_renderer_merges_column_and_row_spans() -> None:
     assert container.tables[0]._tbl.xpath('.//w:gridSpan[@w:val="2"]')
     assert container.tables[0]._tbl.xpath(".//w:vMerge")
     assert [row.height.pt for row in container.tables[0].rows] == pytest.approx((30, 40))
+    assert container.tables[0].cell(1, 0)._tc.xpath("./w:tcPr/w:tcMar/w:end/@w:w") == ["100"]
 
 
 def test_header_with_image_payload_renders_as_image() -> None:

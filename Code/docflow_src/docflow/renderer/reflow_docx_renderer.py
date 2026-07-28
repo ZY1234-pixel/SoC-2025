@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import math
+from dataclasses import replace
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -283,6 +284,18 @@ class ReflowDocxRenderer:
                         grid_cell.column + grid_cell.column_span - 1,
                     )
                 )
+            half_gutter_twips = int(max(flow.gutter_pt, 0.0) * 10)
+            set_cell_margins(
+                cell,
+                top=0,
+                bottom=0,
+                start=half_gutter_twips if grid_cell.column > 0 else 0,
+                end=(
+                    half_gutter_twips
+                    if grid_cell.column + grid_cell.column_span < column_count
+                    else 0
+                ),
+            )
             target_cells[(grid_cell.row, grid_cell.column)] = cell
         for row in table.rows:
             for cell in row.cells:
@@ -307,6 +320,24 @@ class ReflowDocxRenderer:
         if element.kind in {"heading", "paragraph_group", "caption"}:
             if element.text_structure.orientation == "vertical":
                 self._write_vertical_text(container, element, roles, fit_scale)
+                return
+            split_text_rows = element.payload.get("split_text_rows") or ()
+            if split_text_rows:
+                for index, row in enumerate(split_text_rows):
+                    payload = dict(element.payload)
+                    payload.update(
+                        split_text_rows=(row,),
+                        lines=tuple(row),
+                        space_before_pt=payload.get("space_before_pt", 0.0) if index == 0 else 0.0,
+                    )
+                    paragraph = container.add_paragraph()
+                    self._write_text(
+                        paragraph,
+                        replace(element, text=" ".join(row), payload=payload),
+                        roles,
+                        fit_scale,
+                        container_width,
+                    )
                 return
             paragraph = container.add_paragraph()
             self._write_text(paragraph, element, roles, fit_scale, container_width)
@@ -355,9 +386,17 @@ class ReflowDocxRenderer:
         role = roles.get(element.role_id) or self._body_role(roles)
         font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5) if role else None
         source_lines = element.payload.get("lines") or ()
+        split_text_rows = element.payload.get("split_text_rows") or ()
+        if split_text_rows and container_width:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            right_indent = paragraph.paragraph_format.right_indent.pt if paragraph.paragraph_format.right_indent else 0.0
+            paragraph.paragraph_format.tab_stops.add_tab_stop(
+                Pt(max(container_width - right_indent, 1.0)),
+                WD_TAB_ALIGNMENT.RIGHT,
+            )
         if font_size and container_width and len(source_lines) > 1 and (
             element.kind == "heading" or element.text_structure.preserve_source_lines
-        ):
+        ) and not split_text_rows:
             left_indent = paragraph.paragraph_format.left_indent.pt if paragraph.paragraph_format.left_indent else 0.0
             right_indent = paragraph.paragraph_format.right_indent.pt if paragraph.paragraph_format.right_indent else 0.0
             first_indent = paragraph.paragraph_format.first_line_indent.pt if paragraph.paragraph_format.first_line_indent else 0.0
@@ -666,6 +705,9 @@ class ReflowDocxRenderer:
     def _visual_text(element) -> str:
         if element.text_structure.orientation == "vertical":
             return "\n".join(character for character in element.text if not character.isspace())
+        split_text_rows = element.payload.get("split_text_rows") or ()
+        if split_text_rows:
+            return "\n".join("\t".join(str(value) for value in row) for row in split_text_rows)
         lines = element.payload.get("lines") or ()
         if element.text_structure.preserve_source_lines:
             return "\n".join(str(line) for line in lines)

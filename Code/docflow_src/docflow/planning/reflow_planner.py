@@ -1164,7 +1164,7 @@ class ReflowPlanner:
             source_line_count = int(element.payload.get("visual_line_count") or len(source_lines))
             source_width = content_bbox.width * float(element.payload.get("source_scale", 1.0))
             if element.text_structure.preserve_source_lines:
-                lines = len(source_lines)
+                lines = source_line_count
             else:
                 lines = estimate_wrapped_lines(
                     element.text,
@@ -1220,16 +1220,27 @@ class ReflowPlanner:
                 return "right"
             return "center"
         content_bbox = ReflowPlanner._content_bbox(element)
+        layout_bbox = ReflowPlanner._layout_bbox(element)
         element_center = (content_bbox.x1 + content_bbox.x2) / 2.0
         centered = abs(element_center - (left + right) / 2.0) <= width * 0.04
         source_lines = element.payload.get("lines") or ()
         if element.kind == "paragraph_group" and element.text_structure.is_list:
             return "left"
+        if (
+            element.kind == "paragraph_group"
+            and content_bbox.x1 - layout_bbox.x1 >= layout_bbox.width * 0.03
+        ):
+            return "left"
         widths = element.payload.get("line_widths_px") or ()
         lefts = element.payload.get("line_lefts_px") or ()
-        if len(source_lines) >= 2 and len(lefts) == len(widths) == len(source_lines) and all(
-            abs(float(source_left) + float(line_width) / 2.0 - (left + right) / 2.0) <= width * 0.05
-            for source_left, line_width in zip(lefts, widths)
+        if (
+            content_bbox.width <= width * 0.80
+            and len(source_lines) >= 2
+            and len(lefts) == len(widths) == len(source_lines)
+            and all(
+                abs(float(source_left) + float(line_width) / 2.0 - (left + right) / 2.0) <= width * 0.05
+                for source_left, line_width in zip(lefts, widths)
+            )
         ):
             return "center"
         if element.kind == "heading" and len(source_lines) > 1 and content_bbox.x1 <= left + width * 0.05:

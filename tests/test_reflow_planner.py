@@ -52,6 +52,21 @@ def test_planner_preserves_page_ratio_and_excludes_header_from_content_frame() -
     assert page.header_element_ids == ("header",)
 
 
+def test_full_width_body_with_leading_layout_space_is_left_aligned() -> None:
+    element = SemanticElement(
+        "body",
+        "paragraph_group",
+        Rect(100, 100, 900, 300),
+        1,
+        ("raw",),
+        text="body " * 30,
+        payload={"lines": ("line one", "line two", "line three")},
+        content_bbox=Rect(140, 105, 895, 295),
+    )
+
+    assert ReflowPlanner._alignment(element, (100, 900)) == "left"
+
+
 def test_single_flow_repairs_outlying_model_order_with_geometry() -> None:
     elements = (
         _element("bottom", (100, 500, 400, 600), 1),

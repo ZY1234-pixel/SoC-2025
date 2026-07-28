@@ -392,6 +392,28 @@ def test_analyzer_keeps_layout_and_tight_text_geometry_separate() -> None:
     assert element.payload["visual_line_count"] == 3
 
 
+def test_analyzer_preserves_split_rows_as_left_and_right_fields() -> None:
+    item = RecognitionItem(
+        "contact",
+        "text",
+        Rect(100, 100, 900, 180),
+        1,
+        text_lines=(
+            TextEvidence("phone", polygon=((100, 100), (250, 100), (250, 125), (100, 125))),
+            TextEvidence("email", polygon=((600, 100), (900, 100), (900, 125), (600, 125))),
+            TextEvidence("license", polygon=((100, 145), (260, 145), (260, 170), (100, 170))),
+            TextEvidence("number", polygon=((650, 145), (900, 145), (900, 170), (650, 170))),
+        ),
+    )
+
+    element = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))
+    ).pages[0].elements[0]
+
+    assert element.payload["split_text_rows"] == (("phone", "email"), ("license", "number"))
+    assert element.text_structure.preserve_source_lines is True
+
+
 def test_heading_font_size_counts_overlapping_ocr_lines_as_one_visual_row() -> None:
     element = SemanticElement(
         "chapter",

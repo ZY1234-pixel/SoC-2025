@@ -227,6 +227,7 @@ class DocumentAnalyzer:
         line_boxes = tuple(bbox for _line, _value, bbox in visible_lines if bbox is not None)
         visual_rows = self._visual_row_boxes(line_boxes)
         content_bbox = self._union(visual_rows) if visual_rows else primary.bbox
+        split_text_rows = self._split_text_rows(primary, visible_lines, visual_rows)
         caption_lines = [
             line
             for caption in captions
@@ -255,6 +256,7 @@ class DocumentAnalyzer:
                 for current, following in zip(visual_rows, visual_rows[1:])
             ),
             "visual_line_count": len(visual_rows),
+            "split_text_rows": split_text_rows,
             "caption": self._merge_caption_text(captions),
             "caption_line_heights_px": tuple(
                 self._line_height(line, bbox) for line, _value, bbox in caption_lines if bbox is not None
@@ -301,15 +303,15 @@ class DocumentAnalyzer:
             source_ids=tuple(item.evidence_id for item in related),
             text=text,
             payload=payload,
-            text_structure=self._text_structure(primary, visible_lines),
+            text_structure=self._text_structure(primary, visible_lines, bool(split_text_rows)),
             content_bbox=content_bbox,
         )
 
     @staticmethod
-    def _text_structure(primary: RecognitionItem, visible_lines) -> TextStructure:
+    def _text_structure(primary: RecognitionItem, visible_lines, preserve_visual_rows: bool = False) -> TextStructure:
         lines = tuple(value for _line, value, _bbox in visible_lines)
         marked = tuple(bool(_LIST_MARKER_RE.match(str(line))) for line in lines)
-        preserve_lines = len(lines) >= 2 and sum(marked) >= 2 and (
+        preserve_lines = preserve_visual_rows or len(lines) >= 2 and sum(marked) >= 2 and (
             all(marked) or not marked[0] and all(marked[1:])
         )
         boxes = tuple(bbox for _line, _value, bbox in visible_lines if bbox is not None)
@@ -837,6 +839,25 @@ class DocumentAnalyzer:
             else:
                 rows.append(box)
         return tuple(rows)
+
+    @staticmethod
+    def _split_text_rows(primary: RecognitionItem, visible_lines, rows: tuple[Rect, ...]):
+        grouped = []
+        for row in rows:
+            entries = sorted(
+                (
+                    (value, bbox)
+                    for _line, value, bbox in visible_lines
+                    if bbox is not None and row.y1 <= (bbox.y1 + bbox.y2) / 2.0 <= row.y2
+                ),
+                key=lambda item: item[1].x1,
+            )
+            grouped.append(entries)
+        if len(grouped) < 2 or any(len(row) != 2 for row in grouped):
+            return ()
+        if any(row[1][1].x1 - row[0][1].x2 < primary.bbox.width * 0.08 for row in grouped):
+            return ()
+        return tuple(tuple(value for value, _bbox in row) for row in grouped)
 
     @staticmethod
     def _union(rectangles: Iterable[Rect]) -> Rect:
