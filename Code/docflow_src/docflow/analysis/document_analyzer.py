@@ -204,26 +204,21 @@ class DocumentAnalyzer:
         text = "" if kind in {"figure_group", "table_group", "equation_group"} else self._text(primary)
         if kind == "heading":
             text = self._normalize_heading(text)
+        visible_lines = self._visible_lines(primary)
         payload = {
             "confidence": primary.confidence,
             "image_base64": primary.image_base64,
             "html": primary.html,
             "latex": primary.latex,
-            "lines": tuple(line.text for line in primary.text_lines),
+            "lines": tuple(value for _line, value, _bbox in visible_lines),
             "line_heights_px": tuple(
-                max(point[1] for point in line.polygon) - min(point[1] for point in line.polygon)
-                for line in primary.text_lines
-                if line.polygon
+                bbox.height for _line, _value, bbox in visible_lines if bbox is not None
             ),
             "line_tops_px": tuple(
-                min(point[1] for point in line.polygon)
-                for line in primary.text_lines
-                if line.polygon
+                bbox.y1 for _line, _value, bbox in visible_lines if bbox is not None
             ),
             "line_lefts_px": tuple(
-                min(point[0] for point in line.polygon)
-                for line in primary.text_lines
-                if line.polygon
+                bbox.x1 for _line, _value, bbox in visible_lines if bbox is not None
             ),
             "caption": self._merge_caption_text(captions),
             "caption_alignment": self._caption_alignment(primary, captions),
@@ -443,9 +438,9 @@ class DocumentAnalyzer:
             item.category == "formula" and bool(_FORMULA_NUMBER_RE.match(DocumentAnalyzer._text(item)))
         )
 
-    @staticmethod
-    def _text(item: RecognitionItem) -> str:
-        parts = [line.text.strip() for line in item.text_lines if line.text.strip()]
+    @classmethod
+    def _text(cls, item: RecognitionItem) -> str:
+        parts = [value for _line, value, _bbox in cls._visible_lines(item)]
         output = ""
         for part in parts:
             if output.endswith("-") and part[:1].islower():
@@ -453,6 +448,37 @@ class DocumentAnalyzer:
             else:
                 output = _join_text_segments(output, part)
         return output
+
+    @classmethod
+    def _visible_lines(cls, item: RecognitionItem):
+        visible = []
+        for line in item.text_lines:
+            text = line.text.strip()
+            line_bbox = cls._polygon_rect(line.polygon)
+            if not text:
+                continue
+            if line_bbox is None:
+                visible.append((line, text, None))
+                continue
+            horizontal = line_bbox.width >= line_bbox.height
+            start = line_bbox.x1 if horizontal else line_bbox.y1
+            end = line_bbox.x2 if horizontal else line_bbox.y2
+            clip_start = item.bbox.x1 if horizontal else item.bbox.y1
+            clip_end = item.bbox.x2 if horizontal else item.bbox.y2
+            span = max(end - start, 1.0)
+            glyph_span = span / max(len(text), 1)
+            left = round(len(text) * max(clip_start - start, 0.0) / span) if clip_start - start >= glyph_span * 0.5 else 0
+            right = round(len(text) * max(end - clip_end, 0.0) / span) if end - clip_end >= glyph_span * 0.5 else 0
+            clipped = text[left : max(len(text) - right, left)].strip()
+            if clipped:
+                visible_bbox = Rect(
+                    max(line_bbox.x1, item.bbox.x1),
+                    max(line_bbox.y1, item.bbox.y1),
+                    min(line_bbox.x2, item.bbox.x2),
+                    min(line_bbox.y2, item.bbox.y2),
+                )
+                visible.append((line, clipped, visible_bbox))
+        return visible
 
     @staticmethod
     def _normalize_heading(text: str) -> str:

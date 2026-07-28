@@ -165,6 +165,31 @@ def test_vertical_cjk_sidebar_keeps_visual_orientation() -> None:
     assert element.text == ""
 
 
+def test_ocr_lines_are_clipped_to_their_layout_region() -> None:
+    shared = TextEvidence(
+        "侧注正文继续",
+        polygon=((50, 100), (350, 100), (350, 130), (50, 130)),
+    )
+    evidence = RecognitionEvidence(
+        (
+            RecognitionPage(
+                0,
+                500,
+                700,
+                (
+                    RecognitionItem("note", "footnote", Rect(50, 100, 150, 180), 1, text_lines=(shared, TextEvidence("内容", polygon=((50, 140), (150, 140), (150, 170), (50, 170))))),
+                    RecognitionItem("body", "text", Rect(150, 100, 350, 180), 2, text_lines=(shared,)),
+                ),
+            ),
+        )
+    )
+
+    note, body = DocumentAnalyzer().analyze(evidence).pages[0].elements
+
+    assert note.text == "侧注内容"
+    assert body.text == "正文继续"
+
+
 def test_font_size_uses_source_pitch_capped_by_ink_height() -> None:
     item = RecognitionItem(
         "body",

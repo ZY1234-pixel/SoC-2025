@@ -139,6 +139,31 @@ def test_wrapped_flow_uses_floating_editable_media_table() -> None:
     assert container.paragraphs[-1].text == "Editable body"
 
 
+def test_left_wrapped_flow_uses_absolute_position_and_editable_text() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    flow = FlowSection(
+        "wrapped",
+        FlowKind.WRAPPED,
+        ("body", "note"),
+        floating_element_id="note",
+        floating_width_pt=40,
+        floating_side="left",
+        floating_offset_x_pt=20,
+    )
+    elements = {
+        "body": PlannedElement("body", "paragraph_group", "body", "Editable body"),
+        "note": PlannedElement("note", "paragraph_group", "body", "Editable note"),
+    }
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._render_wrapped(container, flow, elements, {"body": role}, 1.0, 100)
+
+    positioning = container.tables[0]._tbl.tblPr.find(qn("w:tblpPr"))
+    assert positioning.get(qn("w:tblpX")) == "400"
+    assert positioning.get(qn("w:tblpXSpec")) is None
+    assert container.tables[0].cell(0, 0).paragraphs[-1].text == "Editable note"
+
+
 def test_native_table_respects_element_width_and_sets_fixed_table_width() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     element = PlannedElement(

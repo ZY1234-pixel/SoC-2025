@@ -177,12 +177,13 @@ class ReflowDocxRenderer:
 
     def _render_wrapped(self, container, flow, elements, roles, fit_scale, container_width) -> None:
         floating = elements[flow.floating_element_id]
-        width = flow.floating_width_pt * fit_scale
+        width = flow.floating_width_pt * fit_scale if floating.kind == "figure_group" else flow.floating_width_pt
         table = container.add_table(rows=1, cols=1)
         self._format_layout_table(table, (width,))
         self._float_table(
             table,
             flow.floating_side,
+            flow.floating_offset_x_pt * fit_scale,
             flow.floating_offset_y_pt * fit_scale,
             flow.gutter_pt * fit_scale,
         )
@@ -190,25 +191,28 @@ class ReflowDocxRenderer:
         set_cell_margins(cell, top=0, bottom=0, start=0, end=0)
         self._clear_container(cell)
         data = self._decode_image(floating.payload.get("image_base64"))
-        if data:
+        if floating.kind == "figure_group" and data:
             paragraph = cell.add_paragraph()
             paragraph.paragraph_format.space_before = Pt(0)
             paragraph.paragraph_format.space_after = Pt(0)
             paragraph.add_run().add_picture(io.BytesIO(data), width=Pt(max(width, 0.5)))
-        self._write_caption(
-            cell,
-            floating.payload.get("caption"),
-            roles,
-            fit_scale,
-            floating.payload.get("caption_alignment"),
-        )
+            self._write_caption(
+                cell,
+                floating.payload.get("caption"),
+                roles,
+                fit_scale,
+                floating.payload.get("caption_alignment"),
+            )
+        else:
+            self._render_element(cell, floating, roles, fit_scale, width)
         self._collapse_trailing_paragraph(cell)
+        self._collapse_trailing_paragraph(container)
         for identifier in flow.element_ids:
             if identifier != flow.floating_element_id:
                 self._render_element(container, elements[identifier], roles, fit_scale, container_width)
 
     @staticmethod
-    def _float_table(table, side: str, offset_y_pt: float, gutter_pt: float) -> None:
+    def _float_table(table, side: str, offset_x_pt: float, offset_y_pt: float, gutter_pt: float) -> None:
         properties = table._tbl.tblPr
         positioning = OxmlElement("w:tblpPr")
         distance = str(round(max(gutter_pt / 2.0, 2.0) * 20))
@@ -218,7 +222,10 @@ class ReflowDocxRenderer:
         positioning.set(qn("w:bottomFromText"), "0")
         positioning.set(qn("w:vertAnchor"), "text")
         positioning.set(qn("w:horzAnchor"), "text")
-        positioning.set(qn("w:tblpXSpec"), side)
+        if side == "left":
+            positioning.set(qn("w:tblpX"), str(round(offset_x_pt * 20)))
+        else:
+            positioning.set(qn("w:tblpXSpec"), side)
         positioning.set(qn("w:tblpY"), str(round(offset_y_pt * 20)))
         properties.append(positioning)
 
@@ -358,7 +365,7 @@ class ReflowDocxRenderer:
             return
         width = container_width * float(element.payload.get("width_fraction", 1.0)) * fit_scale
         paragraph = container.add_paragraph()
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.alignment = _ALIGNMENT.get(element.payload.get("alignment"), WD_ALIGN_PARAGRAPH.CENTER)
         paragraph.paragraph_format.space_before = Pt(0)
         paragraph.paragraph_format.space_after = Pt(0)
         paragraph.add_run().add_picture(io.BytesIO(data), width=Pt(max(width, 0.5)))

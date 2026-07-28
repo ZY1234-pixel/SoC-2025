@@ -52,7 +52,20 @@ class ReflowPlanner:
         scale = self.page_long_edge_pt / max(page.width_px, page.height_px)
         width_pt = page.width_px * scale
         height_pt = page.height_px * scale
-        furniture = [element for element in page.elements if element.kind in {"header", "footer", "page_number"}]
+        edge_candidates = [
+            element
+            for element in page.elements
+            if element.kind == "figure_group"
+            and element.bbox.width <= page.width_px * 0.08
+            and element.bbox.height >= element.bbox.width * 2.5
+            and (element.bbox.x2 <= page.width_px * 0.12 or element.bbox.x1 >= page.width_px * 0.88)
+        ]
+        edge_visuals = {edge_candidates[0].element_id} if len(edge_candidates) == 1 else set()
+        furniture = [
+            element
+            for element in page.elements
+            if element.kind in {"header", "footer", "page_number"} or element.element_id in edge_visuals
+        ]
         body = [element for element in page.elements if element not in furniture]
         bounds = self._union(element.bbox for element in body) if body else Rect(0, 0, page.width_px, page.height_px)
         geometry = PageGeometry(
@@ -65,6 +78,7 @@ class ReflowPlanner:
         )
         usable_width = geometry.width_pt - geometry.margin_left_pt - geometry.margin_right_pt
         sections, placement = self._build_sections(body, bounds, usable_width)
+        sections, placement = self._promote_margin_notes(sections, body, placement, bounds, scale)
         sections, placement = self._promote_wrapped_media(sections, body, placement, scale)
         sections = tuple(self._with_vertical_tracks(section, body, scale) for section in sections)
         container_frames = self._container_frames(body, sections, placement, bounds)
@@ -129,7 +143,9 @@ class ReflowPlanner:
         header_ids = tuple(
             element.element_id
             for element in furniture
-            if element.kind == "header" or (element.kind == "page_number" and (element.bbox.y1 + element.bbox.y2) / 2 < page.height_px / 2)
+            if element.kind == "header"
+            or (element.kind == "page_number" and (element.bbox.y1 + element.bbox.y2) / 2 < page.height_px / 2)
+            or (element.element_id in edge_visuals and (element.bbox.y1 + element.bbox.y2) / 2 < page.height_px / 2)
         )
         footer_ids = tuple(element.element_id for element in furniture if element.element_id not in header_ids)
         return ReflowPagePlan(
@@ -196,6 +212,83 @@ class ReflowPlanner:
         return tuple(sections), placement
 
     @staticmethod
+    def _promote_margin_notes(sections, elements, placement, bounds: Rect, source_scale: float):
+        by_id = {element.element_id: element for element in elements}
+        main_text = [
+            element
+            for element in elements
+            if element.kind == "paragraph_group" and element.bbox.width >= bounds.width * 0.55
+        ]
+        if len(main_text) < 2:
+            return sections, placement
+        main_left = median(element.bbox.x1 for element in main_text)
+        main_right = median(element.bbox.x2 for element in main_text)
+        main_width = max(main_right - main_left, 1.0)
+        section_by_id = {
+            identifier: index
+            for index, section in enumerate(sections)
+            for identifier in section.element_ids
+        }
+        replacements = {}
+        removed = set()
+        updated_placement = dict(placement)
+        for note in elements:
+            if (
+                note.kind != "paragraph_group"
+                or note.bbox.width > main_width * 0.20
+                or not (note.bbox.x2 <= main_left + main_width * 0.03 or note.bbox.x1 >= main_right - main_width * 0.03)
+            ):
+                continue
+            note_section_index = section_by_id[note.element_id]
+            note_section = sections[note_section_index]
+            if note_section.kind != FlowKind.SINGLE:
+                continue
+            anchors = [
+                element
+                for element in main_text
+                if max(0.0, min(note.bbox.y2, element.bbox.y2) - max(note.bbox.y1, element.bbox.y1))
+                / max(min(note.bbox.height, element.bbox.height), 1.0)
+                >= 0.20
+                and sections[section_by_id[element.element_id]].kind == FlowKind.SINGLE
+            ]
+            if not anchors:
+                continue
+            anchor = max(anchors, key=lambda element: min(note.bbox.y2, element.bbox.y2) - max(note.bbox.y1, element.bbox.y1))
+            anchor_section_index = section_by_id[anchor.element_id]
+            if anchor_section_index in replacements:
+                continue
+            anchor_section = sections[anchor_section_index]
+            side = "left" if note.bbox.x2 <= main_left + main_width * 0.03 else "right"
+            element_ids = (
+                anchor_section.element_ids
+                if note_section_index == anchor_section_index
+                else anchor_section.element_ids + (note.element_id,)
+            )
+            replacements[anchor_section_index] = FlowSection(
+                anchor_section.section_id,
+                FlowKind.WRAPPED,
+                element_ids,
+                gutter_pt=max((main_left - note.bbox.x2 if side == "left" else note.bbox.x1 - main_right) * source_scale, 0.0),
+                floating_element_id=note.element_id,
+                floating_width_pt=note.bbox.width * source_scale,
+                floating_side=side,
+                floating_offset_x_pt=max(note.bbox.x1 - bounds.x1, 0.0) * source_scale,
+                floating_offset_y_pt=max(
+                    note.bbox.y1 - min(by_id[identifier].bbox.y1 for identifier in element_ids if identifier != note.element_id),
+                    0.0,
+                ) * source_scale,
+            )
+            updated_placement[note.element_id] = 0
+            if note_section_index != anchor_section_index:
+                removed.add(note_section_index)
+        promoted = tuple(
+            replacements.get(index, section)
+            for index, section in enumerate(sections)
+            if index not in removed
+        )
+        return promoted, updated_placement
+
+    @staticmethod
     def _promote_wrapped_media(sections, elements, placement, source_scale: float):
         by_id = {element.element_id: element for element in elements}
         promoted = []
@@ -239,6 +332,14 @@ class ReflowPlanner:
                     break
                 element_ids.extend(following.element_ids)
                 next_index += 1
+            if not any(
+                by_id[identifier].kind == "paragraph_group"
+                and by_id[identifier].bbox.y1 >= figure.bbox.y2
+                for identifier in element_ids
+            ):
+                promoted.append(section)
+                index += 1
+                continue
             text_top = min(
                 by_id[identifier].bbox.y1
                 for identifier in element_ids
@@ -253,6 +354,7 @@ class ReflowPlanner:
                     floating_element_id=figure.element_id,
                     floating_width_pt=section.column_widths_pt[figure_column],
                     floating_side=side,
+                    floating_offset_x_pt=(figure.bbox.x1 * source_scale if side == "left" else 0.0),
                     floating_offset_y_pt=max(figure.bbox.y1 - text_top, 0.0) * source_scale,
                 )
             )
@@ -294,10 +396,14 @@ class ReflowPlanner:
 
     @staticmethod
     def _horizontal_indents(elements, sections, placement, frames, usable_width: float):
+        by_id = {element.element_id: element for element in elements}
         target_widths = {element.element_id: usable_width for element in elements}
         section_kinds = {}
+        wrapped_figure_ids = set()
         for section in sections:
             section_kinds.update((identifier, section.kind) for identifier in section.element_ids)
+            if section.kind == FlowKind.WRAPPED and by_id[section.floating_element_id].kind == "figure_group":
+                wrapped_figure_ids.update(section.element_ids)
             if section.kind in {FlowKind.SINGLE, FlowKind.WRAPPED}:
                 continue
             spans = {
@@ -319,14 +425,18 @@ class ReflowPlanner:
             centered = abs((element.bbox.x1 + element.bbox.x2 - left - right) / 2.0) <= source_width * 0.04
             width_fraction = element.bbox.width / source_width
             section_kind = section_kinds[element.element_id]
-            single_flow_uses_full_width = section_kind == FlowKind.WRAPPED or (
+            single_flow_uses_full_width = element.element_id in wrapped_figure_ids or (
                 section_kind == FlowKind.SINGLE and (element.kind == "heading" or width_fraction > 0.85)
             )
-            if (
-                element.kind not in {"heading", "paragraph_group"}
-                or width_fraction < 0.3
-                or single_flow_uses_full_width
-            ):
+            if element.kind == "heading":
+                result[element.element_id] = (
+                    0.0
+                    if centered or width_fraction > 0.85
+                    else max(element.bbox.x1 - left, 0.0) / source_width * target_widths[element.element_id],
+                    0.0,
+                )
+                continue
+            if element.kind != "paragraph_group" or width_fraction < 0.3 or single_flow_uses_full_width:
                 result[element.element_id] = (0.0, 0.0)
                 continue
             target_width = target_widths[element.element_id]
@@ -942,10 +1052,16 @@ class ReflowPlanner:
 
     @staticmethod
     def _alignment(element, frame) -> str:
-        if element.kind in {"figure_group", "equation_group", "caption"}:
+        if element.kind in {"equation_group", "caption"}:
             return "center"
         left, right = frame
         width = max(right - left, 1.0)
+        if element.kind == "figure_group":
+            if element.bbox.x1 <= left + width * 0.08:
+                return "left"
+            if element.bbox.x2 >= right - width * 0.08:
+                return "right"
+            return "center"
         element_center = (element.bbox.x1 + element.bbox.x2) / 2.0
         centered = abs(element_center - (left + right) / 2.0) <= width * 0.04
         source_lines = element.payload.get("lines") or ()
@@ -969,7 +1085,11 @@ class ReflowPlanner:
         if not lines or role is None:
             return None
         line_heights = element.payload.get("line_heights_px") or ()
-        observed = median(line_heights) * source_scale if line_heights else element.bbox.height * source_scale / len(lines)
+        line_tops = element.payload.get("line_tops_px") or ()
+        if len(line_tops) >= 2:
+            observed = median(right - left for left, right in zip(line_tops, line_tops[1:])) * source_scale
+        else:
+            observed = median(line_heights) * source_scale if line_heights else element.bbox.height * source_scale / len(lines)
         return min(max(observed, role.font_size_pt * 1.05), role.font_size_pt * 1.5)
 
     @staticmethod

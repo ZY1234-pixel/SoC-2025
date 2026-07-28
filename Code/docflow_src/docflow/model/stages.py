@@ -251,6 +251,7 @@ class FlowSection:
     floating_element_id: Optional[str] = None
     floating_width_pt: float = 0.0
     floating_side: str = "right"
+    floating_offset_x_pt: float = 0.0
     floating_offset_y_pt: float = 0.0
 
     def __post_init__(self) -> None:
@@ -263,6 +264,7 @@ class FlowSection:
             or any(width <= 0 for width in self.column_widths_pt)
             or any(height <= 0 for height in self.row_heights_pt)
             or self.floating_width_pt < 0
+            or self.floating_offset_x_pt < 0
             or self.floating_offset_y_pt < 0
         ):
             raise ValueError("invalid flow section dimensions")

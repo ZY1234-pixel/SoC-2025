@@ -348,14 +348,41 @@ def test_single_flow_preserves_substantial_inset_paragraph_width() -> None:
     assert planned.payload["right_indent_pt"] == 0
 
 
-def test_single_flow_off_center_heading_does_not_use_bbox_as_text_width() -> None:
-    heading = _element("sidebar", (100, 100, 500, 160), 1, "Sidebar", kind="heading", payload={"lines": ("Sidebar",)})
+def test_single_flow_off_center_heading_preserves_its_left_anchor_without_narrowing() -> None:
+    heading = _element("sidebar", (200, 100, 500, 160), 1, "Sidebar", kind="heading", payload={"lines": ("Sidebar",)})
     anchor = _element("anchor", (100, 200, 900, 260), 2, "Anchor", kind="heading")
 
     planned = ReflowPlanner().plan(_analysis((heading, anchor))).pages[0].elements[0]
 
-    assert planned.payload["left_indent_pt"] == 0
+    assert planned.payload["left_indent_pt"] > 0
     assert planned.payload["right_indent_pt"] == 0
+
+
+def test_overlapping_margin_note_becomes_wrapped_flow() -> None:
+    elements = (
+        _element("body-1", (180, 100, 900, 300), 1, "Body " * 30, payload={"lines": ("a", "b", "c")}),
+        _element("note", (80, 240, 160, 340), 2, "Margin note", payload={"lines": ("a", "b")}),
+        _element("body-2", (180, 350, 900, 500), 3, "Body " * 20, payload={"lines": ("a", "b")}),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+
+    wrapped = next(section for section in page.sections if section.kind == FlowKind.WRAPPED)
+    assert wrapped.floating_element_id == "note"
+    assert wrapped.floating_side == "left"
+    assert wrapped.floating_offset_x_pt == 0
+
+
+def test_narrow_edge_visual_is_page_furniture() -> None:
+    elements = (
+        _element("rail", (20, 100, 60, 400), 1, text="", kind="figure_group"),
+        _element("body", (120, 200, 900, 1000), 2),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+
+    assert page.header_element_ids == ("rail",)
+    assert page.sections[0].element_ids == ("body",)
 
 
 def test_page_fit_uses_observed_source_lines_as_a_lower_bound() -> None:
