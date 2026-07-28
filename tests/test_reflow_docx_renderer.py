@@ -183,6 +183,23 @@ def test_native_table_respects_element_width_and_sets_fixed_table_width() -> Non
     assert int(table_width.get(qn("w:w"))) == pytest.approx(75 * 20, abs=2)
 
 
+def test_numbered_equation_clears_word_default_cell_paragraph_spacing() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "equation",
+        "equation_group",
+        "body",
+        payload={"image_base64": _png_base64(), "number": "(1)", "width_fraction": 0.8},
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_equation(container, element, {"body": role}, 1.0, 100)
+
+    for cell in container.tables[0].rows[0].cells:
+        assert cell.paragraphs[0].paragraph_format.space_before.pt == 0
+        assert cell.paragraphs[0].paragraph_format.space_after.pt == 0
+
+
 def test_native_table_uses_inferred_table_font() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     element = PlannedElement(

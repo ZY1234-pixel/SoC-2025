@@ -403,6 +403,8 @@ class ReflowDocxRenderer:
         if data:
             paragraph = body.paragraphs[0]
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph.paragraph_format.space_before = Pt(0)
+            paragraph.paragraph_format.space_after = Pt(0)
             width = widths[0] * float(element.payload.get("width_fraction", 1.0)) * fit_scale
             paragraph.add_run().add_picture(io.BytesIO(data), width=Pt(max(width, 0.5)))
         elif element.payload.get("latex"):
@@ -411,6 +413,8 @@ class ReflowDocxRenderer:
         number_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
         paragraph = number_cell.paragraphs[0]
         paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(0)
         role = roles.get(element.role_id) or self._body_role(roles)
         self._style_run(paragraph.add_run(number), role, fit_scale)
         self._collapse_trailing_paragraph(container)
