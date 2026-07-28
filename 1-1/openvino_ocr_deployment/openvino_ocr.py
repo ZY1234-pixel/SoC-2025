@@ -1,6 +1,5 @@
 # Copyright (c) 2020 PaddlePaddle Authors.
 # Licensed under the Apache License, Version 2.0.
-# 上述版权和许可声明来自 PaddleOCR，需随部署代码保留。
 
 from __future__ import annotations
 
