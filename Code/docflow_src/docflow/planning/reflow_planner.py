@@ -662,39 +662,49 @@ class ReflowPlanner:
             GridCell(row, column, tuple(ids), column_span=column_span)
             for (row, column, column_span), ids in sorted(cells.items())
         ]
-        for anchor_row in sorted({cell.row for cell in grid_cells if cell.column_span > 1}):
-            covered = {
-                column
-                for cell in grid_cells
-                if cell.row == anchor_row and cell.column_span > 1
-                for column in range(cell.column, cell.column + cell.column_span)
-            }
-            for lower in tuple(
-                cell
-                for cell in grid_cells
-                if cell.row == anchor_row and cell.column_span == 1 and cell.column not in covered
-            ):
-                upper = next(
+        for column in range(len(lanes)):
+            while True:
+                lane = sorted(
+                    (cell for cell in grid_cells if cell.column == column and cell.column_span == 1),
+                    key=lambda cell: cell.row,
+                )
+                pair = next(
                     (
-                        cell
-                        for cell in grid_cells
-                        if cell.column == lower.column
-                        and cell.column_span == 1
-                        and cell.row + cell.row_span == anchor_row
+                        (upper, lower)
+                        for upper, lower in zip(lane, lane[1:])
+                        if upper.row + upper.row_span <= lower.row
+                        and (
+                            upper.row + upper.row_span < lower.row
+                            or any(
+                                cell.row == lower.row
+                                and cell.column_span > 1
+                                and not cell.column <= column < cell.column + cell.column_span
+                                for cell in grid_cells
+                            )
+                        )
+                        and not any(
+                            cell.column <= column < cell.column + cell.column_span
+                            and cell.row < lower.row
+                            and cell.row + cell.row_span > upper.row + upper.row_span
+                            for cell in grid_cells
+                            if cell not in {upper, lower}
+                        )
                     ),
                     None,
                 )
-                if upper is not None:
-                    grid_cells.remove(upper)
-                    grid_cells.remove(lower)
-                    grid_cells.append(
-                        GridCell(
-                            upper.row,
-                            upper.column,
-                            upper.element_ids + lower.element_ids,
-                            row_span=upper.row_span + lower.row_span,
-                        )
+                if pair is None:
+                    break
+                upper, lower = pair
+                grid_cells.remove(upper)
+                grid_cells.remove(lower)
+                grid_cells.append(
+                    GridCell(
+                        upper.row,
+                        upper.column,
+                        upper.element_ids + lower.element_ids,
+                        row_span=lower.row + lower.row_span - upper.row,
                     )
+                )
         return FlowSection(
             section_id,
             FlowKind.GRID,
@@ -984,14 +994,14 @@ class ReflowPlanner:
                 predecessors = [
                     previous
                     for previous in previous_by_column[column]
-                    if previous.bbox.y2 <= current.bbox.y1
+                    if previous.bbox.y1 <= current.bbox.y1
                     and max(0.0, min(previous.bbox.x2, current.bbox.x2) - max(previous.bbox.x1, current.bbox.x1))
                     / max(min(previous.bbox.width, current.bbox.width), 1.0)
                     >= 0.30
                 ]
                 if predecessors:
                     previous = max(predecessors, key=lambda element: element.bbox.y2)
-                    spacing[identifier] = (current.bbox.y1 - previous.bbox.y2) * source_scale
+                    spacing[identifier] = max(current.bbox.y1 - previous.bbox.y2, 0.0) * source_scale
                 previous_by_column[column].append(current)
             if section.kind == FlowKind.GRID:
                 for cell in section.grid_cells:
@@ -1246,6 +1256,13 @@ class ReflowPlanner:
         source_lines = element.payload.get("lines") or ()
         if element.kind == "paragraph_group" and element.text_structure.is_list:
             return "left"
+        widths = element.payload.get("line_widths_px") or ()
+        lefts = element.payload.get("line_lefts_px") or ()
+        if len(source_lines) >= 2 and len(lefts) == len(widths) == len(source_lines) and all(
+            abs(float(source_left) + float(line_width) / 2.0 - (left + right) / 2.0) <= width * 0.05
+            for source_left, line_width in zip(lefts, widths)
+        ):
+            return "center"
         if element.kind == "heading" and len(source_lines) > 1 and element.bbox.x1 <= left + width * 0.05:
             return "left"
         if centered and (element.kind == "heading" or element.bbox.width <= width * 0.75):

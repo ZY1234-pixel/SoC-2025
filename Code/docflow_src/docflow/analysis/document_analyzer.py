@@ -133,6 +133,8 @@ class DocumentAnalyzer:
             target_category = self._caption_target(caption)
             if not target_category or caption.evidence_id in consumed:
                 continue
+            if target_category == "figure" and self._is_shared_figure_caption(caption, items, page):
+                continue
             text = self._text(caption).strip()
             peer = next(
                 (
@@ -242,6 +244,9 @@ class DocumentAnalyzer:
             "line_lefts_px": tuple(
                 bbox.x1 for _line, _value, bbox in visible_lines if bbox is not None
             ),
+            "line_widths_px": tuple(
+                bbox.width for _line, _value, bbox in visible_lines if bbox is not None
+            ),
             "caption": self._merge_caption_text(captions),
             "caption_line_heights_px": tuple(
                 self._line_height(line, bbox) for line, _value, bbox in caption_lines if bbox is not None
@@ -298,6 +303,13 @@ class DocumentAnalyzer:
         preserve_lines = len(lines) >= 2 and sum(marked) >= 2 and (
             all(marked) or not marked[0] and all(marked[1:])
         )
+        boxes = tuple(bbox for _line, _value, bbox in visible_lines if bbox is not None)
+        if len(boxes) == len(lines) and len(boxes) >= 2:
+            center = (primary.bbox.x1 + primary.bbox.x2) / 2.0
+            preserve_lines = preserve_lines or (
+                max(box.x1 for box in boxes) - min(box.x1 for box in boxes) > primary.bbox.width * 0.05
+                and all(abs((box.x1 + box.x2) / 2.0 - center) <= primary.bbox.width * 0.05 for box in boxes)
+            )
         lefts = tuple(bbox.x1 for _line, _value, bbox in visible_lines if bbox is not None)
         hanging_indent = 0.0
         if preserve_lines and not marked[0] and len(lefts) == len(lines):
@@ -421,6 +433,24 @@ class DocumentAnalyzer:
         if re.match(r"^(?:fig(?:ure)?\.?|图)\s*\w", text):
             return "figure"
         return _CAPTION_TARGET.get(item.category)
+
+    @classmethod
+    def _is_shared_figure_caption(cls, caption: RecognitionItem, items, page) -> bool:
+        candidates = [
+            item
+            for item in items
+            if item.category == "figure"
+            and 0 <= caption.bbox.y1 - item.bbox.y2 <= page.height_px * 0.06
+            and max(0.0, min(caption.bbox.x2, item.bbox.x2) - max(caption.bbox.x1, item.bbox.x1)) > 0
+        ]
+        if len(candidates) < 2:
+            return False
+        left, right = min(candidates, key=lambda item: item.bbox.x1), max(candidates, key=lambda item: item.bbox.x2)
+        if left is right or left.bbox.x2 > right.bbox.x1:
+            return False
+        union_center = (left.bbox.x1 + right.bbox.x2) / 2.0
+        caption_center = (caption.bbox.x1 + caption.bbox.x2) / 2.0
+        return abs(caption_center - union_center) <= (right.bbox.x2 - left.bbox.x1) * 0.08
 
     @classmethod
     def _merge_caption_text(cls, captions: Iterable[RecognitionItem]) -> str:
@@ -640,7 +670,7 @@ class DocumentAnalyzer:
                 line_count = max(len(element.payload.get("lines") or ()), 1)
                 line_heights = element.payload.get("line_heights_px") or ()
                 line_tops = element.payload.get("line_tops_px") or ()
-                if element.kind == "heading" and len(line_tops) == len(line_heights) and line_tops:
+                if len(line_tops) == len(line_heights) and line_tops:
                     row_bottoms = []
                     for top, height in sorted(zip(line_tops, line_heights)):
                         if not row_bottoms or float(top) >= row_bottoms[-1] - float(height) * 0.10:

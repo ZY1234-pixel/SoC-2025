@@ -393,6 +393,23 @@ def test_multiline_heading_font_fits_each_preserved_source_line() -> None:
     assert container.paragraphs[-1].runs[0].font.size.pt < role.font_size_pt
 
 
+def test_centered_source_rows_fit_without_word_adding_wraps() -> None:
+    paragraph = Document().add_paragraph()
+    element = PlannedElement(
+        "affiliations",
+        "paragraph_group",
+        "body",
+        text="First unit Second deliberately longer unit",
+        payload={"lines": ("First unit", "Second deliberately longer unit"), "alignment": "center"},
+        text_structure=TextStructure(preserve_source_lines=True),
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 20, 1.0)
+
+    ReflowDocxRenderer()._write_text(paragraph, element, {"body": role}, 1.0, 100)
+
+    assert paragraph.runs[0].font.size.pt < role.font_size_pt
+
+
 def test_column_layout_collapses_word_trailing_paragraph() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)

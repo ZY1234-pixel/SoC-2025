@@ -729,6 +729,36 @@ def test_repeated_small_icon_text_pairs_form_a_local_grid() -> None:
     assert len(section.grid_cells) == 6
 
 
+def test_grid_merges_a_text_lane_interrupted_only_by_other_columns() -> None:
+    elements = (
+        _element("left-top", (50, 100, 300, 250), 1),
+        _element("right-top", (400, 100, 950, 250), 2),
+        _element("right-middle", (400, 270, 950, 400), 3),
+        _element("left-bottom", (50, 420, 300, 600), 4),
+        _element("right-bottom", (400, 420, 950, 600), 5),
+    )
+
+    section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
+
+    assert section.kind == FlowKind.GRID
+    left = next(cell for cell in section.grid_cells if cell.column == 0)
+    assert left.element_ids == ("left-top", "left-bottom")
+    assert left.row_span > 1
+
+
+def test_overlapping_adjacent_blocks_do_not_inherit_spacing_from_an_older_block() -> None:
+    elements = (
+        _element("older", (100, 100, 500, 200), 1),
+        _element("heading", (100, 300, 500, 350), 2, kind="heading"),
+        _element("body", (100, 345, 500, 500), 3),
+    )
+    section = FlowSection("section", FlowKind.SINGLE, tuple(element.element_id for element in elements))
+
+    spacing = ReflowPlanner._vertical_spacing(elements, (section,), {element.element_id: 0 for element in elements}, 1.0)
+
+    assert spacing["body"] == 0
+
+
 def test_independent_text_and_visual_lanes_confirm_staggered_columns() -> None:
     elements = (
         _element("left-text-1", (50, 100, 450, 150), 1),

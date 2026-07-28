@@ -121,6 +121,52 @@ def test_analyzer_keeps_same_baseline_caption_fragments_on_one_line() -> None:
     assert DocumentAnalyzer._merge_caption_text(captions) == "Table 7\tMeasured results"
 
 
+def test_analyzer_keeps_a_shared_pair_caption_outside_individual_figures() -> None:
+    evidence = RecognitionEvidence(
+        (
+            RecognitionPage(
+                0,
+                1000,
+                1400,
+                (
+                    _item("left", "figure", (100, 100, 450, 400), 1),
+                    _item("left-label", "figure_caption", (220, 410, 330, 435), 2, "(a) Before"),
+                    _item("right", "figure", (550, 100, 900, 400), 3),
+                    _item("right-label", "figure_caption", (670, 410, 790, 435), 4, "(b) After"),
+                    _item("shared", "figure_caption", (350, 470, 650, 500), 5, "Figure 3 Comparison"),
+                ),
+            ),
+        )
+    )
+
+    elements = DocumentAnalyzer().analyze(evidence).pages[0].elements
+
+    assert [element.kind for element in elements] == ["figure_group", "figure_group", "caption"]
+    assert [element.payload.get("caption") for element in elements[:2]] == ["(a) Before", "(b) After"]
+    assert elements[2].text == "Figure 3 Comparison"
+
+
+def test_analyzer_preserves_independently_centered_source_rows() -> None:
+    item = RecognitionItem(
+        "affiliations",
+        "text",
+        Rect(100, 100, 900, 220),
+        1,
+        text_lines=(
+            TextEvidence("First unit", polygon=((250, 100), (750, 100), (750, 130), (250, 130))),
+            TextEvidence("Second longer unit", polygon=((150, 145), (850, 145), (850, 175), (150, 175))),
+            TextEvidence("Third unit", polygon=((275, 190), (725, 190), (725, 220), (275, 220))),
+        ),
+    )
+
+    element = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))
+    ).pages[0].elements[0]
+
+    assert element.text_structure.preserve_source_lines is True
+    assert element.payload["line_widths_px"] == (500, 700, 450)
+
+
 def test_analyzer_joins_visual_lines_and_groups_editable_formula_number() -> None:
     paragraph = RecognitionItem(
         "body",
@@ -339,6 +385,26 @@ def test_heading_font_size_counts_overlapping_ocr_lines_as_one_visual_row() -> N
     roles, _assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, (element,)),))
 
     assert roles[0].font_size_pt > 35
+
+
+def test_body_font_size_counts_same_baseline_ocr_fragments_as_one_visual_row() -> None:
+    element = SemanticElement(
+        "byline",
+        "paragraph_group",
+        Rect(100, 100, 900, 130),
+        1,
+        ("raw",),
+        text="Reporter One Two",
+        payload={
+            "lines": ("Reporter", "One", "Two"),
+            "line_tops_px": (100, 100, 100),
+            "line_heights_px": (24, 24, 24),
+        },
+    )
+
+    roles, _assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, (element,)),))
+
+    assert roles[0].font_size_pt > 10
 
 
 def test_style_clustering_absorbs_an_isolated_font_prediction() -> None:

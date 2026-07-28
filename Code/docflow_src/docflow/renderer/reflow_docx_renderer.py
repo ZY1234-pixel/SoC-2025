@@ -314,7 +314,9 @@ class ReflowDocxRenderer:
         role = roles.get(element.role_id) or self._body_role(roles)
         font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5) if role else None
         source_lines = element.payload.get("lines") or ()
-        if font_size and container_width and element.kind == "heading" and len(source_lines) > 1:
+        if font_size and container_width and len(source_lines) > 1 and (
+            element.kind == "heading" or element.text_structure.preserve_source_lines
+        ):
             left_indent = paragraph.paragraph_format.left_indent.pt if paragraph.paragraph_format.left_indent else 0.0
             right_indent = paragraph.paragraph_format.right_indent.pt if paragraph.paragraph_format.right_indent else 0.0
             first_indent = paragraph.paragraph_format.first_line_indent.pt if paragraph.paragraph_format.first_line_indent else 0.0
@@ -324,7 +326,8 @@ class ReflowDocxRenderer:
             font_size = min(
                 font_size,
                 min(
-                    width * 0.98 / max(estimate_text_units(line), 1.0)
+                    width * (0.90 if element.text_structure.preserve_source_lines else 0.98)
+                    / max(estimate_text_units(line), 1.0)
                     for line, width in zip(source_lines, line_widths)
                 ),
             )
