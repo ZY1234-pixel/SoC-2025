@@ -9,6 +9,20 @@ def estimate_text_units(text: str) -> float:
     return sum(1.0 if ord(char) >= 0x2E80 else 0.42 for char in text)
 
 
+def fit_font_size_to_lines(
+    font_size_pt: float,
+    lines: tuple[str, ...],
+    widths_pt: tuple[float, ...],
+    occupancy: float,
+) -> float:
+    limits = [
+        width * occupancy / max(estimate_text_units(line), 1.0)
+        for line, width in zip(lines, widths_pt)
+        if line
+    ]
+    return max(math.floor(min([font_size_pt, *limits]) * 2.0) / 2.0, 0.5)
+
+
 def estimate_wrapped_lines(
     text: str,
     font_size_pt: float,

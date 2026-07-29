@@ -21,6 +21,7 @@ from docflow.model.stages import FlowKind, Rect, ReflowLayoutPlan
 from docflow.planning.text_metrics import (
     estimate_text_units,
     estimate_wrapped_lines,
+    fit_font_size_to_lines,
     infer_occupancy_line_height,
 )
 from docflow.renderer.docx_utils.html_table import (
@@ -405,22 +406,20 @@ class ReflowDocxRenderer:
                 Pt(max(container_width - right_indent, 1.0)),
                 WD_TAB_ALIGNMENT.RIGHT,
             )
-        if font_size and container_width and len(source_lines) > 1 and (
-            element.kind == "heading" or element.text_structure.preserve_source_lines
-        ) and not split_text_rows:
+        if font_size and container_width and len(source_lines) > 1 and not split_text_rows:
             left_indent = paragraph.paragraph_format.left_indent.pt if paragraph.paragraph_format.left_indent else 0.0
             right_indent = paragraph.paragraph_format.right_indent.pt if paragraph.paragraph_format.right_indent else 0.0
             first_indent = paragraph.paragraph_format.first_line_indent.pt if paragraph.paragraph_format.first_line_indent else 0.0
             line_widths = (container_width - left_indent - right_indent - first_indent,) + (
                 container_width - left_indent - right_indent,
             ) * (len(source_lines) - 1)
-            font_size = min(
+            font_size = fit_font_size_to_lines(
                 font_size,
-                min(
-                    width * 0.90
-                    / max(estimate_text_units(line), 1.0)
-                    for line, width in zip(source_lines, line_widths)
-                ),
+                tuple(str(line) for line in source_lines),
+                line_widths,
+                0.90
+                if element.kind == "heading" or element.text_structure.preserve_source_lines
+                else 0.99,
             )
         elif (
             font_size

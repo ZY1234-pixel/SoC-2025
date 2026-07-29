@@ -25,6 +25,7 @@ from docflow.renderer.docx_utils.html_table import get_table_cell_placements, ge
 from docflow.planning.text_metrics import (
     estimate_text_units,
     estimate_wrapped_lines,
+    fit_font_size_to_lines,
     infer_occupancy_line_height,
 )
 
@@ -1187,6 +1188,19 @@ class ReflowPlanner:
             )
             font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
             source_lines = element.payload.get("lines") or ()
+            if len(source_lines) > 1:
+                first_width = max(
+                    width - float(element.payload.get("first_line_indent_pt", 0.0)) * fit_scale,
+                    1.0,
+                )
+                font_size = fit_font_size_to_lines(
+                    font_size,
+                    tuple(str(line) for line in source_lines),
+                    (first_width,) + (width,) * (len(source_lines) - 1),
+                    0.90
+                    if element.kind == "heading" or element.text_structure.preserve_source_lines
+                    else 0.99,
+                )
             line_height = element.payload.get("line_height_pt")
             content_bbox = ReflowPlanner._content_bbox(element)
             source_line_count = (

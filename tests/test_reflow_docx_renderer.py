@@ -27,6 +27,7 @@ from docflow.planning import ReflowPlanner
 from docflow.planning.text_metrics import (
     estimate_text_units,
     estimate_wrapped_lines,
+    fit_font_size_to_lines,
     infer_occupancy_line_height,
 )
 from docflow.renderer.reflow_docx_renderer import ReflowDocxRenderer
@@ -51,6 +52,10 @@ def test_table_column_weights_follow_cell_content() -> None:
 def test_text_width_units_match_latin_and_cjk_font_metrics() -> None:
     assert estimate_text_units("AAAA") == pytest.approx(1.68)
     assert estimate_text_units("中文") == 2.0
+
+
+def test_source_line_font_limit_rounds_down_to_word_half_points() -> None:
+    assert fit_font_size_to_lines(10.0, ("中文" * 10,), (194.0,), 0.99) == 9.5
 
 
 def test_text_occupancy_uses_rendered_lines_to_fill_tight_content_height() -> None:
@@ -559,6 +564,24 @@ def test_centered_source_rows_fit_without_word_adding_wraps() -> None:
     ReflowDocxRenderer()._write_text(paragraph, element, {"body": role}, 1.0, 100)
 
     assert paragraph.runs[0].font.size.pt < role.font_size_pt
+
+
+def test_continuous_paragraph_fits_source_rows_without_hard_breaks() -> None:
+    paragraph = Document().add_paragraph()
+    line = "中文" * 10
+    element = PlannedElement(
+        "body",
+        "paragraph_group",
+        "body",
+        text=line * 2,
+        payload={"lines": (line, line), "alignment": "justify"},
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10, 1.0)
+
+    ReflowDocxRenderer()._write_text(paragraph, element, {"body": role}, 1.0, 194)
+
+    assert paragraph.runs[0].font.size.pt == 9.5
+    assert "\n" not in paragraph.text
 
 
 def test_column_layout_collapses_word_trailing_paragraph() -> None:
