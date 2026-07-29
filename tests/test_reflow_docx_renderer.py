@@ -97,6 +97,29 @@ def test_text_occupancy_uses_rendered_lines_to_fill_tight_content_height() -> No
     assert infer_occupancy_line_height(10, 10.5, 60, lines) == 12
 
 
+def test_dense_grid_text_does_not_reinflate_line_spacing_past_source_rows() -> None:
+    paragraph = Document().add_paragraph()
+    element = PlannedElement(
+        "body",
+        "paragraph_group",
+        "body",
+        "正文" * 45,
+        payload={
+            "lines": ("正文" * 5,) * 9,
+            "visual_line_count": 9,
+            "line_height_pt": 13.25,
+            "source_scale": 0.55,
+            "grid_fit_scale": 0.9,
+        },
+        content_bbox=Rect(0, 0, 350, 216),
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 12.5, 1.0)
+
+    ReflowDocxRenderer()._write_text(paragraph, element, {"body": role}, 0.817 * 0.9, 195)
+
+    assert paragraph.paragraph_format.line_spacing.pt < 10
+
+
 def test_split_text_rows_render_with_right_aligned_fields() -> None:
     cell = Document().add_table(rows=1, cols=1).cell(0, 0)
     cell.text = ""

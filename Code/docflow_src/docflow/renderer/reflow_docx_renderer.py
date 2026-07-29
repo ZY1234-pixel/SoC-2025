@@ -441,11 +441,12 @@ class ReflowDocxRenderer:
                 right_indent = paragraph.paragraph_format.right_indent.pt if paragraph.paragraph_format.right_indent else 0.0
                 width = max(container_width - left_indent - right_indent, 1.0)
                 content_bbox = self._content_bbox(element)
+                source_line_count = int(element.payload.get("visual_line_count") or len(source_lines))
                 lines = estimate_wrapped_lines(
                     element.text,
                     font_size,
                     width,
-                    int(element.payload.get("visual_line_count") or len(source_lines)),
+                    source_line_count,
                     content_bbox.width * float(element.payload.get("source_scale", 1.0)),
                     fit_scale,
                 )
@@ -453,7 +454,7 @@ class ReflowDocxRenderer:
                     font_size,
                     rendered_line_height,
                     content_bbox.height * float(element.payload.get("source_scale", 1.0)) * fit_scale,
-                    lines,
+                    max(lines, source_line_count),
                 )
             paragraph.paragraph_format.line_spacing = Pt(rendered_line_height)
             paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY

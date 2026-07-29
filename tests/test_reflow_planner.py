@@ -795,7 +795,7 @@ def test_dense_grid_text_gets_local_word_capacity_scale() -> None:
 
     scales = planner._grid_cell_fit_scales((section,), (dense, single_line), roles, 1.0)
 
-    assert 0.8 < scales[dense.element_id] < 1.0
+    assert 0.8 < scales[dense.element_id] <= planner.GRID_WORD_SAFETY_FACTOR + 0.01
     assert single_line.element_id not in scales
 
 

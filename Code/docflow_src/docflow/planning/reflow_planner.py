@@ -1136,7 +1136,7 @@ class ReflowPlanner:
                 available = (
                     sum(section.row_heights_pt[cell.row : cell.row + cell.row_span])
                     * fit_scale
-                    * self.word_safety_factor
+                    * min(self.word_safety_factor, self.GRID_WORD_SAFETY_FACTOR)
                 )
 
                 def content_height(local_scale: float) -> float:
