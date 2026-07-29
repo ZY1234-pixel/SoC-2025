@@ -368,7 +368,12 @@ class ReflowDocxRenderer:
                     paragraph = container.add_paragraph()
                     self._write_text(
                         paragraph,
-                        replace(element, text=str(line), payload=payload),
+                        replace(
+                            element,
+                            text=str(line),
+                            payload=payload,
+                            text_structure=replace(element.text_structure, preserve_source_lines=True),
+                        ),
                         roles,
                         fit_scale,
                         container_width,

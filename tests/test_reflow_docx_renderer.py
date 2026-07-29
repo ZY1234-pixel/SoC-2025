@@ -160,7 +160,9 @@ def test_two_line_text_renders_each_source_alignment() -> None:
             "lines": ("centered caption", "right credit"),
             "line_alignments": ("center", "right"),
             "line_height_pt": 12,
+            "source_scale": 1.0,
         },
+        content_bbox=Rect(0, 0, 200, 60),
     )
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
 
@@ -173,6 +175,7 @@ def test_two_line_text_renders_each_source_alignment() -> None:
         WD_ALIGN_PARAGRAPH.CENTER,
         WD_ALIGN_PARAGRAPH.RIGHT,
     ]
+    assert all(paragraph.paragraph_format.line_spacing.pt == 12 for paragraph in cell.paragraphs)
 
 
 def test_single_line_text_is_sized_to_its_source_width() -> None:
