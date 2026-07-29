@@ -154,7 +154,7 @@ def test_grid_renderer_merges_column_and_row_spans() -> None:
 
     assert container.tables[0]._tbl.xpath('.//w:gridSpan[@w:val="2"]')
     assert container.tables[0]._tbl.xpath(".//w:vMerge")
-    assert [row.height.pt for row in container.tables[0].rows] == pytest.approx((30, 40))
+    assert [row.height.pt for row in container.tables[0].rows] == pytest.approx((30, 45.25))
     assert container.tables[0].cell(1, 0)._tc.xpath("./w:tcPr/w:tcMar/w:end/@w:w") == ["100"]
 
 
@@ -198,6 +198,7 @@ def test_row_spanning_grid_figure_floats_without_expanding_its_start_row() -> No
     assert not table._tbl.xpath(".//w:vMerge")
     assert table._tbl.xpath(".//wp:positionH[@relativeFrom='column']/wp:align[text()='left']")
     assert all(row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY for row in table.rows)
+    assert [row.height.pt for row in table.rows] == pytest.approx((40, 40))
 
 
 def test_header_with_image_payload_renders_as_image() -> None:

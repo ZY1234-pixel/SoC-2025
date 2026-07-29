@@ -277,8 +277,36 @@ class ReflowDocxRenderer:
         column_count = len(flow.column_widths_pt)
         table = container.add_table(rows=row_count, cols=column_count)
         self._format_layout_table(table, flow.column_widths_pt, flow.gutter_pt)
-        for row, height in zip(table.rows, flow.row_heights_pt):
-            row.height = Pt(height * fit_scale)
+        # Word needs room for the closing paragraph mark of a vertically merged text cell.
+        terminal_text_ids = tuple(
+            identifier
+            for cell in flow.grid_cells
+            if cell.row + cell.row_span == row_count and cell.row_span > 1
+            for identifier in cell.element_ids
+            if elements[identifier].kind != "figure_group"
+        )
+        terminal_line_reserve = max(
+            (
+                float(
+                    elements[identifier].payload.get("line_height_pt")
+                    or (
+                        roles[elements[identifier].role_id].font_size_pt
+                        * roles[elements[identifier].role_id].line_spacing
+                        if elements[identifier].role_id in roles
+                        else 0.0
+                    )
+                )
+                * fit_scale
+                * 0.5
+                for identifier in terminal_text_ids
+            ),
+            default=0.0,
+        )
+        for index, (row, height) in enumerate(zip(table.rows, flow.row_heights_pt)):
+            row.height = Pt(
+                height * fit_scale
+                + (terminal_line_reserve if index == row_count - 1 else 0.0)
+            )
             row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
         target_cells = {}
         for grid_cell in flow.grid_cells:
