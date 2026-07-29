@@ -24,9 +24,7 @@ from docflow.model.stages import (
 from docflow.renderer.docx_utils.html_table import get_table_cell_placements, get_table_column_weights
 from docflow.planning.text_metrics import (
     estimate_text_units,
-    estimate_wrapped_lines,
-    fit_font_size_to_lines,
-    infer_occupancy_line_height,
+    resolve_text_layout,
 )
 
 
@@ -197,6 +195,7 @@ class ReflowPlanner:
             else element
             for element in planned
         )
+        planned = self._resolve_text_layouts(sections, planned, role_by_id, fit_scale, usable_width)
         header_ids = tuple(
             element.element_id
             for element in furniture
@@ -1177,6 +1176,45 @@ class ReflowPlanner:
                     scales[element.element_id] = max(lower, 0.001)
         return scales
 
+    @staticmethod
+    def _resolve_text_layouts(sections, elements, roles, fit_scale: float, usable_width: float):
+        by_id = {element.element_id: element for element in elements}
+        widths = {element.element_id: usable_width for element in elements}
+        for section in sections:
+            if section.kind == FlowKind.SEQUENTIAL_COLUMNS:
+                for identifier in section.element_ids:
+                    column = int(by_id[identifier].payload.get("column", 0))
+                    widths[identifier] = section.column_widths_pt[column]
+            elif section.kind == FlowKind.GRID:
+                for cell in section.grid_cells:
+                    width = (
+                        sum(section.column_widths_pt[cell.column : cell.column + cell.column_span])
+                        + section.gutter_pt * (cell.column_span - 1)
+                    )
+                    widths.update((identifier, width) for identifier in cell.element_ids)
+            elif section.kind == FlowKind.WRAPPED:
+                floating = by_id[section.floating_element_id]
+                floating_bbox = floating.payload.get("source_bbox") or (0, 0, 1, 1)
+                wrap_width = max(usable_width - section.floating_width_pt - section.gutter_pt, 1.0)
+                widths[section.floating_element_id] = section.floating_width_pt
+                for identifier in section.element_ids:
+                    if identifier == section.floating_element_id:
+                        continue
+                    bbox = by_id[identifier].payload.get("source_bbox") or (0, 0, 1, 1)
+                    widths[identifier] = wrap_width if float(bbox[1]) < float(floating_bbox[3]) else usable_width
+        return tuple(
+            replace(
+                element,
+                text_layout=resolve_text_layout(
+                    element,
+                    roles.get(element.role_id),
+                    widths[element.element_id],
+                    fit_scale * float(element.payload.get("grid_fit_scale", 1.0)),
+                ),
+            )
+            for element in elements
+        )
+
     def _with_vertical_tracks(self, section, elements, source_scale: float):
         if section.kind == FlowKind.SINGLE:
             return section
@@ -1254,65 +1292,8 @@ class ReflowPlanner:
             height = max(height, float(element.payload.get("table_height_pt") or 0.0) * fit_scale)
             return spacing + height + ReflowPlanner._caption_height(element, fit_scale)
         if role is not None and element.text:
-            width = max(
-                width
-                - float(element.payload.get("left_indent_pt", 0.0))
-                - float(element.payload.get("right_indent_pt", 0.0)),
-                1.0,
-            )
-            font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
-            source_lines = element.payload.get("lines") or ()
-            if len(source_lines) > 1:
-                first_width = max(
-                    width - float(element.payload.get("first_line_indent_pt", 0.0)) * fit_scale,
-                    1.0,
-                )
-                font_size = fit_font_size_to_lines(
-                    font_size,
-                    tuple(str(line) for line in source_lines),
-                    (first_width,) + (width,) * (len(source_lines) - 1),
-                    0.90
-                    if element.kind == "heading" or element.text_structure.preserve_source_lines
-                    else 0.99,
-                )
-            line_height = element.payload.get("line_height_pt")
-            content_bbox = ReflowPlanner._content_bbox(element)
-            source_line_count = (
-                len(source_lines)
-                if element.text_structure.preserve_source_lines
-                else int(element.payload.get("visual_line_count") or len(source_lines))
-            )
-            source_width = content_bbox.width * float(element.payload.get("source_scale", 1.0))
-            if element.text_structure.preserve_source_lines:
-                lines = source_line_count
-            else:
-                lines = estimate_wrapped_lines(
-                    element.text,
-                    font_size,
-                    width,
-                    source_line_count,
-                    source_width,
-                    fit_scale,
-                )
-            if source_lines and line_height:
-                measured_line_height = max(float(line_height) * fit_scale, font_size * 1.05)
-                if (
-                    element.kind == "paragraph_group"
-                    and not element.text_structure.preserve_source_lines
-                    and element.text_structure.orientation == "horizontal"
-                ):
-                    target_height = content_bbox.height * float(element.payload.get("source_scale", 1.0)) * fit_scale
-                    measured_line_height = infer_occupancy_line_height(
-                        font_size,
-                        measured_line_height,
-                        target_height,
-                        lines,
-                    )
-                    return spacing + lines * measured_line_height
-                return spacing + lines * measured_line_height + min(font_size * 0.15, 2.0)
-            cjk_count = sum(1 for char in element.text if ord(char) >= 0x2E80)
-            paragraph_boundary = font_size if cjk_count else font_size / 4.0
-            return spacing + lines * font_size * role.line_spacing * 1.05 + paragraph_boundary
+            layouts = resolve_text_layout(element, role, width, fit_scale)
+            return sum(layout.measured_height_pt for layout in layouts)
         bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox") or (0, 0, 1, 1)
         aspect = max(float(bbox[3]) - float(bbox[1]), 1.0) / max(float(bbox[2]) - float(bbox[0]), 1.0)
         source_width = (float(bbox[2]) - float(bbox[0])) * float(element.payload.get("source_scale", 1.0))

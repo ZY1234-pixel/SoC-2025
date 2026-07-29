@@ -20,9 +20,8 @@ from docx.shared import Pt, RGBColor
 from docflow.model.stages import FlowKind, Rect, ReflowLayoutPlan
 from docflow.planning.text_metrics import (
     estimate_text_units,
-    estimate_wrapped_lines,
-    fit_font_size_to_lines,
-    infer_occupancy_line_height,
+    resolve_text_layout,
+    visual_text,
 )
 from docflow.renderer.docx_utils.html_table import (
     get_table_cell_placements,
@@ -331,56 +330,10 @@ class ReflowDocxRenderer:
             if element.text_structure.orientation == "vertical":
                 self._write_vertical_text(container, element, roles, fit_scale)
                 return
-            split_text_rows = element.payload.get("split_text_rows") or ()
-            if split_text_rows:
-                for index, row in enumerate(split_text_rows):
-                    payload = dict(element.payload)
-                    payload.update(
-                        split_text_rows=(row,),
-                        lines=tuple(row),
-                        space_before_pt=payload.get("space_before_pt", 0.0) if index == 0 else 0.0,
-                    )
-                    paragraph = container.add_paragraph()
-                    self._write_text(
-                        paragraph,
-                        replace(element, text=" ".join(row), payload=payload),
-                        roles,
-                        fit_scale,
-                        container_width,
-                    )
-                return
-            line_alignments = element.payload.get("line_alignments") or ()
-            source_lines = element.payload.get("lines") or ()
-            if len(line_alignments) == len(source_lines) >= 2:
-                for index, (line, alignment) in enumerate(zip(source_lines, line_alignments)):
-                    payload = dict(element.payload)
-                    payload.update(
-                        alignment=alignment,
-                        line_alignments=(),
-                        lines=(line,),
-                        visual_line_count=1,
-                        first_line_indent_pt=0.0,
-                        left_indent_pt=0.0,
-                        right_indent_pt=0.0,
-                        width_fraction=1.0,
-                        space_before_pt=payload.get("space_before_pt", 0.0) if index == 0 else 0.0,
-                    )
-                    paragraph = container.add_paragraph()
-                    self._write_text(
-                        paragraph,
-                        replace(
-                            element,
-                            text=str(line),
-                            payload=payload,
-                            text_structure=replace(element.text_structure, preserve_source_lines=True),
-                        ),
-                        roles,
-                        fit_scale,
-                        container_width,
-                    )
-                return
-            paragraph = container.add_paragraph()
-            self._write_text(paragraph, element, roles, fit_scale, container_width)
+            role = roles.get(element.role_id) or self._body_role(roles)
+            layouts = element.text_layout or resolve_text_layout(element, role, container_width, fit_scale)
+            for layout in layouts:
+                self._write_resolved_text(container.add_paragraph(), element, role, layout)
             return
         self._write_block_spacing(container, element, fit_scale)
         if element.kind == "figure_group":
@@ -416,95 +369,38 @@ class ReflowDocxRenderer:
         self._collapse_trailing_paragraph(container)
 
     def _write_text(self, paragraph, element, roles, fit_scale: float, container_width: float | None = None) -> None:
-        self._write_paragraph_geometry(paragraph, element, fit_scale)
-        if element.text_structure.is_list:
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        if element.payload.get("background_color") and container_width:
-            left_indent = paragraph.paragraph_format.left_indent.pt if paragraph.paragraph_format.left_indent else 0.0
-            visual_width = container_width * float(element.payload.get("width_fraction", 1.0)) * fit_scale
-            paragraph.paragraph_format.right_indent = Pt(max(container_width - left_indent - visual_width, 0.0))
         role = roles.get(element.role_id) or self._body_role(roles)
-        font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5) if role else None
-        source_lines = element.payload.get("lines") or ()
-        split_text_rows = element.payload.get("split_text_rows") or ()
-        if split_text_rows and container_width:
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            right_indent = paragraph.paragraph_format.right_indent.pt if paragraph.paragraph_format.right_indent else 0.0
+        if role is None:
+            paragraph.add_run(element.text)
+            return
+        width = container_width
+        if width is None:
+            bbox = self._content_bbox(element)
+            width = max(bbox.width * float(element.payload.get("source_scale", 1.0)), 1.0)
+        layouts = element.text_layout or resolve_text_layout(element, role, width, fit_scale)
+        if layouts:
+            self._write_resolved_text(paragraph, element, role, layouts[0])
+
+    def _write_resolved_text(self, paragraph, element, role, layout) -> None:
+        paragraph.paragraph_format.space_before = Pt(layout.space_before_pt)
+        paragraph.paragraph_format.space_after = Pt(0)
+        paragraph.paragraph_format.first_line_indent = Pt(layout.first_line_indent_pt)
+        paragraph.paragraph_format.left_indent = Pt(layout.left_indent_pt)
+        paragraph.paragraph_format.right_indent = Pt(layout.right_indent_pt)
+        paragraph.alignment = _ALIGNMENT[layout.alignment]
+        if layout.right_tab_stop_pt is not None:
             paragraph.paragraph_format.tab_stops.add_tab_stop(
-                Pt(max(container_width - right_indent, 1.0)),
+                Pt(layout.right_tab_stop_pt),
                 WD_TAB_ALIGNMENT.RIGHT,
             )
-        if font_size and container_width and len(source_lines) > 1 and not split_text_rows:
-            left_indent = paragraph.paragraph_format.left_indent.pt if paragraph.paragraph_format.left_indent else 0.0
-            right_indent = paragraph.paragraph_format.right_indent.pt if paragraph.paragraph_format.right_indent else 0.0
-            first_indent = paragraph.paragraph_format.first_line_indent.pt if paragraph.paragraph_format.first_line_indent else 0.0
-            line_widths = (container_width - left_indent - right_indent - first_indent,) + (
-                container_width - left_indent - right_indent,
-            ) * (len(source_lines) - 1)
-            font_size = fit_font_size_to_lines(
-                font_size,
-                tuple(str(line) for line in source_lines),
-                line_widths,
-                0.90
-                if element.kind == "heading" or element.text_structure.preserve_source_lines
-                else 0.99,
-            )
-        elif (
-            font_size
-            and container_width
-            and len(source_lines) == 1
-            and element.text_structure.orientation != "vertical"
-        ):
-            units = estimate_text_units(element.text)
-            visual_width = container_width * float(element.payload.get("width_fraction", 1.0))
-            font_size = min(font_size, visual_width * 0.90 / max(units, 1.0))
-        line_height = element.payload.get("line_height_pt")
-        if role and line_height:
-            rendered_line_height = max(float(line_height) * fit_scale, font_size * 1.05)
-            if (
-                container_width
-                and element.kind == "paragraph_group"
-                and not element.text_structure.preserve_source_lines
-                and element.text_structure.orientation == "horizontal"
-            ):
-                left_indent = paragraph.paragraph_format.left_indent.pt if paragraph.paragraph_format.left_indent else 0.0
-                right_indent = paragraph.paragraph_format.right_indent.pt if paragraph.paragraph_format.right_indent else 0.0
-                width = max(container_width - left_indent - right_indent, 1.0)
-                content_bbox = self._content_bbox(element)
-                source_line_count = int(element.payload.get("visual_line_count") or len(source_lines))
-                lines = estimate_wrapped_lines(
-                    element.text,
-                    font_size,
-                    width,
-                    source_line_count,
-                    content_bbox.width * float(element.payload.get("source_scale", 1.0)),
-                    fit_scale,
-                )
-                rendered_line_height = infer_occupancy_line_height(
-                    font_size,
-                    rendered_line_height,
-                    content_bbox.height * float(element.payload.get("source_scale", 1.0)) * fit_scale,
-                    max(lines, source_line_count),
-                )
-            paragraph.paragraph_format.line_spacing = Pt(rendered_line_height)
-            paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
-        elif role:
-            paragraph.paragraph_format.line_spacing = role.line_spacing
-        run = paragraph.add_run(self._visual_text(element))
-        self._style_run(run, role, 1.0, font_size_pt=font_size)
+        paragraph.paragraph_format.line_spacing = Pt(layout.line_height_pt)
+        paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+        run = paragraph.add_run(layout.text)
+        self._style_run(run, role, 1.0, font_size_pt=layout.font_size_pt)
         self._shade(paragraph._p.get_or_add_pPr(), element.payload.get("background_color"))
         paragraph.paragraph_format.widow_control = False
         paragraph.paragraph_format.keep_together = False
         paragraph.paragraph_format.keep_with_next = False
-
-    @staticmethod
-    def _write_paragraph_geometry(paragraph, element, fit_scale: float) -> None:
-        paragraph.paragraph_format.space_before = Pt(float(element.payload.get("space_before_pt", 0.0)) * fit_scale)
-        paragraph.paragraph_format.space_after = Pt(0)
-        paragraph.paragraph_format.first_line_indent = Pt(float(element.payload.get("first_line_indent_pt", 0.0)) * fit_scale)
-        paragraph.paragraph_format.left_indent = Pt(float(element.payload.get("left_indent_pt", 0.0)))
-        paragraph.paragraph_format.right_indent = Pt(float(element.payload.get("right_indent_pt", 0.0)))
-        paragraph.alignment = _ALIGNMENT.get(element.payload.get("alignment"), WD_ALIGN_PARAGRAPH.LEFT)
 
     @staticmethod
     def _set_furniture_distances(section, page, elements) -> None:
@@ -762,24 +658,7 @@ class ReflowDocxRenderer:
 
     @staticmethod
     def _visual_text(element) -> str:
-        if element.text_structure.orientation == "vertical":
-            return "\n".join(character for character in element.text if not character.isspace())
-        split_text_rows = element.payload.get("split_text_rows") or ()
-        if split_text_rows:
-            return "\n".join("\t".join(str(value) for value in row) for row in split_text_rows)
-        lines = element.payload.get("lines") or ()
-        if element.text_structure.preserve_source_lines:
-            return "\n".join(str(line) for line in lines)
-        tops = element.payload.get("line_tops_px") or ()
-        heights = element.payload.get("line_heights_px") or ()
-        if element.kind != "heading" or len(lines) < 2 or len(tops) != len(lines) or len(heights) != len(lines):
-            return element.text
-        output = str(lines[0])
-        row_bottom = float(tops[0]) + float(heights[0])
-        for line, top, height in zip(lines[1:], tops[1:], heights[1:]):
-            output += ("\n" if float(top) >= row_bottom - min(float(height), row_bottom - float(tops[0])) * 0.10 else " ") + str(line)
-            row_bottom = max(row_bottom, float(top) + float(height))
-        return output
+        return visual_text(element)
 
     @staticmethod
     def _content_bbox(element) -> Rect:

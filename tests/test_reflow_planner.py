@@ -12,6 +12,7 @@ from docflow.model.stages import (
     Rect,
     SemanticElement,
     TextStructure,
+    TextParagraphLayout,
     TypographicRole,
 )
 from docflow.planning import ReflowPlanner
@@ -309,6 +310,33 @@ def test_page_budget_preserves_source_whitespace_while_scaling_typography() -> N
 
     assert page.fit_scale < 1.0
     assert page.elements[1].payload["space_before_pt"] == pytest.approx(300 * 841.89 / 1400)
+
+
+def test_planner_resolves_final_text_layout_from_the_same_height_model() -> None:
+    element = _element(
+        "body",
+        (100, 100, 900, 300),
+        1,
+        "正文" * 30,
+        payload={
+            "lines": ("正文" * 10,) * 3,
+            "visual_line_count": 3,
+            "line_heights_px": (20, 20, 20),
+        },
+    )
+
+    page = ReflowPlanner().plan(_analysis((element,))).pages[0]
+    planned = page.elements[0]
+    usable_width = page.geometry.width_pt - page.geometry.margin_left_pt - page.geometry.margin_right_pt
+
+    assert planned.text_layout
+    assert isinstance(planned.text_layout[0], TextParagraphLayout)
+    assert ReflowPlanner._element_height(
+        planned,
+        {"body": _analysis(()).roles[0]},
+        usable_width,
+        page.fit_scale,
+    ) == pytest.approx(sum(layout.measured_height_pt for layout in planned.text_layout))
 
 
 def test_grid_assigns_narrow_elements_by_self_coverage() -> None:

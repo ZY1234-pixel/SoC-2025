@@ -161,6 +161,40 @@ class TextStructure:
 
 
 @dataclass(frozen=True)
+class TextParagraphLayout:
+    """Fully resolved paragraph geometry consumed without renderer inference."""
+
+    text: str
+    alignment: str
+    font_size_pt: float
+    line_height_pt: float
+    rendered_line_count: int = 1
+    space_before_pt: float = 0.0
+    first_line_indent_pt: float = 0.0
+    left_indent_pt: float = 0.0
+    right_indent_pt: float = 0.0
+    right_tab_stop_pt: Optional[float] = None
+    layout_reserve_pt: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.alignment not in {"left", "center", "right", "justify"}:
+            raise ValueError("invalid paragraph alignment")
+        if self.font_size_pt <= 0 or self.line_height_pt <= 0 or self.rendered_line_count < 1:
+            raise ValueError("invalid resolved text dimensions")
+        if min(
+            self.space_before_pt,
+            self.left_indent_pt,
+            self.right_indent_pt,
+            self.layout_reserve_pt,
+        ) < 0:
+            raise ValueError("resolved text spacing must not be negative")
+
+    @property
+    def measured_height_pt(self) -> float:
+        return self.space_before_pt + self.rendered_line_count * self.line_height_pt + self.layout_reserve_pt
+
+
+@dataclass(frozen=True)
 class SemanticElement:
     element_id: str
     kind: str
@@ -307,9 +341,11 @@ class PlannedElement:
     payload: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     text_structure: TextStructure = field(default_factory=TextStructure)
     content_bbox: Optional[Rect] = None
+    text_layout: Tuple[TextParagraphLayout, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "payload", _freeze(self.payload))
+        object.__setattr__(self, "text_layout", tuple(self.text_layout))
 
 
 @dataclass(frozen=True)

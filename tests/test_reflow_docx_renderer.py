@@ -21,6 +21,7 @@ from docflow.model.stages import (
     Rect,
     SemanticElement,
     TextStructure,
+    TextParagraphLayout,
     TypographicRole,
 )
 from docflow.planning import ReflowPlanner
@@ -176,6 +177,38 @@ def test_two_line_text_renders_each_source_alignment() -> None:
         WD_ALIGN_PARAGRAPH.RIGHT,
     ]
     assert all(paragraph.paragraph_format.line_spacing.pt == 12 for paragraph in cell.paragraphs)
+
+
+def test_renderer_executes_resolved_text_layout_without_reinferring_payload() -> None:
+    cell = Document().add_table(rows=1, cols=1).cell(0, 0)
+    cell.text = ""
+    element = PlannedElement(
+        "body",
+        "paragraph_group",
+        "body",
+        "planned text",
+        payload={"lines": ("conflicting payload",), "line_height_pt": 40, "alignment": "left"},
+        text_layout=(
+            TextParagraphLayout(
+                "planned text",
+                "right",
+                9.0,
+                11.0,
+                left_indent_pt=4.0,
+            ),
+        ),
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 20, 1.0)
+
+    renderer = ReflowDocxRenderer()
+    renderer._clear_container(cell)
+    renderer._render_element(cell, element, {"body": role}, 0.5, 200)
+    paragraph = cell.paragraphs[0]
+
+    assert paragraph.text == "planned text"
+    assert paragraph.alignment == WD_ALIGN_PARAGRAPH.RIGHT
+    assert paragraph.runs[0].font.size.pt == 9
+    assert paragraph.paragraph_format.line_spacing.pt == 11
 
 
 def test_single_line_text_is_sized_to_its_source_width() -> None:
