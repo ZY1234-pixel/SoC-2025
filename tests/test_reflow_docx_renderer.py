@@ -41,6 +41,38 @@ def _png_base64() -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def test_document_without_furniture_has_no_empty_header_footer_parts() -> None:
+    analysis = DocumentAnalysis(
+        (
+            AnalysisPage(
+                0,
+                1000,
+                1400,
+                (
+                    SemanticElement(
+                        "body",
+                        "paragraph_group",
+                        Rect(100, 100, 900, 1200),
+                        1,
+                        ("raw",),
+                        text="正文",
+                        role_id="body",
+                    ),
+                ),
+            ),
+        ),
+        (TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0),),
+    )
+
+    document = ReflowDocxRenderer().build(ReflowPlanner().plan(analysis))
+
+    section_properties = document.sections[0]._sectPr
+    assert not section_properties.xpath("./w:headerReference | ./w:footerReference")
+    margins = section_properties.pgMar
+    assert margins.get(qn("w:header")) == "0"
+    assert margins.get(qn("w:footer")) == "0"
+
+
 def test_table_column_weights_follow_cell_content() -> None:
     table = BeautifulSoup("<table><tr><td>近12个月最高/最低（元）</td><td>15.06/9.98</td></tr></table>", "html.parser").table
 

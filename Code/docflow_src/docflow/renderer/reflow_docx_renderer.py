@@ -62,8 +62,12 @@ class ReflowDocxRenderer:
             elements = {element.element_id: element for element in page.elements}
             self._set_furniture_distances(section, page, elements)
             usable_width = self._usable_width(page.geometry)
-            self._render_furniture(section.header, page.header_element_ids, elements, roles, page.fit_scale, usable_width)
-            self._render_furniture(section.footer, page.footer_element_ids, elements, roles, page.fit_scale, usable_width)
+            if page.header_element_ids:
+                section.header.is_linked_to_previous = False
+                self._render_furniture(section.header, page.header_element_ids, elements, roles, page.fit_scale, usable_width)
+            if page.footer_element_ids:
+                section.footer.is_linked_to_previous = False
+                self._render_furniture(section.footer, page.footer_element_ids, elements, roles, page.fit_scale, usable_width)
             body = document
             for flow in page.sections:
                 if flow.kind == FlowKind.SINGLE:
@@ -109,8 +113,6 @@ class ReflowDocxRenderer:
         section.right_margin = Pt(geometry.margin_right_pt)
         section.bottom_margin = Pt(geometry.margin_bottom_pt)
         section.left_margin = Pt(geometry.margin_left_pt)
-        section.header.is_linked_to_previous = False
-        section.footer.is_linked_to_previous = False
 
     def _render_furniture(self, container, identifiers, elements, roles, fit_scale, usable_width) -> None:
         self._clear_container(container)
@@ -482,11 +484,15 @@ class ReflowDocxRenderer:
                 min(float(elements[identifier].payload["source_bbox"][1]) for identifier in page.header_element_ids)
                 * float(elements[page.header_element_ids[0]].payload.get("source_scale", 1.0))
             ))
+        else:
+            section.header_distance = Pt(0)
         if page.footer_element_ids:
             reference = elements[page.footer_element_ids[0]]
             page_height = float(reference.payload.get("page_height_px", 1.0))
             bottom = max(float(elements[identifier].payload["source_bbox"][3]) for identifier in page.footer_element_ids)
             section.footer_distance = Pt((page_height - bottom) * float(reference.payload.get("source_scale", 1.0)))
+        else:
+            section.footer_distance = Pt(0)
 
     @staticmethod
     def _write_block_spacing(container, element, fit_scale: float) -> None:
