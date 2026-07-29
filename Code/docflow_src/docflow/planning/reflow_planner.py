@@ -63,7 +63,25 @@ class ReflowPlanner:
             and element.bbox.height >= element.bbox.width * 2.5
             and (element.bbox.x2 <= page.width_px * 0.12 or element.bbox.x1 >= page.width_px * 0.88)
         ]
-        edge_visuals = {edge_candidates[0].element_id} if len(edge_candidates) == 1 else set()
+        edge_visuals = set()
+        for candidates in (
+            [element for element in edge_candidates if element.bbox.x2 <= page.width_px * 0.12],
+            [element for element in edge_candidates if element.bbox.x1 >= page.width_px * 0.88],
+        ):
+            if len(candidates) == 1 or (
+                candidates
+                and all(element.text_structure.orientation == "vertical" for element in candidates)
+                and self._union(element.bbox for element in candidates).height >= page.height_px * 0.40
+            ):
+                edge_visuals.update(element.element_id for element in candidates)
+        edge_visuals.update(
+            element.element_id
+            for element in page.elements
+            if element.kind == "figure_group"
+            and element.bbox.y1 <= page.height_px * 0.01
+            and element.bbox.height <= page.height_px * 0.35
+            and (element.bbox.x2 <= page.width_px * 0.55 or element.bbox.x1 >= page.width_px * 0.45)
+        )
         furniture = [
             element
             for element in page.elements
@@ -194,11 +212,7 @@ class ReflowPlanner:
             section
             for section in sections
             if section.kind == FlowKind.GRID
-            and any(
-                cell.row_span > 1
-                and any(planned_by_id[identifier].kind == "figure_group" for identifier in cell.element_ids)
-                for cell in section.grid_cells
-            )
+            and any(self._is_floating_figure_cell(cell, planned_by_id) for cell in section.grid_cells)
         )
         grid_fit_scales = self._grid_cell_fit_scales(fixed_grid_sections, planned, role_by_id, fit_scale)
         planned = tuple(
@@ -554,12 +568,16 @@ class ReflowPlanner:
         spans = {}
         for item in elements:
             bbox = self._layout_bbox(item)
+            coverage_threshold = 0.20 if item.kind == "figure_group" else 0.30
             overlaps = [
                 index
                 for index, (left, right) in enumerate(lane_bounds)
-                if max(0.0, min(bbox.x2, right) - max(bbox.x1, left)) / max(right - left, 1.0) >= 0.30
+                if max(0.0, min(bbox.x2, right) - max(bbox.x1, left)) / max(right - left, 1.0)
+                >= coverage_threshold
             ]
             spans[item.element_id] = max(overlaps) - min(overlaps) + 1 if overlaps else 1
+            if len(overlaps) > 1:
+                placement[item.element_id] = min(overlaps)
         lane_members = [
             [item for item in elements if placement[item.element_id] == index and spans[item.element_id] == 1]
             for index in range(len(lane_bounds))
@@ -690,7 +708,15 @@ class ReflowPlanner:
             and min(lane_sizes) == 1
         ):
             cells = tuple(
-                GridCell(0, column, tuple(item.element_id for item in elements if placement[item.element_id] == column))
+                GridCell(
+                    0,
+                    column,
+                    tuple(
+                        item.element_id
+                        for item in sorted(elements, key=lambda value: self._layout_bbox(value).y1)
+                        if placement[item.element_id] == column
+                    ),
+                )
                 for column in range(len(lanes))
                 if any(placement[item.element_id] == column for item in elements)
             )
@@ -720,8 +746,14 @@ class ReflowPlanner:
         cells = defaultdict(list)
         for item in elements:
             cells[(rows[item.element_id], placement[item.element_id], spans[item.element_id])].append(item.element_id)
+        by_id = {item.element_id: item for item in elements}
         grid_cells = [
-            GridCell(row, column, tuple(ids), column_span=column_span)
+            GridCell(
+                row,
+                column,
+                tuple(sorted(ids, key=lambda identifier: self._layout_bbox(by_id[identifier]).y1)),
+                column_span=column_span,
+            )
             for (row, column, column_span), ids in sorted(cells.items())
         ]
         row_count = max(cell.row + cell.row_span for cell in grid_cells)
@@ -997,14 +1029,14 @@ class ReflowPlanner:
             covering_events = [
                 event_index
                 for event_index, (top, items) in enumerate(events)
-                if top <= first_top + tolerance
+                if max(ReflowPlanner._layout_bbox(item).y2 for item in items) <= first_top + tolerance
                 or any(
                     placement[item.element_id] <= column < placement[item.element_id] + spans[item.element_id]
                     for item in items
                 )
             ]
             groups = defaultdict(list)
-            for item in column_items:
+            for item in sorted(column_items, key=lambda value: ReflowPlanner._layout_bbox(value).y1):
                 segment = sum(events[event_index][0] <= ReflowPlanner._layout_bbox(item).y1 for event_index in covering_events)
                 groups[segment].append(item.element_id)
             for segment, identifiers in groups.items():
@@ -1020,6 +1052,11 @@ class ReflowPlanner:
         for section in sections:
             by_column = defaultdict(list)
             grid_elements = [by_id[identifier] for identifier in section.element_ids]
+            grid_cell_by_id = {
+                identifier: cell
+                for cell in section.grid_cells
+                for identifier in cell.element_ids
+            }
             for identifier in section.element_ids:
                 current = by_id[identifier]
                 column = placement.get(identifier, 0)
@@ -1040,6 +1077,18 @@ class ReflowPlanner:
                 if predecessors:
                     previous = max(predecessors, key=lambda element: element.bbox.y2)
                     spacing[identifier] = max(current.bbox.y1 - previous.bbox.y2, 0.0) * source_scale
+                elif section.kind == FlowKind.GRID and identifier in grid_cell_by_id:
+                    current_cell = grid_cell_by_id[identifier]
+                    previous_rows = [
+                        by_id[previous_id]
+                        for cell in section.grid_cells
+                        if cell.row + cell.row_span <= current_cell.row
+                        for previous_id in cell.element_ids
+                        if by_id[previous_id].bbox.y2 <= current.bbox.y1
+                    ]
+                    if previous_rows:
+                        previous = max(previous_rows, key=lambda element: element.bbox.y2)
+                        spacing[identifier] = max(current.bbox.y1 - previous.bbox.y2, 0.0) * source_scale
                 if section.kind != FlowKind.GRID:
                     by_column[column].append(current)
         section_elements = [
@@ -1085,11 +1134,7 @@ class ReflowPlanner:
         by_id = {element.element_id: element for element in elements}
         has_fixed_grid_tracks = any(
             section.kind == FlowKind.GRID
-            and any(
-                cell.row_span > 1
-                and any(by_id[identifier].kind == "figure_group" for identifier in cell.element_ids)
-                for cell in section.grid_cells
-            )
+            and any(self._is_floating_figure_cell(cell, by_id) for cell in section.grid_cells)
             for section in sections
         )
         safety_factor = (
@@ -1116,6 +1161,14 @@ class ReflowPlanner:
             else:
                 upper = middle
         return max(lower, 0.001)
+
+    @staticmethod
+    def _is_floating_figure_cell(cell, elements) -> bool:
+        return (
+            cell.row_span > 1
+            and len(cell.element_ids) == 1
+            and elements[cell.element_ids[0]].kind == "figure_group"
+        )
 
     def _section_height(self, section, elements, roles, usable_width: float, fit_scale: float) -> float:
         by_id = {element.element_id: element for element in elements}

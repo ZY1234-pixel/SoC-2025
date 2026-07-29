@@ -282,7 +282,8 @@ class ReflowDocxRenderer:
             row
             for cell in flow.grid_cells
             if cell.row_span > 1
-            and any(elements[identifier].kind == "figure_group" for identifier in cell.element_ids)
+            and len(cell.element_ids) == 1
+            and elements[cell.element_ids[0]].kind == "figure_group"
             for row in range(cell.row, cell.row + cell.row_span)
         }
         for index in fixed_rows:
@@ -291,8 +292,10 @@ class ReflowDocxRenderer:
         target_cells = {}
         for grid_cell in flow.grid_cells:
             cell = table.cell(grid_cell.row, grid_cell.column)
-            floats_across_rows = grid_cell.row_span > 1 and any(
-                elements[identifier].kind == "figure_group" for identifier in grid_cell.element_ids
+            floats_across_rows = (
+                grid_cell.row_span > 1
+                and len(grid_cell.element_ids) == 1
+                and elements[grid_cell.element_ids[0]].kind == "figure_group"
             )
             if grid_cell.row_span > 1 or grid_cell.column_span > 1:
                 end_row = grid_cell.row if floats_across_rows else grid_cell.row + grid_cell.row_span - 1
@@ -319,9 +322,14 @@ class ReflowDocxRenderer:
                 sum(flow.column_widths_pt[grid_cell.column : grid_cell.column + grid_cell.column_span])
                 + flow.gutter_pt * (grid_cell.column_span - 1)
             )
+            floats_across_rows = (
+                grid_cell.row_span > 1
+                and len(grid_cell.element_ids) == 1
+                and elements[grid_cell.element_ids[0]].kind == "figure_group"
+            )
             for identifier in grid_cell.element_ids:
                 element = elements[identifier]
-                if element.kind == "figure_group" and grid_cell.row_span > 1:
+                if element.kind == "figure_group" and floats_across_rows:
                     element = replace(element, payload={**element.payload, "float_in_grid": True})
                 element_fit_scale = fit_scale * float(element.payload.get("grid_fit_scale", 1.0))
                 self._render_element(cell, element, roles, element_fit_scale, container_width)

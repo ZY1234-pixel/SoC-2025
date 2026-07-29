@@ -262,6 +262,99 @@ def test_column_bands_only_split_columns_covered_by_spanning_elements() -> None:
     assert right.row_span == 3
 
 
+def test_spanning_event_does_not_block_an_overlapping_uncovered_column() -> None:
+    elements = (
+        _element("left-title", (0, 20, 90, 60), 1, kind="heading"),
+        _element("image", (100, 0, 290, 100), 2, text="", kind="figure_group"),
+        _element("middle-body", (100, 110, 190, 150), 3),
+        _element("right-body", (200, 110, 290, 150), 4),
+    )
+    placement = {"left-title": 0, "image": 1, "middle-body": 1, "right-body": 2}
+    spans = {item.element_id: (2 if item.element_id == "image" else 1) for item in elements}
+
+    cells = ReflowPlanner._column_band_grid_cells(elements, placement, spans, 3)
+    left = next(cell for cell in cells if "left-title" in cell.element_ids)
+    image = next(cell for cell in cells if "image" in cell.element_ids)
+
+    assert left.row < image.row
+
+
+def test_grid_first_cell_uses_previous_row_as_spacing_reference() -> None:
+    elements = (
+        _element("title", (0, 20, 190, 60), 1, kind="heading"),
+        _element("right", (200, 110, 290, 150), 2),
+    )
+    section = FlowSection(
+        "grid",
+        FlowKind.GRID,
+        ("title", "right"),
+        (90, 90, 90),
+        grid_cells=(
+            GridCell(0, 0, ("title",), column_span=2),
+            GridCell(1, 2, ("right",)),
+        ),
+    )
+
+    spacing = ReflowPlanner._vertical_spacing(elements, (section,), {"title": 0, "right": 2}, 1.0)
+
+    assert spacing["right"] == 50
+
+
+def test_column_band_cell_orders_elements_by_source_position() -> None:
+    elements = (
+        _element("lower", (0, 100, 90, 140), 1),
+        _element("upper", (0, 0, 90, 40), 2),
+        _element("anchor", (100, 50, 290, 90), 3, text="", kind="figure_group"),
+        _element("middle", (100, 100, 190, 140), 4),
+        _element("right", (200, 100, 290, 140), 5),
+    )
+    placement = {"lower": 0, "upper": 0, "anchor": 1, "middle": 1, "right": 2}
+    spans = {item.element_id: (2 if item.element_id == "anchor" else 1) for item in elements}
+
+    cells = ReflowPlanner._column_band_grid_cells(elements, placement, spans, 3)
+
+    left = next(cell for cell in cells if cell.column == 0)
+    assert left.element_ids == ("upper", "lower")
+
+
+def test_regular_grid_cell_orders_elements_by_source_position() -> None:
+    elements = (
+        _element("left", (0, 0, 120, 300), 1),
+        _element("right-lower", (150, 160, 200, 220), 2),
+        _element("right-upper", (150, 80, 200, 140), 3),
+    )
+    planner = ReflowPlanner()
+
+    section, _placement = planner._narrow_section(
+        elements,
+        Rect(0, 0, 200, 300),
+        200,
+        0,
+        fallback_lanes=((elements[0],), elements[1:]),
+    )
+
+    right = next(cell for cell in section.grid_cells if cell.column == 1)
+    assert right.element_ids == ("right-upper", "right-lower")
+
+
+def test_figure_crossing_one_fifth_of_an_adjacent_lane_spans_both_lanes() -> None:
+    elements = (
+        _element("left-1", (100, 100, 300, 200), 1),
+        _element("middle-1", (400, 100, 600, 200), 2),
+        _element("right-1", (700, 100, 900, 200), 3),
+        _element("left-2", (100, 220, 300, 320), 4),
+        _element("middle-2", (400, 220, 600, 320), 5),
+        _element("right-2", (700, 220, 900, 320), 6),
+        _element("image", (250, 350, 600, 500), 7, text="", kind="figure_group"),
+    )
+
+    section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
+    image = next(cell for cell in section.grid_cells if "image" in cell.element_ids)
+
+    assert image.column == 0
+    assert image.column_span == 2
+
+
 def test_grid_rows_preserve_local_spacing_when_tracks_follow_content() -> None:
     elements = (
         _element("left-top", (100, 50, 300, 80), 1),
@@ -914,6 +1007,34 @@ def test_narrow_edge_visual_is_page_furniture() -> None:
 
     assert page.header_element_ids == ("rail",)
     assert page.sections[0].element_ids == ("body",)
+
+
+def test_split_page_edge_rail_is_grouped_as_furniture() -> None:
+    elements = (
+        _element("rail-top", (20, 50, 60, 300), 1, text_structure=TextStructure(orientation="vertical")),
+        _element("rail-bottom", (20, 350, 60, 700), 2, text_structure=TextStructure(orientation="vertical")),
+        _element("body", (120, 200, 900, 1200), 3),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+
+    assert set(page.header_element_ids) == {"rail-top", "rail-bottom"}
+    assert page.sections[0].element_ids == ("body",)
+    assert page.geometry.margin_top_pt == pytest.approx(200 * 841.89 / 1400)
+
+
+def test_top_edge_side_figure_is_anchored_without_consuming_body_height() -> None:
+    elements = (
+        _element("figure", (550, 0, 950, 350), 1, text="", kind="figure_group"),
+        _element("title", (50, 150, 500, 220), 2, kind="heading"),
+        _element("body", (50, 300, 950, 1200), 3),
+    )
+
+    page = ReflowPlanner().plan(_analysis(elements)).pages[0]
+
+    assert page.header_element_ids == ("figure",)
+    assert all("figure" not in section.element_ids for section in page.sections)
+    assert page.geometry.margin_top_pt == pytest.approx(150 * 841.89 / 1400)
 
 
 def test_page_fit_uses_observed_source_lines_as_a_lower_bound() -> None:

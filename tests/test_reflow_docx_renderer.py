@@ -345,6 +345,41 @@ def test_row_spanning_grid_figure_floats_without_expanding_its_start_row() -> No
     assert [row.height.pt for row in table.rows] == pytest.approx((40, 40))
 
 
+def test_mixed_figure_text_cell_uses_normal_merged_flow() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    flow = FlowSection(
+        "grid",
+        FlowKind.GRID,
+        ("figure", "body"),
+        (120,),
+        grid_cells=(GridCell(0, 0, ("figure", "body"), row_span=2),),
+        row_heights_pt=(40, 40),
+    )
+    elements = {
+        "figure": PlannedElement(
+            "figure",
+            "figure_group",
+            "body",
+            payload={
+                "image_base64": _png_base64(),
+                "source_bbox": (0, 0, 120, 80),
+                "source_scale": 1.0,
+                "width_fraction": 1.0,
+            },
+        ),
+        "body": PlannedElement("body", "paragraph_group", "body", "continued text"),
+    }
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._render_grid(container, flow, elements, {"body": role}, 1.0)
+
+    table = container.tables[0]
+    assert table._tbl.xpath(".//w:vMerge")
+    assert not table._tbl.xpath(".//wp:anchor")
+    assert all(row.height is None for row in table.rows)
+    assert "continued text" in table.cell(0, 0).text
+
+
 def test_header_with_image_payload_renders_as_image() -> None:
     document = Document()
     header = document.sections[0].header
