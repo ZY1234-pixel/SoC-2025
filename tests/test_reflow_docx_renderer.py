@@ -130,7 +130,7 @@ def test_sparse_grid_keeps_valid_empty_cells() -> None:
     assert all(cell.paragraphs or cell.tables for row in grid.rows for cell in row.cells)
 
 
-def test_grid_renderer_merges_column_and_row_spans() -> None:
+def test_grid_renderer_hides_cell_marks_without_splitting_row_spans() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     flow = FlowSection(
         "grid",
@@ -154,7 +154,10 @@ def test_grid_renderer_merges_column_and_row_spans() -> None:
 
     assert container.tables[0]._tbl.xpath('.//w:gridSpan[@w:val="2"]')
     assert container.tables[0]._tbl.xpath(".//w:vMerge")
-    assert [row.height.pt for row in container.tables[0].rows] == pytest.approx((30, 45.25))
+    cell_properties = container.tables[0]._tbl.xpath(".//w:tcPr")
+    assert cell_properties
+    assert all(properties.find(qn("w:hideMark")) is not None for properties in cell_properties)
+    assert [row.height.pt for row in container.tables[0].rows] == pytest.approx((30, 40))
     assert container.tables[0].cell(1, 0)._tc.xpath("./w:tcPr/w:tcMar/w:end/@w:w") == ["100"]
 
 

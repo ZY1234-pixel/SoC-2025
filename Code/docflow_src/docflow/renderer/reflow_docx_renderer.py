@@ -277,36 +277,8 @@ class ReflowDocxRenderer:
         column_count = len(flow.column_widths_pt)
         table = container.add_table(rows=row_count, cols=column_count)
         self._format_layout_table(table, flow.column_widths_pt, flow.gutter_pt)
-        # Word needs room for the closing paragraph mark of a vertically merged text cell.
-        terminal_text_ids = tuple(
-            identifier
-            for cell in flow.grid_cells
-            if cell.row + cell.row_span == row_count and cell.row_span > 1
-            for identifier in cell.element_ids
-            if elements[identifier].kind != "figure_group"
-        )
-        terminal_line_reserve = max(
-            (
-                float(
-                    elements[identifier].payload.get("line_height_pt")
-                    or (
-                        roles[elements[identifier].role_id].font_size_pt
-                        * roles[elements[identifier].role_id].line_spacing
-                        if elements[identifier].role_id in roles
-                        else 0.0
-                    )
-                )
-                * fit_scale
-                * 0.5
-                for identifier in terminal_text_ids
-            ),
-            default=0.0,
-        )
-        for index, (row, height) in enumerate(zip(table.rows, flow.row_heights_pt)):
-            row.height = Pt(
-                height * fit_scale
-                + (terminal_line_reserve if index == row_count - 1 else 0.0)
-            )
+        for row, height in zip(table.rows, flow.row_heights_pt):
+            row.height = Pt(height * fit_scale)
             row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
         target_cells = {}
         for grid_cell in flow.grid_cells:
@@ -315,25 +287,20 @@ class ReflowDocxRenderer:
                 elements[identifier].kind == "figure_group" for identifier in grid_cell.element_ids
             )
             if grid_cell.row_span > 1 or grid_cell.column_span > 1:
-                cell = cell.merge(
-                    table.cell(
-                        grid_cell.row if floats_across_rows else grid_cell.row + grid_cell.row_span - 1,
-                        grid_cell.column + grid_cell.column_span - 1,
-                    )
-                )
+                end_row = grid_cell.row if floats_across_rows else grid_cell.row + grid_cell.row_span - 1
+                cell = cell.merge(table.cell(end_row, grid_cell.column + grid_cell.column_span - 1))
             half_gutter_twips = int(max(flow.gutter_pt, 0.0) * 10)
             set_cell_margins(
                 cell,
                 top=0,
                 bottom=0,
                 start=half_gutter_twips if grid_cell.column > 0 else 0,
-                end=(
-                    half_gutter_twips
-                    if grid_cell.column + grid_cell.column_span < column_count
-                    else 0
-                ),
+                end=half_gutter_twips if grid_cell.column + grid_cell.column_span < column_count else 0,
             )
             target_cells[(grid_cell.row, grid_cell.column)] = cell
+        for properties in table._tbl.xpath(".//w:tcPr"):
+            if properties.find(qn("w:hideMark")) is None:
+                properties.append(OxmlElement("w:hideMark"))
         for row in table.rows:
             for cell in row.cells:
                 if cell._tc.xpath("./w:p | ./w:tbl"):
