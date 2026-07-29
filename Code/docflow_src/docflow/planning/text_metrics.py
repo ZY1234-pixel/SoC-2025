@@ -57,18 +57,24 @@ def resolve_text_layout(element, role, container_width_pt: float, fit_scale: flo
     if role is None or not element.text:
         return ()
     payload = element.payload
-    source_lines = tuple(str(line) for line in payload.get("lines") or ())
-    split_rows = payload.get("split_text_rows") or ()
-    line_alignments = payload.get("line_alignments") or ()
+    source_lines = tuple(row.text for row in element.text_rows) or tuple(
+        str(line) for line in payload.get("lines") or ()
+    )
+    split_rows = (
+        tuple(tuple(span.text for span in row.spans) for row in element.text_rows)
+        if element.text_structure.tabular_rows
+        else ()
+    )
+    row_alignments = element.row_alignments
     if split_rows:
         specs = [
             ("\t".join(str(value) for value in row), "left", tuple(str(value) for value in row), True, True, False)
             for row in split_rows
         ]
-    elif len(line_alignments) == len(source_lines) >= 2:
+    elif len(row_alignments) == len(source_lines) >= 2:
         specs = [
             (line, str(alignment), (line,), True, False, True)
-            for line, alignment in zip(source_lines, line_alignments)
+            for line, alignment in zip(source_lines, row_alignments)
         ]
     else:
         specs = [(
@@ -156,10 +162,15 @@ def resolve_text_layout(element, role, container_width_pt: float, fit_scale: flo
 
 
 def visual_text(element, lines: tuple[str, ...] | None = None) -> str:
-    lines = lines if lines is not None else tuple(str(line) for line in element.payload.get("lines") or ())
+    lines = lines if lines is not None else (
+        tuple(row.text for row in element.text_rows)
+        or tuple(str(line) for line in element.payload.get("lines") or ())
+    )
     if element.text_structure.orientation == "vertical":
         return "\n".join(character for character in element.text if not character.isspace())
     if element.text_structure.preserve_source_lines:
+        return "\n".join(lines)
+    if element.kind == "heading" and element.text_rows:
         return "\n".join(lines)
     tops = element.payload.get("line_tops_px") or ()
     heights = element.payload.get("line_heights_px") or ()

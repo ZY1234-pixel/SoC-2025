@@ -91,8 +91,8 @@ class ReflowPlanner:
             element.element_id: self._alignment(element, container_frames.get(element.element_id, (bounds.x1, bounds.x2)))
             for element in page.elements
         }
-        line_alignments = {
-            element.element_id: self._line_alignments(
+        row_alignments = {
+            element.element_id: self._row_alignments(
                 element,
                 container_frames.get(element.element_id, (bounds.x1, bounds.x2)),
             )
@@ -120,6 +120,8 @@ class ReflowPlanner:
                 role_id=element.role_id or default_body_role,
                 text=element.text,
                 text_structure=element.text_structure,
+                text_rows=element.text_rows,
+                row_alignments=row_alignments[element.element_id],
                 payload={
                     **dict(element.payload),
                     "source_bbox": (element.bbox.x1, element.bbox.y1, element.bbox.x2, element.bbox.y2),
@@ -134,7 +136,6 @@ class ReflowPlanner:
                     ),
                     "column": placement.get(element.element_id, 0),
                     "alignment": alignments[element.element_id],
-                    "line_alignments": line_alignments[element.element_id],
                     "first_line_indent_pt": (
                         self._first_line_indent(element, scale)
                         - hanging_indents[element.element_id]
@@ -428,7 +429,7 @@ class ReflowPlanner:
         for element in elements:
             left, right = frames[element.element_id]
             source_width = max(right - left, 1.0)
-            source_lines = element.payload.get("lines") or ()
+            source_lines = element.text_rows or element.payload.get("lines") or ()
             content_bbox = ReflowPlanner._content_bbox(element)
             centered = abs((content_bbox.x1 + content_bbox.x2 - left - right) / 2.0) <= source_width * 0.04
             width_fraction = content_bbox.width / source_width
@@ -1142,7 +1143,8 @@ class ReflowPlanner:
                 ):
                     continue
                 visual_lines = sum(
-                    int(element.payload.get("visual_line_count") or len(element.payload.get("lines") or ()) or 1)
+                    len(element.text_rows)
+                    or int(element.payload.get("visual_line_count") or len(element.payload.get("lines") or ()) or 1)
                     for element in cell_elements
                 )
                 if visual_lines == 1:
@@ -1326,7 +1328,7 @@ class ReflowPlanner:
         layout_bbox = ReflowPlanner._layout_bbox(element)
         element_center = (content_bbox.x1 + content_bbox.x2) / 2.0
         centered = abs(element_center - (left + right) / 2.0) <= width * 0.04
-        source_lines = element.payload.get("lines") or ()
+        source_lines = tuple(row.text for row in element.text_rows) or element.payload.get("lines") or ()
         if element.kind == "paragraph_group" and element.text_structure.is_list:
             return "left"
         if (
@@ -1334,8 +1336,8 @@ class ReflowPlanner:
             and content_bbox.x1 - layout_bbox.x1 >= layout_bbox.width * 0.03
         ):
             return "left"
-        widths = element.payload.get("line_widths_px") or ()
-        lefts = element.payload.get("line_lefts_px") or ()
+        widths = tuple(row.bbox.width for row in element.text_rows) or element.payload.get("line_widths_px") or ()
+        lefts = tuple(row.bbox.x1 for row in element.text_rows) or element.payload.get("line_lefts_px") or ()
         if (
             element.kind == "paragraph_group"
             and element.text_structure.preserve_source_lines
@@ -1366,22 +1368,15 @@ class ReflowPlanner:
         return "justify" if element.kind == "paragraph_group" and len(source_lines) >= 3 and len(element.text) >= 40 else "left"
 
     @staticmethod
-    def _line_alignments(element, frame) -> tuple[str, ...]:
-        lines = element.payload.get("lines") or ()
-        lefts = element.payload.get("line_lefts_px") or ()
-        widths = element.payload.get("line_widths_px") or ()
-        if (
-            len(lines) != 2
-            or int(element.payload.get("visual_line_count") or 0) != 2
-            or not len(lefts) == len(widths) == len(lines)
-        ):
+    def _row_alignments(element, frame) -> tuple[str, ...]:
+        if len(element.text_rows) < 2:
             return ()
         left, right = frame
         frame_width = max(right - left, 1.0)
         inferred = []
-        for line_left, line_width in zip(lefts, widths):
-            line_left = float(line_left)
-            line_width = float(line_width)
+        for row in element.text_rows:
+            line_left = row.bbox.x1
+            line_width = row.bbox.width
             line_right = line_left + line_width
             centered = abs(line_left + line_width / 2.0 - (left + right) / 2.0) <= frame_width * 0.04
             if line_width <= frame_width * 0.92 and centered:
@@ -1396,7 +1391,7 @@ class ReflowPlanner:
 
     @staticmethod
     def _first_line_indent(element, source_scale: float) -> float:
-        lefts = element.payload.get("line_lefts_px") or ()
+        lefts = tuple(row.bbox.x1 for row in element.text_rows) or element.payload.get("line_lefts_px") or ()
         if len(lefts) < 2:
             return 0.0
         indent = float(lefts[0]) - median(float(value) for value in lefts[1:])
@@ -1404,22 +1399,37 @@ class ReflowPlanner:
 
     @staticmethod
     def _heading_hanging_indent(element, source_scale: float) -> float:
-        lefts = element.payload.get("line_lefts_px") or ()
+        lefts = tuple(row.bbox.x1 for row in element.text_rows) or element.payload.get("line_lefts_px") or ()
         if element.kind != "heading" or len(lefts) < 2:
             return 0.0
         return max(median(float(value) for value in lefts[1:]) - float(lefts[0]), 0.0) * source_scale
 
     @staticmethod
     def _source_line_height(element, role, source_scale: float):
-        lines = element.payload.get("lines") or ()
+        lines = element.text_rows or element.payload.get("lines") or ()
         if not lines or role is None:
             return None
-        line_heights = element.payload.get("line_heights_px") or ()
-        line_pitches = element.payload.get("line_pitches_px") or ()
+        line_heights = (
+            tuple(row.ink_height_px or row.bbox.height for row in element.text_rows)
+            or element.payload.get("line_heights_px")
+            or ()
+        )
+        line_pitches = (
+            tuple(
+                right.bbox.y1 - left.bbox.y1
+                for left, right in zip(element.text_rows, element.text_rows[1:])
+            )
+            or element.payload.get("line_pitches_px")
+            or ()
+        )
         if line_pitches:
             observed = median(line_pitches) * source_scale
         else:
-            observed = median(line_heights) * source_scale if line_heights else ReflowPlanner._content_bbox(element).height * source_scale / len(lines)
+            observed = (
+                median(line_heights) * source_scale
+                if line_heights
+                else ReflowPlanner._content_bbox(element).height * source_scale / len(lines)
+            )
         return min(max(observed, role.font_size_pt * 1.05), role.font_size_pt * 1.5)
 
     @staticmethod

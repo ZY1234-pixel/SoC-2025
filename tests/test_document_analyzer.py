@@ -185,7 +185,7 @@ def test_analyzer_preserves_independently_centered_source_rows() -> None:
     ).pages[0].elements[0]
 
     assert element.text_structure.preserve_source_lines is True
-    assert element.payload["line_widths_px"] == (500, 700, 450)
+    assert tuple(row.bbox.width for row in element.text_rows) == (500, 700, 450)
 
 
 def test_analyzer_joins_visual_lines_and_groups_editable_formula_number() -> None:
@@ -348,7 +348,7 @@ def test_analyzer_uses_polygon_thickness_for_rotated_text_height() -> None:
         RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))
     ).pages[0].elements[0]
 
-    assert element.payload["line_heights_px"][0] < element.bbox.height
+    assert element.text_rows[0].ink_height_px < element.bbox.height
 
 
 def test_ocr_lines_are_clipped_to_their_layout_region() -> None:
@@ -409,8 +409,11 @@ def test_analyzer_keeps_layout_and_tight_text_geometry_separate() -> None:
 
     assert element.bbox == Rect(90, 90, 910, 230)
     assert element.content_bbox == Rect(120, 100, 880, 210)
-    assert element.payload["line_pitches_px"] == (45, 45)
-    assert element.payload["visual_line_count"] == 3
+    assert tuple(
+        right.bbox.y1 - left.bbox.y1
+        for left, right in zip(element.text_rows, element.text_rows[1:])
+    ) == (45, 45)
+    assert len(element.text_rows) == 3
 
 
 def test_analyzer_reflows_full_width_rows_instead_of_preserving_justified_lines() -> None:
@@ -490,7 +493,11 @@ def test_analyzer_preserves_split_rows_as_left_and_right_fields() -> None:
         RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))
     ).pages[0].elements[0]
 
-    assert element.payload["split_text_rows"] == (("phone", "email"), ("license", "number"))
+    assert element.text_structure.tabular_rows is True
+    assert tuple(tuple(span.text for span in row.spans) for row in element.text_rows) == (
+        ("phone", "email"),
+        ("license", "number"),
+    )
     assert element.text_structure.preserve_source_lines is True
 
 

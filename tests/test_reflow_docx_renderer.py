@@ -20,6 +20,8 @@ from docflow.model.stages import (
     PlannedElement,
     Rect,
     SemanticElement,
+    TextRow,
+    TextSpan,
     TextStructure,
     TextParagraphLayout,
     TypographicRole,
@@ -121,7 +123,7 @@ def test_dense_grid_text_does_not_reinflate_line_spacing_past_source_rows() -> N
     assert paragraph.paragraph_format.line_spacing.pt < 10
 
 
-def test_split_text_rows_render_with_right_aligned_fields() -> None:
+def test_tabular_text_rows_render_with_right_aligned_fields() -> None:
     cell = Document().add_table(rows=1, cols=1).cell(0, 0)
     cell.text = ""
     element = PlannedElement(
@@ -131,11 +133,21 @@ def test_split_text_rows_render_with_right_aligned_fields() -> None:
         "phone email license number",
         payload={
             "alignment": "left",
-            "lines": ("phone", "email", "license", "number"),
-            "split_text_rows": (("phone", "email"), ("license", "number")),
             "line_height_pt": 12,
         },
-        text_structure=TextStructure(preserve_source_lines=True),
+        text_structure=TextStructure(preserve_source_lines=True, tabular_rows=True),
+        text_rows=(
+            TextRow(
+                "phone email",
+                Rect(0, 0, 200, 20),
+                (TextSpan("phone", Rect(0, 0, 50, 20)), TextSpan("email", Rect(150, 0, 200, 20))),
+            ),
+            TextRow(
+                "license number",
+                Rect(0, 20, 200, 40),
+                (TextSpan("license", Rect(0, 20, 60, 40)), TextSpan("number", Rect(150, 20, 200, 40))),
+            ),
+        ),
     )
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
 
@@ -158,12 +170,15 @@ def test_two_line_text_renders_each_source_alignment() -> None:
         "centered caption right credit",
         payload={
             "alignment": "left",
-            "lines": ("centered caption", "right credit"),
-            "line_alignments": ("center", "right"),
             "line_height_pt": 12,
             "source_scale": 1.0,
         },
         content_bbox=Rect(0, 0, 200, 60),
+        text_rows=(
+            TextRow("centered caption", Rect(0, 0, 200, 20)),
+            TextRow("right credit", Rect(100, 20, 200, 40)),
+        ),
+        row_alignments=("center", "right"),
     )
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
 

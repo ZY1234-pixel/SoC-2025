@@ -18,6 +18,8 @@ from docflow.model.stages import (
     SemanticElement,
     TextEvidence,
     TextParagraphLayout,
+    TextRow,
+    TextSpan,
     TextStructure,
     TypographicRole,
 )

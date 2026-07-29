@@ -23,6 +23,8 @@ from docflow.model.stages import (
     RecognitionItem,
     Rect,
     SemanticElement,
+    TextRow,
+    TextSpan,
     TextStructure,
     TypographicRole,
 )
@@ -223,13 +225,14 @@ class DocumentAnalyzer:
         visible_lines = self._visible_lines(primary)
         line_boxes = tuple(bbox for _line, _value, bbox in visible_lines if bbox is not None)
         visual_rows = self._visual_row_boxes(line_boxes)
+        text_rows = self._text_rows(visible_lines, visual_rows)
         text = "" if kind in {"figure_group", "table_group", "equation_group"} else self._text(primary)
-        if text and len(visual_rows) == 1:
-            text = self._single_row_text(visible_lines, text)
+        if text and len(text_rows) == 1:
+            text = text_rows[0].text
         if kind == "heading":
             text = self._normalize_heading(text)
         content_bbox = self._union(visual_rows) if visual_rows else primary.bbox
-        split_text_rows = self._split_text_rows(primary, visible_lines, visual_rows)
+        tabular_rows = self._has_tabular_rows(primary, text_rows)
         caption_lines = [
             line
             for caption in captions
@@ -240,25 +243,6 @@ class DocumentAnalyzer:
             "image_base64": primary.image_base64,
             "html": primary.html,
             "latex": primary.latex,
-            "lines": tuple(value for _line, value, _bbox in visible_lines),
-            "line_heights_px": tuple(
-                self._line_height(line, bbox) for line, _value, bbox in visible_lines if bbox is not None
-            ),
-            "line_tops_px": tuple(
-                bbox.y1 for _line, _value, bbox in visible_lines if bbox is not None
-            ),
-            "line_lefts_px": tuple(
-                bbox.x1 for _line, _value, bbox in visible_lines if bbox is not None
-            ),
-            "line_widths_px": tuple(
-                bbox.width for _line, _value, bbox in visible_lines if bbox is not None
-            ),
-            "line_pitches_px": tuple(
-                following.y1 - current.y1
-                for current, following in zip(visual_rows, visual_rows[1:])
-            ),
-            "visual_line_count": len(visual_rows),
-            "split_text_rows": split_text_rows,
             "caption": self._merge_caption_text(captions),
             "caption_line_heights_px": tuple(
                 self._line_height(line, bbox) for line, _value, bbox in caption_lines if bbox is not None
@@ -305,18 +289,24 @@ class DocumentAnalyzer:
             source_ids=tuple(item.evidence_id for item in related),
             text=text,
             payload=payload,
-            text_structure=self._text_structure(primary, visible_lines, bool(split_text_rows)),
+            text_structure=self._text_structure(primary, visible_lines, text_rows, tabular_rows),
             content_bbox=content_bbox,
+            text_rows=text_rows,
         )
 
     @staticmethod
-    def _text_structure(primary: RecognitionItem, visible_lines, preserve_visual_rows: bool = False) -> TextStructure:
-        lines = tuple(value for _line, value, _bbox in visible_lines)
+    def _text_structure(
+        primary: RecognitionItem,
+        visible_lines,
+        text_rows: tuple[TextRow, ...],
+        tabular_rows: bool = False,
+    ) -> TextStructure:
+        lines = tuple(row.text for row in text_rows) or tuple(value for _line, value, _bbox in visible_lines)
         marked = tuple(bool(_LIST_MARKER_RE.match(str(line))) for line in lines)
-        preserve_lines = preserve_visual_rows or len(lines) >= 2 and sum(marked) >= 2 and (
+        preserve_lines = tabular_rows or len(lines) >= 2 and sum(marked) >= 2 and (
             all(marked) or not marked[0] and all(marked[1:])
         )
-        boxes = tuple(bbox for _line, _value, bbox in visible_lines if bbox is not None)
+        boxes = tuple(row.bbox for row in text_rows)
         if len(boxes) == len(lines) and len(boxes) >= 2:
             center = (primary.bbox.x1 + primary.bbox.x2) / 2.0
             median_width = median(box.width for box in boxes)
@@ -325,7 +315,7 @@ class DocumentAnalyzer:
                 and all(abs((box.x1 + box.x2) / 2.0 - center) <= primary.bbox.width * 0.025 for box in boxes)
                 and median_width <= primary.bbox.width * 0.92
             )
-        lefts = tuple(bbox.x1 for _line, _value, bbox in visible_lines if bbox is not None)
+        lefts = tuple(box.x1 for box in boxes)
         hanging_indent = 0.0
         if preserve_lines and not marked[0] and len(lefts) == len(lines):
             hanging_indent = max(median(lefts[1:]) - lefts[0], 0.0)
@@ -338,6 +328,7 @@ class DocumentAnalyzer:
         return TextStructure(
             preserve_source_lines=preserve_lines,
             is_list=any(marked),
+            tabular_rows=tabular_rows,
             hanging_indent_px=hanging_indent,
             orientation="vertical" if vertical else "horizontal",
         )
@@ -582,20 +573,6 @@ class DocumentAnalyzer:
                 output = _join_text_segments(output, part)
         return output
 
-    @staticmethod
-    def _single_row_text(visible_lines, fallback: str) -> str:
-        if len(visible_lines) < 2 or any(bbox is None for _line, _value, bbox in visible_lines):
-            return fallback
-        segments = sorted(visible_lines, key=lambda item: item[2].x1)
-        glyph_width = median(bbox.width / max(len(value), 1) for _line, value, bbox in segments)
-        output = segments[0][1]
-        for previous, current in zip(segments, segments[1:]):
-            gap = current[2].x1 - previous[2].x2
-            if gap >= glyph_width * 0.20:
-                output += " " * max(1, round(gap / glyph_width))
-            output += current[1]
-        return output
-
     @classmethod
     def _visible_lines(cls, item: RecognitionItem):
         visible = []
@@ -697,10 +674,25 @@ class DocumentAnalyzer:
                 if element.kind in {"figure_group", "table_group", "equation_group"}:
                     continue
                 content_bbox = element.content_bbox or element.bbox
-                line_count = max(len(element.payload.get("lines") or ()), 1)
-                line_heights = element.payload.get("line_heights_px") or ()
-                line_tops = element.payload.get("line_tops_px") or ()
-                line_pitches = element.payload.get("line_pitches_px") or ()
+                line_count = max(len(element.text_rows) or len(element.payload.get("lines") or ()), 1)
+                line_heights = (
+                    tuple(row.ink_height_px or row.bbox.height for row in element.text_rows)
+                    or element.payload.get("line_heights_px")
+                    or ()
+                )
+                line_tops = (
+                    tuple(row.bbox.y1 for row in element.text_rows)
+                    or element.payload.get("line_tops_px")
+                    or ()
+                )
+                line_pitches = (
+                    tuple(
+                        right.bbox.y1 - left.bbox.y1
+                        for left, right in zip(element.text_rows, element.text_rows[1:])
+                    )
+                    or element.payload.get("line_pitches_px")
+                    or ()
+                )
                 if len(line_tops) == len(line_heights) and line_tops:
                     row_bottoms = []
                     for top, height in sorted(zip(line_tops, line_heights)):
@@ -732,7 +724,7 @@ class DocumentAnalyzer:
 
         paragraph_sizes = {}
         for element, size, base, _font, color in samples:
-            lines = element.payload.get("lines") or ()
+            lines = element.text_rows or element.payload.get("lines") or ()
             if base == "body" and element.kind == "paragraph_group" and len(lines) >= 2 and len(element.text) >= 40:
                 color_bucket = tuple(int(color[index : index + 2], 16) // 32 for index in (1, 3, 5))
                 paragraph_sizes.setdefault((base, color_bucket), []).append(size)
@@ -750,17 +742,23 @@ class DocumentAnalyzer:
 
         normalized_samples = []
         for element, size, base, font, color in samples:
-            lines = element.payload.get("lines") or ()
+            lines = element.text_rows or element.payload.get("lines") or ()
             if base == "body" and element.kind == "paragraph_group":
                 color_bucket = tuple(int(color[index : index + 2], 16) // 32 for index in (1, 3, 5))
                 local_consensus = paragraph_consensus.get((base, color_bucket))
                 if local_consensus is not None and abs(size - local_consensus) <= max(1.0, local_consensus * 0.40):
                     size = local_consensus
-                if body_consensus is not None and not element.payload.get("line_heights_px") and size < body_consensus * 0.60:
+                if (
+                    body_consensus is not None
+                    and not element.text_rows
+                    and not element.payload.get("line_heights_px")
+                    and size < body_consensus * 0.60
+                ):
                     size = body_consensus
             elif (
                 base == "heading"
                 and body_consensus is not None
+                and not element.text_rows
                 and not element.payload.get("line_heights_px")
                 and size < body_consensus * 0.60
             ):
@@ -859,23 +857,53 @@ class DocumentAnalyzer:
         return tuple(rows)
 
     @staticmethod
-    def _split_text_rows(primary: RecognitionItem, visible_lines, rows: tuple[Rect, ...]):
-        grouped = []
+    def _text_rows(visible_lines, rows: tuple[Rect, ...]) -> tuple[TextRow, ...]:
+        output = []
         for row in rows:
-            entries = sorted(
-                (
-                    (value, bbox)
-                    for _line, value, bbox in visible_lines
-                    if bbox is not None and row.y1 <= (bbox.y1 + bbox.y2) / 2.0 <= row.y2
-                ),
-                key=lambda item: item[1].x1,
+            entries = tuple(
+                (line, value, bbox)
+                for line, value, bbox in sorted(
+                    (
+                        (line, value, bbox)
+                        for line, value, bbox in visible_lines
+                        if bbox is not None and row.y1 <= (bbox.y1 + bbox.y2) / 2.0 <= row.y2
+                    ),
+                    key=lambda item: item[2].x1,
+                )
             )
-            grouped.append(entries)
-        if len(grouped) < 2 or any(len(row) != 2 for row in grouped):
-            return ()
-        if any(row[1][1].x1 - row[0][1].x2 < primary.bbox.width * 0.08 for row in grouped):
-            return ()
-        return tuple(tuple(value for value, _bbox in row) for row in grouped)
+            spans = tuple(TextSpan(value, bbox) for _line, value, bbox in entries)
+            if not spans:
+                continue
+            glyph_width = median(span.bbox.width / max(len(span.text), 1) for span in spans)
+            text = spans[0].text
+            for previous, current in zip(spans, spans[1:]):
+                gap = current.bbox.x1 - previous.bbox.x2
+                if gap >= glyph_width * 0.20:
+                    text += " " * max(1, round(gap / glyph_width))
+                text += current.text
+            output.append(
+                TextRow(
+                    text,
+                    row,
+                    spans,
+                    median(DocumentAnalyzer._line_height(line, bbox) for line, _value, bbox in entries),
+                )
+            )
+        return tuple(output)
+
+    @staticmethod
+    def _has_tabular_rows(primary: RecognitionItem, rows: tuple[TextRow, ...]) -> bool:
+        if len(rows) < 2 or len(rows[0].spans) < 2:
+            return False
+        field_count = len(rows[0].spans)
+        return all(
+            len(row.spans) == field_count
+            and all(
+                right.bbox.x1 - left.bbox.x2 >= primary.bbox.width * 0.08
+                for left, right in zip(row.spans, row.spans[1:])
+            )
+            for row in rows
+        )
 
     @staticmethod
     def _union(rectangles: Iterable[Rect]) -> Rect:

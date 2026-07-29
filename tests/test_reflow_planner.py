@@ -11,6 +11,8 @@ from docflow.model.stages import (
     PlannedElement,
     Rect,
     SemanticElement,
+    TextRow,
+    TextSpan,
     TextStructure,
     TextParagraphLayout,
     TypographicRole,
@@ -18,7 +20,17 @@ from docflow.model.stages import (
 from docflow.planning import ReflowPlanner
 
 
-def _element(identifier, bbox, order, text="text", kind="paragraph_group", role="body", payload=None, text_structure=None):
+def _element(
+    identifier,
+    bbox,
+    order,
+    text="text",
+    kind="paragraph_group",
+    role="body",
+    payload=None,
+    text_structure=None,
+    text_rows=(),
+):
     return SemanticElement(
         identifier,
         kind,
@@ -29,6 +41,7 @@ def _element(identifier, bbox, order, text="text", kind="paragraph_group", role=
         role_id=role,
         payload=payload or {},
         text_structure=text_structure or TextStructure(),
+        text_rows=text_rows,
     )
 
 
@@ -85,20 +98,23 @@ def test_preserved_centered_rows_are_center_aligned_even_when_wide() -> None:
     assert ReflowPlanner._alignment(element, (100, 900)) == "center"
 
 
-def test_distinct_two_line_geometry_preserves_per_line_alignment() -> None:
+def test_distinct_row_geometry_preserves_per_row_alignment() -> None:
+    rows = (
+        TextRow(
+            "centered caption",
+            Rect(150, 100, 850, 120),
+            (TextSpan("centered caption", Rect(150, 100, 850, 120)),),
+        ),
+        TextRow("right credit", Rect(700, 130, 900, 150), (TextSpan("right credit", Rect(700, 130, 900, 150)),)),
+    )
     element = _element(
         "caption",
         (100, 100, 900, 160),
         1,
-        payload={
-            "lines": ("centered caption", "right credit"),
-            "visual_line_count": 2,
-            "line_lefts_px": (150, 700),
-            "line_widths_px": (700, 200),
-        },
+        text_rows=rows,
     )
 
-    assert ReflowPlanner._line_alignments(element, (100, 900)) == ("center", "right")
+    assert ReflowPlanner._row_alignments(element, (100, 900)) == ("center", "right")
 
 
 def test_single_flow_repairs_outlying_model_order_with_geometry() -> None:

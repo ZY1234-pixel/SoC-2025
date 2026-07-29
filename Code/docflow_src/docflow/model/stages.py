@@ -145,11 +145,31 @@ class TypographicRole:
 
 
 @dataclass(frozen=True)
+class TextSpan:
+    text: str
+    bbox: Rect
+
+
+@dataclass(frozen=True)
+class TextRow:
+    text: str
+    bbox: Rect
+    spans: Tuple[TextSpan, ...] = ()
+    ink_height_px: float = 0.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "spans", tuple(self.spans))
+        if self.ink_height_px < 0:
+            raise ValueError("text row ink height must not be negative")
+
+
+@dataclass(frozen=True)
 class TextStructure:
     """Semantic text geometry inferred once and consumed by later stages."""
 
     preserve_source_lines: bool = False
     is_list: bool = False
+    tabular_rows: bool = False
     hanging_indent_px: float = 0.0
     orientation: str = "horizontal"
 
@@ -207,6 +227,7 @@ class SemanticElement:
     payload: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     text_structure: TextStructure = field(default_factory=TextStructure)
     content_bbox: Optional[Rect] = None
+    text_rows: Tuple[TextRow, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.source_ids:
@@ -214,6 +235,7 @@ class SemanticElement:
         object.__setattr__(self, "source_ids", tuple(self.source_ids))
         object.__setattr__(self, "child_ids", tuple(self.child_ids))
         object.__setattr__(self, "payload", _freeze(self.payload))
+        object.__setattr__(self, "text_rows", tuple(self.text_rows))
 
 
 @dataclass(frozen=True)
@@ -342,10 +364,18 @@ class PlannedElement:
     text_structure: TextStructure = field(default_factory=TextStructure)
     content_bbox: Optional[Rect] = None
     text_layout: Tuple[TextParagraphLayout, ...] = ()
+    text_rows: Tuple[TextRow, ...] = ()
+    row_alignments: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "payload", _freeze(self.payload))
         object.__setattr__(self, "text_layout", tuple(self.text_layout))
+        object.__setattr__(self, "text_rows", tuple(self.text_rows))
+        object.__setattr__(self, "row_alignments", tuple(self.row_alignments))
+        if self.row_alignments and len(self.row_alignments) != len(self.text_rows):
+            raise ValueError("row alignments must match text rows")
+        if any(value not in {"left", "center", "right", "justify"} for value in self.row_alignments):
+            raise ValueError("invalid row alignment")
 
 
 @dataclass(frozen=True)
