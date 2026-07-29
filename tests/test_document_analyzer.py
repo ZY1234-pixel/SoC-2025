@@ -575,6 +575,57 @@ def test_style_clustering_absorbs_an_isolated_font_prediction() -> None:
     assert assignments["body-3"] != assignments["body-0"]
 
 
+def test_style_clustering_infers_bold_from_document_stroke_baseline() -> None:
+    bodies = tuple(
+        SemanticElement(
+            f"body-{index}",
+            "paragraph_group",
+            Rect(100, 100 + index * 80, 900, 160 + index * 80),
+            index,
+            (f"body-raw-{index}",),
+            text="Regular body paragraph content " * 3,
+            payload={"lines": ("first", "second"), "line_heights_px": (20, 20), "stroke_ratio": 0.08},
+        )
+        for index in range(3)
+    )
+    headings = (
+        SemanticElement(
+            "regular-heading",
+            "heading",
+            Rect(100, 400, 700, 440),
+            4,
+            ("regular-heading-raw",),
+            text="Regular heading",
+            payload={"lines": ("Regular heading",), "line_heights_px": (30,), "stroke_ratio": 0.085},
+        ),
+        SemanticElement(
+            "bold-heading",
+            "heading",
+            Rect(100, 460, 700, 500),
+            5,
+            ("bold-heading-raw",),
+            text="Bold heading",
+            payload={"lines": ("Bold heading",), "line_heights_px": (30,), "stroke_ratio": 0.12},
+        ),
+        SemanticElement(
+            "unmeasured-heading",
+            "heading",
+            Rect(100, 520, 700, 560),
+            6,
+            ("unmeasured-heading-raw",),
+            text="Unmeasured heading",
+            payload={"lines": ("Unmeasured heading",), "line_heights_px": (30,)},
+        ),
+    )
+
+    roles, assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, bodies + headings),))
+    by_id = {role.role_id: role for role in roles}
+
+    assert not by_id[assignments["regular-heading"]].bold
+    assert by_id[assignments["bold-heading"]].bold
+    assert not by_id[assignments["unmeasured-heading"]].bold
+
+
 def test_style_clustering_uses_strong_document_font_consensus_across_visual_roles() -> None:
     elements = tuple(
         SemanticElement(

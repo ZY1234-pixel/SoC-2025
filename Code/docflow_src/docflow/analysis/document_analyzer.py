@@ -15,6 +15,7 @@ from PIL import Image
 
 from docflow.appearance.color_inferrer import infer_crop_style, infer_table_row_fills, infer_table_rule_style
 from docflow.appearance.font_classifier import FONT_FAMILY_BY_LABEL, FONT_INK_HEIGHT_RATIO
+from docflow.appearance.text_weight_inferrer import infer_text_stroke_ratio
 from docflow.model.stages import (
     AnalysisDiagnostic,
     AnalysisPage,
@@ -343,11 +344,18 @@ class DocumentAnalyzer:
                 result["text_color"] = style.text_color
                 if style.background_color:
                     result["background_color"] = style.background_color
+        try:
+            image = Image.open(io.BytesIO(base64.b64decode(item.image_base64))).convert("RGB")
+        except Exception:
+            return result
+        line_crops = self._text_line_crops(image, item) if item.category in _TEXT_CATEGORIES else ()
+        stroke_ratio = infer_text_stroke_ratio(line_crops or (image,))
+        if stroke_ratio is not None:
+            result["stroke_ratio"] = stroke_ratio
         content = self._text(item) or BeautifulSoup(str(item.html or ""), "html.parser").get_text()
         if self.font_classifier is None or not any("\u4e00" <= char <= "\u9fff" for char in content):
             return result
         try:
-            image = Image.open(io.BytesIO(base64.b64decode(item.image_base64))).convert("RGB")
             if item.category == "table" and item.html:
                 row_count = max(len(BeautifulSoup(item.html, "html.parser").find_all("tr")), 1)
                 predictions = [
@@ -357,7 +365,6 @@ class DocumentAnalyzer:
                     for row in range(row_count)
                 ]
             else:
-                line_crops = self._text_line_crops(image, item)
                 predictions = [
                     self.font_classifier.predict_image(crop)
                     for crop in line_crops or (image,)
@@ -720,10 +727,37 @@ class DocumentAnalyzer:
                 base = "heading" if element.kind == "heading" else "caption" if element.kind == "caption" else "body"
                 font = element.payload.get("font_family") or ("黑体" if base == "heading" else "宋体")
                 color = element.payload.get("text_color") or "#000000"
-                samples.append((element, raw_size, base, font, color))
+                samples.append((element, raw_size, base, font, color, element.payload.get("stroke_ratio")))
+
+        body_strokes = [
+            float(stroke_ratio)
+            for element, _size, base, _font, _color, stroke_ratio in samples
+            if base == "body"
+            and stroke_ratio is not None
+            and element.kind == "paragraph_group"
+            and len(element.text) >= 40
+        ]
+        regular_stroke = median(body_strokes) if len(body_strokes) >= 3 else None
+        stroke_spread = (
+            median(abs(value - regular_stroke) for value in body_strokes)
+            if regular_stroke is not None
+            else None
+        )
+
+        weighted_samples = []
+        for element, size, base, font, color, stroke_ratio in samples:
+            bold = bool(
+                base == "heading"
+                and regular_stroke is not None
+                and stroke_ratio is not None
+                and float(stroke_ratio) >= regular_stroke * 1.08
+                and float(stroke_ratio) - regular_stroke >= max(0.006, float(stroke_spread) * 2.5)
+            )
+            weighted_samples.append((element, size, base, font, color, bold))
+        samples = weighted_samples
 
         paragraph_sizes = {}
-        for element, size, base, _font, color in samples:
+        for element, size, base, _font, color, _bold in samples:
             lines = element.text_rows or element.payload.get("lines") or ()
             if base == "body" and element.kind == "paragraph_group" and len(lines) >= 2 and len(element.text) >= 40:
                 color_bucket = tuple(int(color[index : index + 2], 16) // 32 for index in (1, 3, 5))
@@ -741,7 +775,7 @@ class DocumentAnalyzer:
             body_consensus = body_consensus if support * 2 > len(body_sizes) else None
 
         normalized_samples = []
-        for element, size, base, font, color in samples:
+        for element, size, base, font, color, bold in samples:
             lines = element.text_rows or element.payload.get("lines") or ()
             if base == "body" and element.kind == "paragraph_group":
                 color_bucket = tuple(int(color[index : index + 2], 16) // 32 for index in (1, 3, 5))
@@ -763,14 +797,14 @@ class DocumentAnalyzer:
                 and size < body_consensus * 0.60
             ):
                 size = body_consensus
-            normalized_samples.append((element, size, base, font, color))
+            normalized_samples.append((element, size, base, font, color, bold))
         samples = normalized_samples
 
         clusters = {}
         assignments: dict[str, str] = {}
-        for element, size, base, font, color in sorted(samples, key=lambda item: (item[2], item[4], item[1])):
+        for element, size, base, font, color, bold in sorted(samples, key=lambda item: (item[2], item[4], item[5], item[1])):
             color_bucket = tuple(int(color[index : index + 2], 16) // 32 for index in (1, 3, 5))
-            groups = clusters.setdefault((base, color_bucket), [])
+            groups = clusters.setdefault((base, color_bucket, bold), [])
             if not groups or abs(size - median(groups[-1]["sizes"])) > max(1.0, median(groups[-1]["sizes"]) * 0.08):
                 groups.append({"sizes": [size], "samples": [(element, font, color)]})
             else:
@@ -779,7 +813,7 @@ class DocumentAnalyzer:
 
         roles = []
         role_counts = {}
-        for (base, _color_bucket), groups in clusters.items():
+        for (base, _color_bucket, bold), groups in clusters.items():
             for group in groups:
                 font_counts = {}
                 for _element, font, _color in group["samples"]:
@@ -800,7 +834,7 @@ class DocumentAnalyzer:
                         "Times New Roman",
                         median(group["sizes"]),
                         1.0,
-                        bold=base == "heading",
+                        bold=bold,
                         color=cluster_color,
                     )
                 )
