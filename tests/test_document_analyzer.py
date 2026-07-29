@@ -416,6 +416,18 @@ def test_analyzer_keeps_layout_and_tight_text_geometry_separate() -> None:
     assert len(element.text_rows) == 3
 
 
+def test_visual_rows_merge_same_baseline_fragments_but_not_adjacent_lines() -> None:
+    rows = DocumentAnalyzer._visual_row_boxes(
+        (
+            Rect(0, 0, 40, 20),
+            Rect(50, 2, 100, 22),
+            Rect(0, 17, 100, 37),
+        )
+    )
+
+    assert rows == (Rect(0, 0, 100, 22), Rect(0, 17, 100, 37))
+
+
 def test_analyzer_reflows_full_width_rows_instead_of_preserving_justified_lines() -> None:
     item = RecognitionItem(
         "body",

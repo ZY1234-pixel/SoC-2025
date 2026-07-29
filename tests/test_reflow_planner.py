@@ -201,7 +201,7 @@ def test_partial_width_elements_span_grid_columns_without_splitting_the_section(
     assert page.fit_scale > 0.8
 
 
-def test_repeated_icon_list_keeps_local_rows_between_spanning_blocks() -> None:
+def test_repeated_icon_list_keeps_local_flow_between_spanning_blocks() -> None:
     elements = (
         _element("top", (100, 0, 900, 50), 1, kind="heading"),
         _element("text-1", (200, 60, 800, 90), 2),
@@ -214,14 +214,15 @@ def test_repeated_icon_list_keeps_local_rows_between_spanning_blocks() -> None:
     placement = {"top": 0, "bottom": 0, "icon-2": 0, "icon-3": 0, "text-1": 1, "text-2": 1, "text-3": 1}
     spans = {identifier: (2 if identifier in {"top", "bottom"} else 1) for identifier in placement}
 
-    rows = ReflowPlanner._spanning_grid_rows(elements, placement, spans)
+    cells = ReflowPlanner._column_band_grid_cells(elements, placement, spans, 2)
+    by_id = {identifier: cell for cell in cells for identifier in cell.element_ids}
 
-    assert rows["text-1"] < rows["text-2"] < rows["text-3"]
-    assert rows["icon-2"] == rows["text-2"]
-    assert rows["icon-3"] == rows["text-3"]
+    assert by_id["text-1"].element_ids == ("text-1", "text-2", "text-3")
+    assert by_id["icon-2"].element_ids == ("icon-2", "icon-3")
+    assert by_id["text-1"].row < by_id["bottom"].row
 
 
-def test_staggered_text_before_a_spanning_anchor_keeps_local_rows() -> None:
+def test_staggered_text_before_a_spanning_anchor_keeps_local_flow() -> None:
     elements = (
         _element("left-title", (100, 100, 450, 150), 1, kind="heading"),
         _element("right-date", (700, 100, 900, 150), 2),
@@ -232,13 +233,36 @@ def test_staggered_text_before_a_spanning_anchor_keeps_local_rows() -> None:
     placement = {"left-title": 0, "left-subtitle": 0, "right-heading": 1, "right-date": 2, "right-body": 1}
     spans = {identifier: (2 if identifier == "right-body" else 1) for identifier in placement}
 
-    rows = ReflowPlanner._spanning_grid_rows(elements, placement, spans)
+    cells = ReflowPlanner._column_band_grid_cells(elements, placement, spans, 3)
+    by_id = {identifier: cell for cell in cells for identifier in cell.element_ids}
 
-    assert rows["left-title"] == rows["right-date"]
-    assert rows["left-title"] < rows["left-subtitle"] < rows["right-heading"] < rows["right-body"]
+    assert by_id["left-title"].element_ids == ("left-title", "left-subtitle")
+    assert by_id["right-heading"].row < by_id["right-body"].row
+    assert by_id["right-date"].row < by_id["right-body"].row
 
 
-def test_grid_rows_do_not_duplicate_structural_paragraph_spacing() -> None:
+def test_column_bands_only_split_columns_covered_by_spanning_elements() -> None:
+    elements = (
+        _element("left-top", (0, 0, 90, 40), 1),
+        _element("middle-top", (100, 0, 190, 40), 2),
+        _element("right-top", (200, 0, 290, 40), 3),
+        _element("image", (0, 50, 190, 100), 4, text="", kind="figure_group"),
+        _element("left-bottom", (0, 110, 90, 150), 5),
+        _element("middle-bottom", (100, 110, 190, 150), 6),
+        _element("right-bottom", (200, 110, 290, 150), 7),
+    )
+    placement = {item.element_id: index % 3 for index, item in enumerate(elements[:3])}
+    placement.update({"image": 0, "left-bottom": 0, "middle-bottom": 1, "right-bottom": 2})
+    spans = {item.element_id: (2 if item.element_id == "image" else 1) for item in elements}
+
+    cells = ReflowPlanner._column_band_grid_cells(elements, placement, spans, 3)
+
+    right = next(cell for cell in cells if cell.column == 2)
+    assert right.element_ids == ("right-top", "right-bottom")
+    assert right.row_span == 3
+
+
+def test_grid_rows_preserve_local_spacing_when_tracks_follow_content() -> None:
     elements = (
         _element("left-top", (100, 50, 300, 80), 1),
         _element("middle-top", (400, 50, 600, 80), 2),
@@ -253,10 +277,10 @@ def test_grid_rows_do_not_duplicate_structural_paragraph_spacing() -> None:
     page = ReflowPlanner().plan(_analysis(elements)).pages[0]
     planned = {element.element_id: element for element in page.elements}
 
-    assert planned["bridge"].payload["space_before_pt"] == 0.0
+    assert planned["bridge"].payload["space_before_pt"] > 0.0
 
 
-def test_grid_cell_starts_do_not_repeat_row_track_spacing() -> None:
+def test_grid_cell_starts_keep_source_spacing_after_visuals() -> None:
     elements = (
         _element("left-visual", (100, 100, 430, 300), 1, text="", kind="figure_group"),
         _element("right-visual", (570, 100, 900, 300), 2, text="", kind="figure_group"),
@@ -267,7 +291,7 @@ def test_grid_cell_starts_do_not_repeat_row_track_spacing() -> None:
     planned = {element.element_id: element for element in page.elements}
 
     assert page.sections[0].kind == FlowKind.GRID
-    assert planned["following-heading"].payload["space_before_pt"] == 0.0
+    assert planned["following-heading"].payload["space_before_pt"] == pytest.approx(100 * 841.89 / 1400)
 
 
 def test_grid_without_source_tracks_keeps_cell_start_spacing() -> None:
@@ -369,7 +393,7 @@ def test_grid_assigns_narrow_elements_by_self_coverage() -> None:
 
     assert page.sections[0].kind == FlowKind.GRID
     assert planned["right-heading"].payload["column"] == 1
-    assert planned["right-heading"].payload["space_before_pt"] == 0.0
+    assert planned["right-heading"].payload["space_before_pt"] > 0.0
 
 
 def test_grid_text_frame_ignores_a_wider_figure_in_the_same_column() -> None:
@@ -491,7 +515,7 @@ def test_primary_bbox_keeps_parallel_visuals_in_the_same_grid_row() -> None:
     assert len(sections) == 1
     assert sections[0].kind == FlowKind.GRID
     assert {(cell.row, cell.column) for cell in sections[0].grid_cells} == {(0, 0), (0, 1), (1, 0), (1, 1)}
-    assert sections[0].row_heights_pt[1] * page.fit_scale == pytest.approx(150 * 841.89 / 1400)
+    assert sections[0].row_heights_pt[1] * page.fit_scale > 150 * 841.89 / 1400
     assert page.elements[0].payload["width_fraction"] == pytest.approx(1.0)
 
 
@@ -575,6 +599,31 @@ def test_grid_height_treats_row_span_as_a_total_height_constraint() -> None:
     assert height == pytest.approx(200)
 
 
+def test_grid_tracks_minimize_overlapping_row_span_constraints() -> None:
+    def image(identifier):
+        return PlannedElement(
+            identifier,
+            "figure_group",
+            payload={"source_bbox": (0, 0, 100, 100), "source_scale": 1.0},
+        )
+
+    elements = (image("upper"), image("lower"))
+    section = FlowSection(
+        "grid",
+        FlowKind.GRID,
+        ("upper", "lower"),
+        (100, 100),
+        grid_cells=(
+            GridCell(0, 0, ("upper",), row_span=2),
+            GridCell(1, 1, ("lower",), row_span=2),
+        ),
+    )
+
+    tracks = ReflowPlanner()._grid_row_heights(section, elements, {}, 1.0)
+
+    assert sum(tracks) < 101
+
+
 def test_grid_tracks_materialize_content_height_for_word() -> None:
     element = PlannedElement("text", "paragraph_group", "body", "x" * 100)
     section = FlowSection(
@@ -593,7 +642,24 @@ def test_grid_tracks_materialize_content_height_for_word() -> None:
     assert sum(tracks) > sum(section.row_heights_pt)
 
 
-def test_grid_fit_reserves_word_layout_table_overhead() -> None:
+def test_grid_tracks_do_not_keep_source_whitespace_as_a_height_floor() -> None:
+    element = PlannedElement("text", "paragraph_group", "body", "short text")
+    section = FlowSection(
+        "grid",
+        FlowKind.GRID,
+        ("text",),
+        (200,),
+        grid_cells=(GridCell(0, 0, ("text",)),),
+        row_heights_pt=(200,),
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    tracks = ReflowPlanner()._grid_row_heights(section, (element,), {"body": role}, 1.0)
+
+    assert tracks[0] < section.row_heights_pt[0]
+
+
+def test_auto_height_grid_does_not_reserve_fixed_track_overhead() -> None:
     element = PlannedElement(
         "image",
         "figure_group",
@@ -608,7 +674,7 @@ def test_grid_fit_reserves_word_layout_table_overhead() -> None:
         row_heights_pt=(92,),
     )
 
-    assert ReflowPlanner()._fit_scale((section,), (element,), {}, 100, 100) < 1.0
+    assert ReflowPlanner()._fit_scale((section,), (element,), {}, 100, 100) == 1.0
 
 
 def test_default_page_budget_reserves_incremental_text_box_wrap_error() -> None:
@@ -660,6 +726,34 @@ def test_vertical_gap_uses_geometry_instead_of_model_order() -> None:
     spacing = ReflowPlanner._vertical_spacing(elements, (section,), {"current": 0, "previous": 0}, 1.0)
 
     assert spacing["current"] == 100
+
+
+def test_grid_gap_uses_a_spanning_predecessor_from_another_anchor_column() -> None:
+    elements = (
+        _element("right-top", (500, 100, 900, 200), 1),
+        _element("spanning", (100, 220, 900, 250), 2),
+        _element("right-bottom", (500, 270, 900, 370), 3),
+    )
+    section = FlowSection(
+        "section",
+        FlowKind.GRID,
+        tuple(element.element_id for element in elements),
+        (400, 400),
+        grid_cells=(
+            GridCell(0, 1, ("right-top",)),
+            GridCell(1, 0, ("spanning",), column_span=2),
+            GridCell(2, 1, ("right-bottom",)),
+        ),
+    )
+
+    spacing = ReflowPlanner._vertical_spacing(
+        elements,
+        (section,),
+        {"right-top": 1, "spanning": 0, "right-bottom": 1},
+        1.0,
+    )
+
+    assert spacing["right-bottom"] == 20
 
 
 def test_planner_maps_narrow_centered_text_bbox_to_paragraph_indents() -> None:

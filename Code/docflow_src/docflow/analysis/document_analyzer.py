@@ -850,7 +850,8 @@ class DocumentAnalyzer:
     def _visual_row_boxes(boxes: Iterable[Rect]) -> tuple[Rect, ...]:
         rows = []
         for box in sorted(boxes, key=lambda value: (value.y1, value.x1)):
-            if rows and box.y1 < rows[-1].y2 - min(box.height, rows[-1].height) * 0.10:
+            overlap = min(box.y2, rows[-1].y2) - max(box.y1, rows[-1].y1) if rows else 0.0
+            if rows and overlap >= min(box.height, rows[-1].height) * 0.45:
                 rows[-1] = DocumentAnalyzer._union((rows[-1], box))
             else:
                 rows.append(box)

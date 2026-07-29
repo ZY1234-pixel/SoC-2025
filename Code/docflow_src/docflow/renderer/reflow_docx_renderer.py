@@ -278,9 +278,16 @@ class ReflowDocxRenderer:
         column_count = len(flow.column_widths_pt)
         table = container.add_table(rows=row_count, cols=column_count)
         self._format_layout_table(table, flow.column_widths_pt, flow.gutter_pt)
-        for row, height in zip(table.rows, flow.row_heights_pt):
-            row.height = Pt(height * fit_scale)
-            row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
+        fixed_rows = {
+            row
+            for cell in flow.grid_cells
+            if cell.row_span > 1
+            and any(elements[identifier].kind == "figure_group" for identifier in cell.element_ids)
+            for row in range(cell.row, cell.row + cell.row_span)
+        }
+        for index in fixed_rows:
+            table.rows[index].height = Pt(flow.row_heights_pt[index] * fit_scale)
+            table.rows[index].height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
         target_cells = {}
         for grid_cell in flow.grid_cells:
             cell = table.cell(grid_cell.row, grid_cell.column)
