@@ -760,6 +760,45 @@ def test_page_fit_does_not_trust_underreported_source_lines_over_text_width() ->
     assert underreported.fit_scale <= estimated.fit_scale
 
 
+def test_dense_grid_text_gets_local_word_capacity_scale() -> None:
+    planner = ReflowPlanner()
+    dense = PlannedElement(
+        "body",
+        "paragraph_group",
+        "body",
+        "正文" * 20,
+        payload={
+            "lines": ("正文" * 5,) * 4,
+            "visual_line_count": 4,
+            "line_height_pt": 10.5,
+            "source_scale": 1.0,
+        },
+        content_bbox=Rect(0, 0, 100, 42),
+    )
+    single_line = PlannedElement(
+        "single",
+        "paragraph_group",
+        "body",
+        "作者名单",
+        payload={"lines": ("作者名单",), "visual_line_count": 1, "line_height_pt": 10.5},
+        content_bbox=Rect(0, 42, 100, 52.5),
+    )
+    section = FlowSection(
+        "grid",
+        FlowKind.GRID,
+        (dense.element_id, single_line.element_id),
+        column_widths_pt=(100,),
+        grid_cells=(GridCell(0, 0, (dense.element_id,)), GridCell(1, 0, (single_line.element_id,))),
+        row_heights_pt=(42, 10.5),
+    )
+    roles = {"body": TypographicRole("body", "宋体", "Times New Roman", 10, 1.0)}
+
+    scales = planner._grid_cell_fit_scales((section,), (dense, single_line), roles, 1.0)
+
+    assert 0.8 < scales[dense.element_id] < 1.0
+    assert single_line.element_id not in scales
+
+
 def test_page_fit_does_not_charge_markup_free_single_section_boundaries() -> None:
     planner = ReflowPlanner()
     elements = tuple(PlannedElement(str(index), "paragraph_group", "body", "x" * 50) for index in range(6))

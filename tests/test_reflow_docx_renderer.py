@@ -146,7 +146,13 @@ def test_grid_renderer_hides_cell_marks_without_splitting_row_spans() -> None:
     )
     elements = {
         "span": PlannedElement("span", "paragraph_group", "body", "image area"),
-        "side": PlannedElement("side", "paragraph_group", "body", "side flow"),
+        "side": PlannedElement(
+            "side",
+            "paragraph_group",
+            "body",
+            "side flow",
+            payload={"grid_fit_scale": 0.8},
+        ),
     }
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
 
@@ -158,6 +164,7 @@ def test_grid_renderer_hides_cell_marks_without_splitting_row_spans() -> None:
     assert cell_properties
     assert all(properties.find(qn("w:hideMark")) is not None for properties in cell_properties)
     assert [row.height.pt for row in container.tables[0].rows] == pytest.approx((30, 40))
+    assert container.tables[0].cell(0, 2).paragraphs[0].runs[0].font.size.pt == 8.5
     assert container.tables[0].cell(1, 0)._tc.xpath("./w:tcPr/w:tcMar/w:end/@w:w") == ["100"]
 
 

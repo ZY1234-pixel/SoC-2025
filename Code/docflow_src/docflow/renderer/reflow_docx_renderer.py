@@ -315,7 +315,8 @@ class ReflowDocxRenderer:
                 element = elements[identifier]
                 if element.kind == "figure_group" and grid_cell.row_span > 1:
                     element = replace(element, payload={**element.payload, "float_in_grid": True})
-                self._render_element(cell, element, roles, fit_scale, container_width)
+                element_fit_scale = fit_scale * float(element.payload.get("grid_fit_scale", 1.0))
+                self._render_element(cell, element, roles, element_fit_scale, container_width)
         for row in table.rows:
             for cell in row.cells:
                 if not cell.paragraphs and not cell.tables:

@@ -182,6 +182,13 @@ class ReflowPlanner:
             else section
             for section in sections
         )
+        grid_fit_scales = self._grid_cell_fit_scales(sections, planned, role_by_id, fit_scale)
+        planned = tuple(
+            replace(element, payload={**element.payload, "grid_fit_scale": grid_fit_scales[element.element_id]})
+            if element.element_id in grid_fit_scales
+            else element
+            for element in planned
+        )
         header_ids = tuple(
             element.element_id
             for element in furniture
@@ -1102,6 +1109,54 @@ class ReflowPlanner:
             for row in rows:
                 row_heights[row] += deficit
         return tuple(row_heights)
+
+    def _grid_cell_fit_scales(self, sections, elements, roles, fit_scale: float) -> dict[str, float]:
+        by_id = {element.element_id: element for element in elements}
+        scales = {}
+        for section in sections:
+            if section.kind != FlowKind.GRID:
+                continue
+            for cell in section.grid_cells:
+                cell_elements = [by_id[identifier] for identifier in cell.element_ids]
+                if not cell_elements or any(
+                    element.kind not in {"heading", "paragraph_group", "caption"} or not element.text
+                    for element in cell_elements
+                ):
+                    continue
+                visual_lines = sum(
+                    int(element.payload.get("visual_line_count") or len(element.payload.get("lines") or ()) or 1)
+                    for element in cell_elements
+                )
+                if visual_lines == 1:
+                    continue
+                width = (
+                    sum(section.column_widths_pt[cell.column : cell.column + cell.column_span])
+                    + section.gutter_pt * (cell.column_span - 1)
+                )
+                available = (
+                    sum(section.row_heights_pt[cell.row : cell.row + cell.row_span])
+                    * fit_scale
+                    * self.word_safety_factor
+                )
+
+                def content_height(local_scale: float) -> float:
+                    return sum(
+                        self._element_height(element, roles, width, fit_scale * local_scale)
+                        for element in cell_elements
+                    )
+
+                if content_height(1.0) <= available:
+                    continue
+                lower, upper = 0.0, 1.0
+                for _ in range(12):
+                    middle = (lower + upper) / 2.0
+                    if content_height(middle) <= available:
+                        lower = middle
+                    else:
+                        upper = middle
+                for element in cell_elements:
+                    scales[element.element_id] = max(lower, 0.001)
+        return scales
 
     def _with_vertical_tracks(self, section, elements, source_scale: float):
         if section.kind == FlowKind.SINGLE:
