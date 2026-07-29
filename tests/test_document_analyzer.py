@@ -392,6 +392,65 @@ def test_analyzer_keeps_layout_and_tight_text_geometry_separate() -> None:
     assert element.payload["visual_line_count"] == 3
 
 
+def test_analyzer_reflows_full_width_rows_instead_of_preserving_justified_lines() -> None:
+    item = RecognitionItem(
+        "body",
+        "text",
+        Rect(100, 100, 900, 250),
+        1,
+        text_lines=(
+            TextEvidence("first line", polygon=((120, 100), (880, 100), (880, 120), (120, 120))),
+            TextEvidence("second line", polygon=((125, 145), (875, 145), (875, 165), (125, 165))),
+            TextEvidence("third line", polygon=((130, 190), (870, 190), (870, 210), (130, 210))),
+        ),
+    )
+
+    element = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))
+    ).pages[0].elements[0]
+
+    assert element.text_structure.preserve_source_lines is False
+
+
+def test_analyzer_preserves_short_centered_rows() -> None:
+    item = RecognitionItem(
+        "author",
+        "text",
+        Rect(100, 100, 900, 250),
+        1,
+        text_lines=(
+            TextEvidence("first centered line", polygon=((280, 100), (720, 100), (720, 120), (280, 120))),
+            TextEvidence("second centered line", polygon=((350, 145), (650, 145), (650, 165), (350, 165))),
+        ),
+    )
+
+    element = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))
+    ).pages[0].elements[0]
+
+    assert element.text_structure.preserve_source_lines is True
+
+
+def test_analyzer_reflows_hanging_rows_that_only_roughly_share_a_center() -> None:
+    item = RecognitionItem(
+        "question",
+        "text",
+        Rect(100, 100, 900, 250),
+        1,
+        text_lines=(
+            TextEvidence("question lead", polygon=((120, 100), (880, 100), (880, 120), (120, 120))),
+            TextEvidence("continued text", polygon=((175, 145), (875, 145), (875, 165), (175, 165))),
+            TextEvidence("continued text", polygon=((175, 190), (875, 190), (875, 210), (175, 210))),
+        ),
+    )
+
+    element = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))
+    ).pages[0].elements[0]
+
+    assert element.text_structure.preserve_source_lines is False
+
+
 def test_analyzer_preserves_split_rows_as_left_and_right_fields() -> None:
     item = RecognitionItem(
         "contact",

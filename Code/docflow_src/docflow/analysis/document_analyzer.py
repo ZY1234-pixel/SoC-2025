@@ -317,9 +317,11 @@ class DocumentAnalyzer:
         boxes = tuple(bbox for _line, _value, bbox in visible_lines if bbox is not None)
         if len(boxes) == len(lines) and len(boxes) >= 2:
             center = (primary.bbox.x1 + primary.bbox.x2) / 2.0
+            median_width = median(box.width for box in boxes)
             preserve_lines = preserve_lines or (
                 max(box.x1 for box in boxes) - min(box.x1 for box in boxes) > primary.bbox.width * 0.05
-                and all(abs((box.x1 + box.x2) / 2.0 - center) <= primary.bbox.width * 0.05 for box in boxes)
+                and all(abs((box.x1 + box.x2) / 2.0 - center) <= primary.bbox.width * 0.025 for box in boxes)
+                and median_width <= primary.bbox.width * 0.92
             )
         lefts = tuple(bbox.x1 for _line, _value, bbox in visible_lines if bbox is not None)
         hanging_indent = 0.0

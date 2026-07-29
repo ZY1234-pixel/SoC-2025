@@ -1189,7 +1189,11 @@ class ReflowPlanner:
             source_lines = element.payload.get("lines") or ()
             line_height = element.payload.get("line_height_pt")
             content_bbox = ReflowPlanner._content_bbox(element)
-            source_line_count = int(element.payload.get("visual_line_count") or len(source_lines))
+            source_line_count = (
+                len(source_lines)
+                if element.text_structure.preserve_source_lines
+                else int(element.payload.get("visual_line_count") or len(source_lines))
+            )
             source_width = content_bbox.width * float(element.payload.get("source_scale", 1.0))
             if element.text_structure.preserve_source_lines:
                 lines = source_line_count
@@ -1263,6 +1267,17 @@ class ReflowPlanner:
             return "left"
         widths = element.payload.get("line_widths_px") or ()
         lefts = element.payload.get("line_lefts_px") or ()
+        if (
+            element.kind == "paragraph_group"
+            and element.text_structure.preserve_source_lines
+            and len(source_lines) >= 2
+            and len(lefts) == len(widths) == len(source_lines)
+            and all(
+                abs(float(source_left) + float(line_width) / 2.0 - (left + right) / 2.0) <= width * 0.025
+                for source_left, line_width in zip(lefts, widths)
+            )
+        ):
+            return "center"
         if (
             content_bbox.width <= width * 0.80
             and len(source_lines) >= 2

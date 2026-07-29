@@ -67,6 +67,23 @@ def test_full_width_body_with_leading_layout_space_is_left_aligned() -> None:
     assert ReflowPlanner._alignment(element, (100, 900)) == "left"
 
 
+def test_preserved_centered_rows_are_center_aligned_even_when_wide() -> None:
+    element = _element(
+        "author",
+        (100, 100, 900, 250),
+        1,
+        "first author line second author line",
+        payload={
+            "lines": ("first author line", "second author line"),
+            "line_lefts_px": (180, 230),
+            "line_widths_px": (640, 540),
+        },
+        text_structure=TextStructure(preserve_source_lines=True),
+    )
+
+    assert ReflowPlanner._alignment(element, (100, 900)) == "center"
+
+
 def test_single_flow_repairs_outlying_model_order_with_geometry() -> None:
     elements = (
         _element("bottom", (100, 500, 400, 600), 1),
