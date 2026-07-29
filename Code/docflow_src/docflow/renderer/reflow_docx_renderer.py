@@ -349,6 +349,31 @@ class ReflowDocxRenderer:
                         container_width,
                     )
                 return
+            line_alignments = element.payload.get("line_alignments") or ()
+            source_lines = element.payload.get("lines") or ()
+            if len(line_alignments) == len(source_lines) >= 2:
+                for index, (line, alignment) in enumerate(zip(source_lines, line_alignments)):
+                    payload = dict(element.payload)
+                    payload.update(
+                        alignment=alignment,
+                        line_alignments=(),
+                        lines=(line,),
+                        visual_line_count=1,
+                        first_line_indent_pt=0.0,
+                        left_indent_pt=0.0,
+                        right_indent_pt=0.0,
+                        width_fraction=1.0,
+                        space_before_pt=payload.get("space_before_pt", 0.0) if index == 0 else 0.0,
+                    )
+                    paragraph = container.add_paragraph()
+                    self._write_text(
+                        paragraph,
+                        replace(element, text=str(line), payload=payload),
+                        roles,
+                        fit_scale,
+                        container_width,
+                    )
+                return
             paragraph = container.add_paragraph()
             self._write_text(paragraph, element, roles, fit_scale, container_width)
             return

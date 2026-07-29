@@ -84,6 +84,22 @@ def test_preserved_centered_rows_are_center_aligned_even_when_wide() -> None:
     assert ReflowPlanner._alignment(element, (100, 900)) == "center"
 
 
+def test_distinct_two_line_geometry_preserves_per_line_alignment() -> None:
+    element = _element(
+        "caption",
+        (100, 100, 900, 160),
+        1,
+        payload={
+            "lines": ("centered caption", "right credit"),
+            "visual_line_count": 2,
+            "line_lefts_px": (150, 700),
+            "line_widths_px": (700, 200),
+        },
+    )
+
+    assert ReflowPlanner._line_alignments(element, (100, 900)) == ("center", "right")
+
+
 def test_single_flow_repairs_outlying_model_order_with_geometry() -> None:
     elements = (
         _element("bottom", (100, 500, 400, 600), 1),
@@ -259,6 +275,28 @@ def test_grid_without_source_tracks_keeps_cell_start_spacing() -> None:
     )
 
     assert spacing["right-bottom"] == 100
+
+
+def test_grid_keeps_source_gap_after_spanning_figure() -> None:
+    elements = (
+        _element("figure", (450, 100, 950, 500), 1, kind="figure_group"),
+        _element("caption", (450, 520, 950, 560), 2),
+    )
+    section = FlowSection(
+        "section",
+        FlowKind.GRID,
+        ("figure", "caption"),
+        (250, 250),
+        grid_cells=(
+            GridCell(0, 0, ("figure",), row_span=2, column_span=2),
+            GridCell(2, 0, ("caption",), column_span=2),
+        ),
+        row_heights_pt=(200, 200, 40),
+    )
+
+    spacing = ReflowPlanner._vertical_spacing(elements, (section,), {"figure": 0, "caption": 0}, 1.0)
+
+    assert spacing["caption"] == 20
 
 
 def test_page_budget_preserves_source_whitespace_while_scaling_typography() -> None:

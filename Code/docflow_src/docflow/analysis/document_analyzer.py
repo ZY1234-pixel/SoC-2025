@@ -220,12 +220,14 @@ class DocumentAnalyzer:
         page_index: int,
     ) -> SemanticElement:
         kind = self._kind(primary)
-        text = "" if kind in {"figure_group", "table_group", "equation_group"} else self._text(primary)
-        if kind == "heading":
-            text = self._normalize_heading(text)
         visible_lines = self._visible_lines(primary)
         line_boxes = tuple(bbox for _line, _value, bbox in visible_lines if bbox is not None)
         visual_rows = self._visual_row_boxes(line_boxes)
+        text = "" if kind in {"figure_group", "table_group", "equation_group"} else self._text(primary)
+        if text and len(visual_rows) == 1:
+            text = self._single_row_text(visible_lines, text)
+        if kind == "heading":
+            text = self._normalize_heading(text)
         content_bbox = self._union(visual_rows) if visual_rows else primary.bbox
         split_text_rows = self._split_text_rows(primary, visible_lines, visual_rows)
         caption_lines = [
@@ -578,6 +580,20 @@ class DocumentAnalyzer:
                 output = output[:-1] + part
             else:
                 output = _join_text_segments(output, part)
+        return output
+
+    @staticmethod
+    def _single_row_text(visible_lines, fallback: str) -> str:
+        if len(visible_lines) < 2 or any(bbox is None for _line, _value, bbox in visible_lines):
+            return fallback
+        segments = sorted(visible_lines, key=lambda item: item[2].x1)
+        glyph_width = median(bbox.width / max(len(value), 1) for _line, value, bbox in segments)
+        output = segments[0][1]
+        for previous, current in zip(segments, segments[1:]):
+            gap = current[2].x1 - previous[2].x2
+            if gap >= glyph_width * 0.20:
+                output += " " * max(1, round(gap / glyph_width))
+            output += current[1]
         return output
 
     @classmethod

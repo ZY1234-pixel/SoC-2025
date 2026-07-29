@@ -93,6 +93,13 @@ class ReflowPlanner:
             element.element_id: self._alignment(element, container_frames.get(element.element_id, (bounds.x1, bounds.x2)))
             for element in page.elements
         }
+        line_alignments = {
+            element.element_id: self._line_alignments(
+                element,
+                container_frames.get(element.element_id, (bounds.x1, bounds.x2)),
+            )
+            for element in page.elements
+        }
         hanging_indents = {
             element.element_id: self._heading_hanging_indent(element, scale)
             if alignments[element.element_id] == "left"
@@ -129,6 +136,7 @@ class ReflowPlanner:
                     ),
                     "column": placement.get(element.element_id, 0),
                     "alignment": alignments[element.element_id],
+                    "line_alignments": line_alignments[element.element_id],
                     "first_line_indent_pt": (
                         self._first_line_indent(element, scale)
                         - hanging_indents[element.element_id]
@@ -969,15 +977,26 @@ class ReflowPlanner:
             if section.kind == FlowKind.GRID:
                 for cell in section.grid_cells:
                     first = min(cell.element_ids, key=lambda identifier: by_id[identifier].bbox.y1)
-                    has_preceding_peer = any(
-                        other.column == cell.column
+                    preceding_peers = [
+                        other
+                        for other in section.grid_cells
+                        if other != cell
+                        and other.column == cell.column
                         and other.column_span == cell.column_span
                         and max(by_id[identifier].bbox.y2 for identifier in other.element_ids)
                         <= by_id[first].bbox.y1
-                        for other in section.grid_cells
-                        if other != cell
+                    ]
+                    preceding_peer = max(
+                        preceding_peers,
+                        key=lambda other: max(by_id[identifier].bbox.y2 for identifier in other.element_ids),
+                        default=None,
                     )
-                    if section.row_heights_pt or not has_preceding_peer:
+                    follows_spanning_figure = (
+                        preceding_peer is not None
+                        and preceding_peer.row_span > 1
+                        and any(by_id[identifier].kind == "figure_group" for identifier in preceding_peer.element_ids)
+                    )
+                    if (section.row_heights_pt and not follows_spanning_figure) or not preceding_peers:
                         spacing.pop(first, None)
         section_elements = [
             [by_id[identifier] for identifier in section.element_ids]
@@ -1364,6 +1383,35 @@ class ReflowPlanner:
         if content_bbox.x2 >= right - width * 0.03 and content_bbox.x1 > left + width * 0.25 and len(source_lines) <= 2:
             return "right"
         return "justify" if element.kind == "paragraph_group" and len(source_lines) >= 3 and len(element.text) >= 40 else "left"
+
+    @staticmethod
+    def _line_alignments(element, frame) -> tuple[str, ...]:
+        lines = element.payload.get("lines") or ()
+        lefts = element.payload.get("line_lefts_px") or ()
+        widths = element.payload.get("line_widths_px") or ()
+        if (
+            len(lines) != 2
+            or int(element.payload.get("visual_line_count") or 0) != 2
+            or not len(lefts) == len(widths) == len(lines)
+        ):
+            return ()
+        left, right = frame
+        frame_width = max(right - left, 1.0)
+        inferred = []
+        for line_left, line_width in zip(lefts, widths):
+            line_left = float(line_left)
+            line_width = float(line_width)
+            line_right = line_left + line_width
+            centered = abs(line_left + line_width / 2.0 - (left + right) / 2.0) <= frame_width * 0.04
+            if line_width <= frame_width * 0.92 and centered:
+                inferred.append("center")
+            elif line_right >= right - frame_width * 0.04 and line_left > left + frame_width * 0.15:
+                inferred.append("right")
+            elif line_left <= left + frame_width * 0.04 and line_right < right - frame_width * 0.15:
+                inferred.append("left")
+            else:
+                return ()
+        return tuple(inferred) if len(set(inferred)) > 1 else ()
 
     @staticmethod
     def _first_line_indent(element, source_scale: float) -> float:

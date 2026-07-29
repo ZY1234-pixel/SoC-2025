@@ -147,6 +147,34 @@ def test_split_text_rows_render_with_right_aligned_fields() -> None:
     assert all(paragraph._p.xpath("./w:pPr/w:tabs/w:tab[@w:val='right']") for paragraph in cell.paragraphs)
 
 
+def test_two_line_text_renders_each_source_alignment() -> None:
+    cell = Document().add_table(rows=1, cols=1).cell(0, 0)
+    cell.text = ""
+    element = PlannedElement(
+        "caption",
+        "paragraph_group",
+        "body",
+        "centered caption right credit",
+        payload={
+            "alignment": "left",
+            "lines": ("centered caption", "right credit"),
+            "line_alignments": ("center", "right"),
+            "line_height_pt": 12,
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    renderer = ReflowDocxRenderer()
+    renderer._clear_container(cell)
+    renderer._render_element(cell, element, {"body": role}, 1.0, 200)
+
+    assert [paragraph.text for paragraph in cell.paragraphs] == ["centered caption", "right credit"]
+    assert [paragraph.alignment for paragraph in cell.paragraphs] == [
+        WD_ALIGN_PARAGRAPH.CENTER,
+        WD_ALIGN_PARAGRAPH.RIGHT,
+    ]
+
+
 def test_single_line_text_is_sized_to_its_source_width() -> None:
     role = TypographicRole("heading", "黑体", "Times New Roman", 16, 1.0)
     element = SemanticElement(

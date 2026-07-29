@@ -90,6 +90,27 @@ def test_analyzer_discards_ocr_lines_outside_caption_box() -> None:
     assert DocumentAnalyzer._text(caption) == "TABLE II"
 
 
+def test_analyzer_preserves_visible_gaps_between_same_row_text_tokens() -> None:
+    item = RecognitionItem(
+        "authors",
+        "text",
+        Rect(100, 100, 440, 125),
+        1,
+        text_lines=(
+            TextEvidence("本报记者", polygon=((100, 100), (200, 100), (200, 125), (100, 125))),
+            TextEvidence("沈小晓", polygon=((200, 100), (277, 100), (277, 125), (200, 125))),
+            TextEvidence("任彦", polygon=((283, 100), (359, 100), (359, 125), (283, 125))),
+            TextEvidence("黄培昭", polygon=((370, 100), (440, 100), (440, 125), (370, 125))),
+        ),
+    )
+
+    element = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))
+    ).pages[0].elements[0]
+
+    assert element.text == "本报记者沈小晓 任彦 黄培昭"
+
+
 def test_analyzer_relates_short_caption_label_through_its_subtitle() -> None:
     evidence = RecognitionEvidence(
         (
