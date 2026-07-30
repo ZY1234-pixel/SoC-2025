@@ -1,6 +1,6 @@
 # 部署说明
 
-这份说明面向第一次在本机运行 DocFlow 的开发人员。所有命令都从仓库根目录执行。
+这份说明面向第一次在本机运行图片文本解析及矢量化转换模块的开发人员。所有命令都从仓库根目录执行。
 
 ## 运行环境
 
@@ -28,7 +28,7 @@ python -m pip install --upgrade pip
 python -m pip install -r Code\requirement.txt
 ```
 
-仓库没有需要单独安装的 DocFlow wheel。运行 `Code/test.py` 时，脚本会把 `Code/docflow_src/` 和打包的 PaddleOCR 运行时加入 Python 路径。
+仓库没有需要单独安装的项目 wheel。运行 `Code/test.py` 时，脚本会把 `Code/docflow_src/` 和打包的 PaddleOCR 运行时加入 Python 路径。
 
 ## 放置模型
 

@@ -1,6 +1,6 @@
-# DocFlow：把图片文档还原成可编辑 DOCX
+# 图片文本解析及矢量化转换
 
-DocFlow 读取扫描图片或 PDF，经过 OCR、版面分析和布局规划，输出 DOCX、Markdown，也可以调用 LibreOffice 导出 PDF。
+图片文本解析及矢量化转换模块读取扫描图片或 PDF，经过 OCR、版面分析和布局规划，输出 DOCX、Markdown，也可以调用 LibreOffice 导出 PDF。
 
 这个分支使用 Word 原生的段落、分栏和表格来组织页面。生成的文字和表格可以继续编辑，版面则尽量贴近原图。它不是按 bbox 放置文本框的绝对定位方案，所以不同版本的 Word 或 LibreOffice 仍可能出现细小的字体度量差异。
 

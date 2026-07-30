@@ -17,7 +17,7 @@ python -m pip --version
 python -m pip install -r Code/requirement.txt
 ```
 
-`Code/test.py` 会直接加载 `Code/docflow_src/`，不需要安装 DocFlow wheel。如果报错来自其他入口，请确认它是否自行配置了源码路径。
+`Code/test.py` 会直接加载 `Code/docflow_src/`，不需要安装项目 wheel。如果报错来自其他入口，请确认它是否自行配置了源码路径。
 
 ## 报错“缺少必要运行资产”
 
