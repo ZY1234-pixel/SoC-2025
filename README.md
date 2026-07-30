@@ -1,12 +1,12 @@
 # 图片文本解析及矢量化转换
 
-图片文本解析及矢量化转换模块读取扫描图片或 PDF，经过 OCR、版面分析和布局规划，输出 DOCX、Markdown，也可以调用 LibreOffice 导出 PDF。
+图片文本解析及矢量化转换模块面向扫描图片和 PDF，经过 OCR、版面分析与布局规划，生成可编辑的 DOCX、结构化 Markdown，并可通过 LibreOffice 导出 PDF。
 
-这个分支使用 Word 原生的段落、分栏和表格来组织页面。生成的文字和表格可以继续编辑，版面则尽量贴近原图。它不是按 bbox 放置文本框的绝对定位方案，所以不同版本的 Word 或 LibreOffice 仍可能出现细小的字体度量差异。
+当前实现采用流式排版，使用 Word 原生段落、分栏和表格组织页面。文字和表格可继续编辑，布局尽量保持原始版面。该方案不按 bbox 绝对定位文本框；由于 Word 与 LibreOffice 的字体度量不同，不同渲染环境可能产生少量换行或分页差异。
 
-## 还原效果
+## 效果示例
 
-下面四组结果由当前代码生成。第三列是 DOCX 经 LibreOffice 转出的页面，不是直接拼接的图片。
+以下示例由当前版本生成，第三列为 DOCX 经 LibreOffice 渲染后的页面。
 
 ### 学术论文：双栏、公式和复杂表格
 
@@ -32,9 +32,9 @@
 |:----:|:--------:|:---------:|
 | <img src="doc/assets/readme/newspaper_01/original.jpg" width="320"> | <img src="doc/assets/readme/newspaper_01/layout.jpg" width="320"> | <img src="doc/assets/readme/newspaper_01/rendered.jpg" width="320"> |
 
-## 开始使用
+## 快速开始
 
-下面的命令都在仓库根目录执行。项目按 Python 3.9 开发和测试；只有导出 PDF 时才需要安装 LibreOffice。
+以下命令均在仓库根目录执行。项目基于 Python 3.9 开发和测试；LibreOffice 仅用于导出 PDF。
 
 ### Linux
 
@@ -54,15 +54,19 @@ python -m pip install --upgrade pip
 python -m pip install -r Code\requirement.txt
 ```
 
-`Code/test.py` 会直接加载 `Code/docflow_src/`，不用另装项目 wheel。
+`Code/test.py` 会直接加载 `Code/docflow_src/`，无需额外安装项目 wheel。
 
-先跑一个样本，确认模型和依赖都能正常加载：
+### 单样本验证
+
+使用单个样本确认依赖和模型可以正常加载：
 
 ```bash
 python Code/test.py --input dataset/exam_paper_02.png --output test-result --formats docx,markdown
 ```
 
-处理整个 `dataset/`，并把 DOCX 转成 PDF：
+### 全量处理
+
+处理整个 `dataset/`，并将 DOCX 转换为 PDF：
 
 ```bash
 python Code/test.py --input dataset --output test-result --formats docx,markdown,pdf
@@ -79,7 +83,7 @@ python Code/test.py --input dataset --output test-result --formats docx,markdown
 | `--pdf-dpi` | 输入 PDF 转图片时使用的 DPI，默认 `200` |
 | `--no-debug-vis` | 关闭版面框和阅读顺序图 |
 
-## 代码怎么处理一页文档
+## 处理流程
 
 ```text
 图片 / PDF
@@ -91,28 +95,28 @@ python Code/test.py --input dataset --output test-result --formats docx,markdown
   -> PDF（可选）
 ```
 
-| 阶段 | 负责什么 | 保存结果 |
+| 阶段 | 职责 | 输出 |
 |------|----------|----------|
 | Recognition Evidence | 接收模型输出，保留 OCR 行、区域、模型顺序和来源标识 | `<样本名>.recognition.json` |
 | Document Analysis | 合并段落、标题、表格、图片、公式和图注，归纳文档内的样式 | `<样本名>.json` |
 | Reflow Layout Plan | 决定分栏结构、元素间距、尺寸和页内缩放 | `<样本名>.render_plan.json` |
-| Renderer | 按计划写入 DOCX 或 Markdown，不再猜测版面 | DOCX / Markdown |
+| Renderer | 按布局计划写入 DOCX 或 Markdown，不再执行版面推断 | DOCX / Markdown |
 
 布局计划有三种基本结构：普通单栏使用 `single_flow`，连续多栏使用 `sequential_columns`，图文混排或跨栏页面使用 `grid_flow`。
 
 每张源页面对应一张输出页面。规划器在写 DOCX 之前估算一次页面容量，必要时统一缩放；它不会反复生成 DOCX 再检测分页。
 
-## 目前能还原什么
+## 支持范围
 
-正文、标题和图注会写成可编辑段落。系统会推断字号、行距、对齐、颜色和字重，中文字体分类包括宋体、黑体、楷体和仿宋。
+正文、标题和图注会写入可编辑段落。系统推断字号、行距、对齐、颜色和字重，中文字体分类包括宋体、黑体、楷体和仿宋。
 
 检测到的表格会写成 Word 原生表格，跨行、跨列和主要边框仍可编辑。图片和公式作为媒体元素嵌入页面，布局规划支持单栏、多栏、跨栏图片、图文混排及页眉页脚。
 
-三阶段 JSON 都带有来源关系。遇到错栏、漏块或样式异常时，可以判断问题出在模型识别、文档分析还是最终布局。
+三个阶段的 JSON 均保留来源映射，可用于判断栏位、内容块或样式异常发生在模型识别、文档分析还是布局规划阶段。
 
-## 输出内容
+## 输出结构
 
-每次运行都会新建一个时间戳目录。同名样本的结果放在自己的子目录里：
+每次运行都会创建独立的时间戳目录，各样本结果保存于对应子目录：
 
 ```text
 test-result/
@@ -135,9 +139,9 @@ test-result/
 
 只会生成 `--formats` 中指定的文件。使用 `--no-debug-vis` 后，`raw_result.json` 和 `debug/` 不再输出。
 
-## 准备模型
+## 模型准备
 
-默认流程会读取这些文件：
+默认流程依赖以下模型文件：
 
 ```text
 Code/models/
@@ -150,7 +154,7 @@ Code/models/
 
 模型可以从百度网盘 [SoC_1-1](https://pan.baidu.com/s/12ouE5owq8Ii_KigQzOeirQ) 下载，提取码为 `4phe`。解压后保持上面的目录结构。
 
-## 测试和版面检查
+## 质量验证
 
 单元测试在仓库根目录运行：
 
@@ -158,7 +162,7 @@ Code/models/
 pytest -q
 ```
 
-自动检查会拦截来源丢失、表格退化和 PDF 超页。版面是否接近原图仍要看渲染结果，通常按下面的顺序检查：
+自动检查覆盖来源完整性、原生表格数量和 PDF 页数。视觉还原质量仍需对照渲染结果，建议按以下顺序验收：
 
 1. 输出页数是否与输入一致。
 2. 阅读顺序、栏数和跨栏范围是否正确。
@@ -171,7 +175,7 @@ pytest -q
 
 - 这是可编辑的流式 DOCX 方案，不是按原始 bbox 放置文本框的 Replica DOCX。
 - Microsoft Word 和 LibreOffice 使用的字体度量并不完全相同，同一份 DOCX 可能有少量换行或分页差异。
-- OCR 和版面模型如果漏检或识别错误，后面的分析阶段不会凭空补回内容。此时应先看 `debug/` 和三阶段 JSON。
+- OCR 或版面模型未识别的信息无法由后续阶段恢复。出现内容缺失时，应先检查 `debug/` 和三阶段 JSON。
 
 ## 仓库结构
 

@@ -1,12 +1,12 @@
 # 测试说明
 
-自动测试负责检查内容有没有丢失、表格有没有退化、输出有没有超页。至于版面是否像原图，仍要把 DOCX 转成图片后人工对照。
+自动测试用于检查来源完整性、原生表格数量和输出页数。视觉还原质量需要将 DOCX 渲染为 PDF 或图片后，与原图进行人工对照。
 
 以下命令都从仓库根目录执行。先按 [DEPLOYMENT.md](DEPLOYMENT.md) 配好 Python 和模型；测试 PDF 输出时还要安装 LibreOffice。
 
 ## 单元测试
 
-代码改动后先跑：
+代码改动后执行：
 
 ```bash
 pytest -q
@@ -29,7 +29,7 @@ python Code/test.py --input <输入路径> --output <输出目录> --formats <�
 | `--pdf-dpi` | 输入 PDF 转图片时使用的 DPI，默认 `200` |
 | `--no-debug-vis` | 不保存版面框和阅读顺序图 |
 
-第一次验证环境时只跑一张图：
+首次验证环境时使用单个样本：
 
 ```bash
 python Code/test.py --input dataset/exam_paper_02.png --output test-result --formats docx,markdown
@@ -43,9 +43,9 @@ python Code/test.py --input dataset --output test-result --formats docx,markdown
 
 PDF 输出会调用 LibreOffice。程序随后检查 PDF 页数；某个样本超过源页数时，本次运行会记为失败。
 
-## 先看运行摘要
+## 运行摘要与阶段数据
 
-`run_manifest.json` 汇总了样本数量、页数、失败列表、原生表格数量和布局类型。批量运行后先看这里，`failures` 非空就不必逐个打开文件。
+`run_manifest.json` 汇总样本数量、页数、失败列表、原生表格数量和布局类型。批量运行后应先检查该文件；`failures` 非空表示存在执行失败的样本。
 
 每个样本有三份阶段数据：
 
@@ -53,19 +53,19 @@ PDF 输出会调用 LibreOffice。程序随后检查 PDF 页数；某个样本�
 - `<样本名>.json`：`pages[].elements` 是合并后的段落、标题、表格和媒体块。
 - `<样本名>.render_plan.json`：`pages[].sections` 记录分栏或网格结构，`pages[].fit_scale` 是页面缩放结果。
 
-如果启用了 debug 图，`debug/page_0001.layout_ocr.jpg` 显示检测框，`debug/page_0001.reading_order_columns.jpg` 显示模型顺序。它们适合排查漏检、错栏和跨栏范围错误。
+启用 debug 图后，`debug/page_0001.layout_ocr.jpg` 显示检测框，`debug/page_0001.reading_order_columns.jpg` 显示模型顺序。这两张图用于排查识别遗漏、栏位判断和跨栏范围错误。
 
-## 人工检查 DOCX
+## 视觉验收
 
-建议把 DOCX 转成 PDF 或图片，再和原图并排查看。检查顺序如下：
+将 DOCX 转换为 PDF 或图片，并与原图并排检查。建议按照以下顺序进行：
 
-1. 先数页数，确认没有空白页或内容溢到下一页。
-2. 看大结构：栏数、阅读顺序、跨栏图片和页眉页脚。
-3. 看完整性：表格行、公式、图片和图注有没有被裁掉。
-4. 最后看样式：字号、行距、对齐、段落间距和字体是否接近原图。
+1. 检查页数，确认不存在空白页或内容溢页。
+2. 检查栏数、阅读顺序、跨栏图片和页眉页脚。
+3. 检查表格行、公式、图片和图注是否完整。
+4. 对照字号、行距、对齐、段落间距和字体。
 
 Markdown 主要检查文本顺序、标题层级、表格语法和图片路径。它不负责复刻页面版式。
 
-## 记录问题
+## 问题记录
 
-发现回归时，至少保留原图、执行命令、`run_manifest.json`、对应样本目录和渲染截图。描述问题时指出页面位置和现象，例如“第二栏末行被裁掉”，比只写“排版不对”更容易复现。
+发现回归时，应保留原图、执行命令、`run_manifest.json`、对应样本目录和渲染截图。问题描述应包含页面位置和具体现象，例如“第二栏末行被裁掉”，以便稳定复现。

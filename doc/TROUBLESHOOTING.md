@@ -1,6 +1,6 @@
 # 常见问题
 
-下面的问题按实际排查顺序整理。命令默认从仓库根目录执行。
+以下问题按建议的排查顺序整理。命令默认从仓库根目录执行。
 
 ## `No module named ...`
 
@@ -38,7 +38,7 @@ Code/models/font/mobilenetv3.ckpt
 
 ## PDF 没有生成
 
-先看系统能否找到 LibreOffice：
+执行以下命令确认系统可以找到 LibreOffice：
 
 ```bash
 soffice --version
@@ -54,19 +54,19 @@ python Code/test.py --input dataset/exam_paper_02.png --output test-result --for
 
 ## Word 和 LibreOffice 的页数不同
 
-两者的字体度量和分页行为并不完全一致。程序会检查 LibreOffice 导出的 PDF 页数，但无法预先知道另一台电脑上的 Word 会怎样分页。
+两者的字体度量和分页行为并不完全一致。程序会检查 LibreOffice 导出的 PDF 页数，但无法预判其他环境中 Microsoft Word 的分页结果。
 
 先确认使用的是同一份 DOCX，再比较发生换页前的字号、行距和表格高度。如果只在 Word 中多出空白页，记录 Word 版本，并同时保留 LibreOffice 的 PDF 作为对照。
 
 ## 运行很慢
 
-第一次运行会加载多个模型，比后续单页处理慢。输入是 PDF 时，可以把 `--pdf-dpi` 从 `200` 调到 `150` 试跑；图片输入不受这个参数影响。
+首次运行需要加载多个模型，耗时通常高于后续单页处理。输入为 PDF 时，可将 `--pdf-dpi` 从 `200` 调整为 `150` 进行初步验证；图片输入不受该参数影响。
 
 debug 图也会占用一些时间和磁盘。只做吞吐测试时加上 `--no-debug-vis`。
 
 ## ONNX Runtime 打印形状警告
 
-`MergeShapeInfo` 或 `VerifyOutputSizes` 一类信息来自 ONNX Runtime。只要命令最后显示“全部样本处理成功”，并且 `run_manifest.json` 中的 `failures` 为空，就可以把这些行当作运行时警告。若进程同时退出或结果缺失，请保留完整日志。
+`MergeShapeInfo` 或 `VerifyOutputSizes` 一类信息来自 ONNX Runtime。若命令最终显示“全部样本处理成功”，且 `run_manifest.json` 中的 `failures` 为空，这些信息可作为运行时警告处理。若进程退出或结果缺失，请保留完整日志。
 
 ## `No ccache found`
 
@@ -86,6 +86,6 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 
 重新打开 PowerShell 后再执行 `.\.venv\Scripts\Activate.ps1`。
 
-## 提交一个可复现问题
+## 提交可复现问题
 
-请附上原始输入、执行命令、操作系统和 Python 版本、终端日志，以及失败样本的完整输出目录。版面问题再加一张标出位置的截图，通常就足够定位。
+问题材料应包括原始输入、执行命令、操作系统和 Python 版本、终端日志，以及失败样本的完整输出目录。版面问题还应附带标注位置的截图。
