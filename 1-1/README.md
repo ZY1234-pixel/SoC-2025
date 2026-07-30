@@ -26,12 +26,6 @@
 |:----:|:--------:|:---------:|
 | <img src="doc/assets/readme/eastmoney_01/original.jpg" width="320"> | <img src="doc/assets/readme/eastmoney_01/layout.jpg" width="320"> | <img src="doc/assets/readme/eastmoney_01/rendered.jpg" width="320"> |
 
-该样本的 DOCX 同时包含宋体、黑体、楷体和仿宋。以下局部对照展示标题、栏目标签和正文的字体差异。
-
-| 原图细节 | DOCX 字体还原 |
-|:--------:|:-------------:|
-| <img src="doc/assets/readme/eastmoney_01/font_detail_original.jpg" width="480"> | <img src="doc/assets/readme/eastmoney_01/font_detail_rendered.jpg" width="480"> |
-
 ### 报纸：四栏、跨栏图片和两行图注
 
 | 原图 | 版面分析 | DOCX 渲染 |
