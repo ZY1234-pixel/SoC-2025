@@ -51,5 +51,5 @@ def test_font_classifier_defaults_are_the_trained_acceptance_contract() -> None:
 
     assert classifier.reject_threshold == 0.6
     assert classifier.margin_threshold == 0.25
-    assert classifier.transform.grayscale is False
+    assert classifier.transform.grayscale is True
     assert classifier.checkpoint_path.name == "mobilenetv3.ckpt"

@@ -744,6 +744,20 @@ class DocumentAnalyzer:
             else None
         )
 
+        body_font_counts = Counter(
+            font
+            for element, _size, base, font, _color, _stroke_ratio in samples
+            if base == "body"
+            and element.kind == "paragraph_group"
+            and len(element.text) >= 40
+            and element.payload.get("font_family")
+        )
+        body_font = None
+        if sum(body_font_counts.values()) >= 3:
+            candidate, support = body_font_counts.most_common(1)[0]
+            if support * 2 > sum(body_font_counts.values()):
+                body_font = candidate
+
         weighted_samples = []
         for element, size, base, font, color, stroke_ratio in samples:
             bold = bool(
@@ -753,6 +767,8 @@ class DocumentAnalyzer:
                 and float(stroke_ratio) >= regular_stroke * 1.08
                 and float(stroke_ratio) - regular_stroke >= max(0.006, float(stroke_spread) * 2.5)
             )
+            if base == "heading" and not bold and not element.payload.get("font_family") and body_font:
+                font = body_font
             weighted_samples.append((element, size, base, font, color, bold))
         samples = weighted_samples
 

@@ -785,6 +785,39 @@ def test_style_clustering_preserves_a_distinct_confident_font_role() -> None:
     assert by_id[assignments["accent"]].font_family == "仿宋"
 
 
+def test_style_clustering_uses_body_font_for_an_uncertain_regular_heading() -> None:
+    bodies = tuple(
+        SemanticElement(
+            f"body-{index}",
+            "paragraph_group",
+            Rect(100, 100 + index * 100, 900, 170 + index * 100),
+            index,
+            (f"body-{index}-raw",),
+            text="正文段落内容" * 10,
+            payload={
+                "lines": ("第一行", "第二行", "第三行"),
+                "font_family": "楷体",
+                "font_prediction": {"accepted": True, "margin": 0.8},
+            },
+        )
+        for index in range(3)
+    )
+    heading = SemanticElement(
+        "uncertain-heading",
+        "heading",
+        Rect(100, 450, 900, 500),
+        4,
+        ("heading-raw",),
+        text="标题文本",
+        payload={"lines": ("标题文本",), "font_prediction": {"accepted": False, "margin": 0.02}},
+    )
+
+    roles, assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, bodies + (heading,)),))
+    by_id = {role.role_id: role for role in roles}
+
+    assert by_id[assignments["uncertain-heading"]].font_family == "楷体"
+
+
 def test_style_clustering_unifies_moderate_body_size_noise() -> None:
     elements = tuple(
         SemanticElement(

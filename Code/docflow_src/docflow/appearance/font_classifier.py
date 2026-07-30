@@ -98,7 +98,7 @@ class FontClassifier:
         temperature: float = 1.0,
         reject_threshold: float = 0.6,
         margin_threshold: float = 0.25,
-        grayscale: bool = False,
+        grayscale: bool = True,
         binarize: bool = False,
         contrast: float = 1.0,
         invert: bool = False,
