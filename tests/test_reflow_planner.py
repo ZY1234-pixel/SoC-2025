@@ -1230,6 +1230,43 @@ def test_single_visual_pair_forms_a_local_grid() -> None:
     assert len(page.sections[1].column_widths_pt) == 2
 
 
+def test_page_columns_take_priority_over_a_local_visual_pair() -> None:
+    anchors = tuple(
+        _element(
+            f"anchor-{column}-{row}",
+            (50 + column * 225, 500 + row * 100, 250 + column * 225, 580 + row * 100),
+            row,
+        )
+        for column in range(4)
+        for row in range(2)
+    )
+    band = (
+        _element("left", (50, 100, 250, 300), 1),
+        _element("left-lower", (50, 320, 250, 400), 2),
+        _element("middle-left", (275, 100, 475, 300), 2),
+        _element("middle-left-lower", (275, 320, 475, 400), 3),
+        _element("middle-right", (500, 100, 700, 180), 3),
+        _element("middle-right-lower", (500, 400, 700, 480), 4),
+        _element("chart", (500, 200, 700, 380), 4, text="", kind="figure_group"),
+        _element("right", (725, 100, 925, 300), 5),
+    )
+    fallback_lanes = tuple(
+        tuple(item for item in anchors if item.element_id.startswith(f"anchor-{column}-"))
+        for column in range(4)
+    )
+
+    section, placement = ReflowPlanner()._narrow_section(
+        band,
+        Rect(50, 0, 925, 700),
+        550,
+        0,
+        fallback_lanes,
+    )
+
+    assert len(section.column_widths_pt) == 4
+    assert {placement[item.element_id] for item in band if item.kind == "paragraph_group"} == {0, 1, 2, 3}
+
+
 def test_edge_figure_with_continuous_text_becomes_wrapped_flow() -> None:
     elements = (
         _element("left-1", (100, 100, 500, 180), 1),

@@ -45,3 +45,19 @@ def test_background_extent_follows_connected_band_beyond_text_box():
     extent = infer_background_extent(image, (70, 20, 160, 60), "#466EA0")
 
     assert extent == (30.0, 20.0, 270.0, 60.0)
+
+
+def test_background_extent_does_not_merge_a_light_band_with_the_white_page():
+    image = np.full((100, 300, 3), 255, dtype=np.uint8)
+    image[40:60, 80:220] = (229, 238, 245)
+
+    extent = infer_background_extent(image, (100, 40, 200, 60), "#E5EEF5")
+
+    assert extent == (80.0, 40.0, 220.0, 60.0)
+
+
+def test_background_extent_keeps_only_the_local_band_of_an_adjacent_image():
+    image = np.full((160, 300, 3), 255, dtype=np.uint8)
+    image[20:120, 80:220] = (229, 238, 245)
+
+    assert infer_background_extent(image, (100, 100, 180, 120), "#E5EEF5") == (80.0, 100.0, 220.0, 120.0)

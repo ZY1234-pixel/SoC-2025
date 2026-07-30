@@ -531,7 +531,9 @@ class ReflowPlanner:
             section_id = f"section_{section_index}"
             return FlowSection(section_id, FlowKind.SINGLE, (elements[0].element_id,)), {elements[0].element_id: 0}
         lanes = self._anchor_lanes(elements, bounds.width)
-        if len(lanes) < 2:
+        if len(fallback_lanes) >= 2 and self._uses_all_lanes(elements, fallback_lanes):
+            lanes = list(fallback_lanes)
+        elif len(lanes) < 2:
             lanes = (
                 self._local_visual_lanes(elements, bounds.width)
                 or (list(fallback_lanes) if len(fallback_lanes) >= 2 else lanes)
@@ -866,6 +868,29 @@ class ReflowPlanner:
                 ):
                     rails.append([item])
         return rails
+
+    @staticmethod
+    def _uses_all_lanes(elements, lanes) -> bool:
+        lane_bounds = [
+            (
+                median(ReflowPlanner._layout_bbox(item).x1 for item in lane),
+                median(ReflowPlanner._layout_bbox(item).x2 for item in lane),
+            )
+            for lane in lanes
+        ]
+        covered = set()
+        for item in elements:
+            bbox = ReflowPlanner._layout_bbox(item)
+            overlaps = [
+                index
+                for index, (left, right) in enumerate(lane_bounds)
+                if max(0.0, min(bbox.x2, right) - max(bbox.x1, left))
+                / max(min(bbox.width, right - left), 1.0)
+                >= 0.30
+            ]
+            if len(overlaps) == 1:
+                covered.add(overlaps[0])
+        return len(covered) == len(lane_bounds)
 
     @staticmethod
     def _anchor_lanes(elements, page_width: float):

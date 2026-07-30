@@ -34,7 +34,10 @@ def infer_background_extent(
         target = np.array([int(color[index : index + 2], 16) for index in (1, 3, 5)], dtype=np.int16)
     except ValueError:
         return None
-    mask = (np.linalg.norm(image_rgb.astype(np.int16) - target, axis=2) <= 48).astype(np.uint8)
+    border = np.concatenate((image_rgb[0], image_rgb[-1], image_rgb[:, 0], image_rgb[:, -1]))
+    page_color = np.median(border, axis=0)
+    tolerance = min(48.0, max(12.0, np.linalg.norm(target - page_color) * 0.45))
+    mask = (np.linalg.norm(image_rgb.astype(np.int16) - target, axis=2) <= tolerance).astype(np.uint8)
     count, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if count <= 1:
         return None
@@ -53,6 +56,9 @@ def infer_background_extent(
     if overlaps[label] < max((x2 - x1) * (y2 - y1) * 0.08, 16):
         return None
     left, top, region_width, region_height, _area = stats[label]
+    box_height = y2 - y1
+    if region_height > max(box_height * 3, box_height + 12):
+        top, region_height = y1, box_height
     return float(left), float(top), float(left + region_width), float(top + region_height)
 
 
