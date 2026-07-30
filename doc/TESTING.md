@@ -11,19 +11,18 @@
 
 ## 2. 主测试命令
 
-在 `Code/` 目录运行：
-
 ```bash
-python test.py --input <输入路径> --output <输出路径> --formats <格式列表>
+python Code/test.py --input <输入路径> --output <输出路径> --formats <格式列表>
 ```
 
 参数说明：
 
-- `--input/-i`：输入文件或目录，默认 `../dataset`
-- `--output/-o`：结果根目录，默认 `../test-result`
+- `--input/-i`：输入文件或目录，默认 `dataset/`
+- `--output/-o`：结果根目录，默认 `test-result/`
 - `--formats/-f`：输出格式，支持 `docx,markdown,pdf`
 - `--pdf-dpi`：PDF 转图片 DPI，默认 `200`
 - `--no-debug-vis`：关闭可视化图导出
+- `--layout-model`：选择版面分析模型，默认 `pp-doclayout-v3`
 
 ## 3. 推荐测试流程
 
@@ -32,7 +31,7 @@ python test.py --input <输入路径> --output <输出路径> --formats <格式�
 用于确认环境、模型和主流程可跑通：
 
 ```bash
-python test.py --input ../dataset/exam_paper_02.png --output ../test-result --formats docx,markdown
+python Code/test.py --input dataset/exam_paper_02.png --output test-result --formats docx,markdown
 ```
 
 通过标准：
@@ -46,7 +45,7 @@ python test.py --input ../dataset/exam_paper_02.png --output ../test-result --fo
 用于验证主流程稳定性：
 
 ```bash
-python test.py --input ../dataset --output ../test-result --formats docx,markdown
+python Code/test.py --input dataset --output test-result --formats docx,markdown
 ```
 
 通过标准：
@@ -60,7 +59,7 @@ python test.py --input ../dataset --output ../test-result --formats docx,markdow
 在系统可用 `soffice` 的前提下执行：
 
 ```bash
-python test.py --input ../dataset --output ../test-result --formats docx,markdown,pdf
+python Code/test.py --input dataset --output test-result --formats docx,markdown,pdf
 ```
 
 通过标准：
@@ -91,9 +90,9 @@ python test.py --input ../dataset --output ../test-result --formats docx,markdow
 
 ### 4.4 Debug 可视化
 
-检查 `test-result/run_xxx/samples/<样例名>/debug/` 下的：
+检查 `test-result/run_xxx/<样例名>/debug/` 下的：
 
 - `page_0001.layout_ocr.jpg`
-- `page_0001.sorted_layout.jpg`
+- `page_0001.reading_order_columns.jpg`
 
 重点看检测框、排序顺序和最终版面块是否符合直觉。

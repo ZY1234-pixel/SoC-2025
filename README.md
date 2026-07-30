@@ -1,114 +1,200 @@
-# 图片文本解析与矢量化转换
+# DocFlow 图片文档结构化还原
 
-图片型文档的版面分析与结构化还原模块。输入扫描图片 / PDF，输出保留原始排版结构的 DOCX、Markdown 与 PDF。
+DocFlow 将扫描图片或 PDF 转换为可编辑的 DOCX、Markdown 和 PDF。当前分支采用流式排版：保留阅读顺序、分栏、表格、图片和主要样式，并严格约束源页面与输出页面一一对应。
 
-![pipeline](https://img.shields.io/badge/pipeline-OCR--%3ELayout--%3EReconstruction-blue)
+本项目优先保证内容可编辑和文档结构可维护，不以文本框绝对定位的方式逐像素复刻原图。
 
 ## 效果展示
 
-### 学术期刊论文（双栏 + 公式 + 表格）
+以下结果均由当前流式排版流程生成，第三列是 DOCX 经 LibreOffice 渲染后的页面。
 
-| 原图 | 版面分析 | 还原输出 |
-|:----:|:--------:|:--------:|
-| <img src="test-result/.examples/academic-paper/01_original.png" width="320"> | <img src="test-result/.examples/academic-paper/02_layout.png" width="320"> | <img src="test-result/.examples/academic-paper/03_rendered.png" width="320"> |
+### 学术论文：双栏、公式与复杂表格
 
-### 报纸版面（多栏 + 混排）
+| 原图 | 版面分析 | DOCX 渲染 |
+|:----:|:--------:|:---------:|
+| <img src="doc/assets/readme/academic_paper_01/original.jpg" width="320"> | <img src="doc/assets/readme/academic_paper_01/layout.jpg" width="320"> | <img src="doc/assets/readme/academic_paper_01/rendered.jpg" width="320"> |
 
-| 原图 | 版面分析 | 还原输出 |
-|:----:|:--------:|:--------:|
-| <img src="test-result/.examples/newspaper/01_original.png" width="320"> | <img src="test-result/.examples/newspaper/02_layout.png" width="320"> | <img src="test-result/.examples/newspaper/03_rendered.png" width="320"> |
+### 复杂表格：原生可编辑表格与单页约束
 
-### 杂志图文（图文混排 + 双栏）
+| 原图 | 版面分析 | DOCX 渲染 |
+|:----:|:--------:|:---------:|
+| <img src="doc/assets/readme/docstructbench_01/original.jpg" width="320"> | <img src="doc/assets/readme/docstructbench_01/layout.jpg" width="320"> | <img src="doc/assets/readme/docstructbench_01/rendered.jpg" width="320"> |
 
-| 原图 | 版面分析 | 还原输出 |
-|:----:|:--------:|:--------:|
-| <img src="test-result/.examples/magazine/01_original.png" width="320"> | <img src="test-result/.examples/magazine/02_layout.png" width="320"> | <img src="test-result/.examples/magazine/03_rendered.png" width="320"> |
+### 金融研报：密集双栏、图表与中文样式
 
-### 中文图书（段落 + 图片）
+| 原图 | 版面分析 | DOCX 渲染 |
+|:----:|:--------:|:---------:|
+| <img src="doc/assets/readme/eastmoney_02/original.jpg" width="320"> | <img src="doc/assets/readme/eastmoney_02/layout.jpg" width="320"> | <img src="doc/assets/readme/eastmoney_02/rendered.jpg" width="320"> |
 
-| 原图 | 版面分析 | 还原输出 |
-|:----:|:--------:|:--------:|
-| <img src="test-result/.examples/book/01_original.png" width="320"> | <img src="test-result/.examples/book/02_layout.png" width="320"> | <img src="test-result/.examples/book/03_rendered.png" width="320"> |
+### 报纸：四栏、跨栏图片与图注
 
----
+| 原图 | 版面分析 | DOCX 渲染 |
+|:----:|:--------:|:---------:|
+| <img src="doc/assets/readme/newspaper_01/original.jpg" width="320"> | <img src="doc/assets/readme/newspaper_01/layout.jpg" width="320"> | <img src="doc/assets/readme/newspaper_01/rendered.jpg" width="320"> |
 
 ## 快速开始
 
-### 环境准备
+### 环境要求
+
+- Python 3.9，支持 Linux 和 Windows
+- 完整的 `Code/models/` 模型目录
+- 输出 PDF 时需要 LibreOffice，并确保 `libreoffice` 或 `soffice` 位于 `PATH`
+
+### Linux
 
 ```bash
-cd Code
-python -m venv .venv
+python3.9 -m venv .venv
 source .venv/bin/activate
-pip install -r requirement.txt
-pip install wheels/vecdoc-0.5.0-py3-none-any.whl
+python -m pip install --upgrade pip
+python -m pip install -r Code/requirement.txt
 ```
 
-### 运行测试
+### Windows PowerShell
+
+```powershell
+py -3.9 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r Code\requirement.txt
+```
+
+代码直接从 `Code/docflow_src/` 加载，不需要额外安装项目 wheel。
+
+### 单样本验证
 
 ```bash
-python test.py -i ../dataset -o ../test-result -f docx,markdown
+python Code/test.py \
+  --input dataset/exam_paper_02.png \
+  --output test-result \
+  --formats docx,markdown
 ```
 
-输出会按时间戳归档到 `test-result/run_YYYYMMDD_HHMMSS/` 目录下，每个样本包含 JSON 中间结果、DOCX / Markdown / PDF 输出文件以及 debug 可视化图。
+### 全量测试
 
-**Windows (PowerShell)** 只需将路径分隔符改为 `\`，虚拟环境激活改为 `.\.venv\Scripts\Activate.ps1`，其余命令相同。
-
-需要 PDF 输出的话，加上 `pdf` 格式并确保系统已安装 LibreOffice。
-
-## 流水线
-
-```
-图片 / PDF
-  → PP-DocLayoutV3 + PP-OCRv6（保留 Model Order 与原始识别证据）
-  → Document Analysis（语义组合、来源追踪、文档级样式角色）
-  → Reflow Layout Plan（Single / Sequential Columns / Grid + 单次 Page Fit）
-  → 机械生成 DOCX / Markdown
-  → LibreOffice 从最终 DOCX 导出 PDF
+```bash
+python Code/test.py \
+  --input dataset \
+  --output test-result \
+  --formats docx,markdown,pdf
 ```
 
-每个源页面严格对应一个输出页面。规划阶段只做一次静态缩放计算，生成后只验收、不重新生成；中间 Evidence、Analysis 和 Plan 均写入 JSON。
+常用参数：
 
-## 输出格式
-
-| 格式 | 说明 |
+| 参数 | 说明 |
 |------|------|
-| **DOCX** | 保留字号、对齐、多栏、表格、图片等排版信息，可直接用 Word 编辑 |
-| **Markdown** | 适合二次加工，标题层级、表格、图片引用均保留 |
-| **PDF** | 通过 LibreOffice 从 DOCX 转换 |
+| `--input`, `-i` | 输入图片、PDF 或目录，默认 `dataset/` |
+| `--output`, `-o` | 结果根目录，默认 `test-result/` |
+| `--formats`, `-f` | `docx,markdown,pdf` 的任意组合 |
+| `--layout-model` | 选择版面分析模型，默认 `pp-doclayout-v3` |
+| `--pdf-dpi` | PDF 转图片的 DPI，默认 `200` |
+| `--no-debug-vis` | 不生成版面分析可视化图 |
+
+## 处理流程
+
+```text
+图片 / PDF
+  -> PP-DocLayoutV3 + PP-OCRv6
+  -> Recognition Evidence
+  -> Document Analysis
+  -> Reflow Layout Plan
+  -> DOCX / Markdown Renderer
+  -> LibreOffice 导出 PDF（可选）
+```
+
+- **Recognition Evidence**：保存模型阅读顺序、OCR 行、原始区域和来源标识。
+- **Document Analysis**：组合段落、标题、表格、图片、公式及图注，并推断文档级样式角色。
+- **Reflow Layout Plan**：在 `single_flow`、`sequential_columns` 和 `grid_flow` 中选择页面结构，统一规划间距与单页缩放。
+- **Renderer**：机械执行布局计划，不在渲染阶段重新推断版面。
+
+规划阶段仅执行一次静态页容量计算，不使用“生成 DOCX、检测分页、反复缩放重生成”的闭环。
+
+## 当前能力
+
+- 段落、标题和图注保持可编辑，支持字号、行距、对齐、颜色及字重推断。
+- 中文字体识别支持宋体、黑体、楷体和仿宋。
+- 表格还原为原生可编辑 Word 表格，并保留跨行、跨列和主要边框样式。
+- 支持单栏、多栏、规则网格、跨栏图片、图文混排、公式和页眉页脚。
+- 每个源页面对应一个输出页面，页面规划会在必要时进行一次保守缩放。
+- Evidence、Analysis 和 Render Plan 均保留为 JSON，便于定位识别、分析或渲染问题。
+
+## 输出目录
+
+每次执行会创建独立的时间戳目录：
+
+```text
+test-result/
+└── run_YYYYMMDD_HHMMSS/
+    ├── run_manifest.json
+    ├── _runtime/
+    └── <样本名>/
+        ├── raw_result.json
+        ├── <样本名>.recognition.json
+        ├── <样本名>.json
+        ├── <样本名>.render_plan.json
+        ├── <样本名>.docx
+        ├── <样本名>.md
+        ├── <样本名>.pdf
+        ├── <样本名>_assets/
+        └── debug/
+            ├── page_0001.layout_ocr.jpg
+            └── page_0001.reading_order_columns.jpg
+```
+
+未请求的输出格式不会生成；`raw_result.json` 和 `debug/` 可通过 `--no-debug-vis` 关闭。
+
+## 模型文件
+
+运行前应确保以下模型存在：
+
+```text
+Code/models/
+├── layout/pp-doclayout-v3/PP-DocLayoutV3.onnx
+├── det/ch/PP-OCRv6_small_det/PP-OCRv6_small_det.onnx
+├── rec/ch/PP-OCRv6_small_rec/PP-OCRv6_small_rec.onnx
+├── table/SLANet_plus/SLANet_plus.onnx
+└── font/mobilenetv3.ckpt
+```
+
+模型下载：百度网盘 [SoC_1-1](https://pan.baidu.com/s/12ouE5owq8Ii_KigQzOeirQ)，提取码 `4phe`。解压后放入 `Code/models/`。
+
+## 测试与验收
+
+运行单元测试：
+
+```bash
+pytest -q
+```
+
+版面质量以渲染结果人工对照原图验收，重点检查：
+
+- 阅读顺序、栏结构和跨栏范围
+- 字号、行距、对齐和段落间距
+- 图片比例、图注位置和表格完整性
+- 输出页数是否与源页面一致
+
+主流程还会自动检查 Evidence 来源完整性、原生表格数量和 PDF 页数。
+
+## 能力边界
+
+- 当前方向是可编辑的流式 DOCX，不是基于绝对定位文本框的像素级 Replica DOCX。
+- DOCX 在 Microsoft Word 与 LibreOffice 中可能存在字体度量和分页差异。
+- OCR 或版面检测错误会传递到后续结构分析，优先通过 `debug/` 和三阶段 JSON 定位问题。
 
 ## 目录结构
 
-```
+```text
 .
 ├── dataset/              # 测试样本
-├── Code/                 # 源码与运行时
-│   ├── docflow_src/      # 核心源码
-│   ├── models/           # 版面 / 检测 / 识别 / 表格模型
-│   ├── third_party/      # PaddleOCR 最小运行时
-│   ├── wheels/           # Wheel 包
-│   ├── test.py           # 测试入口
+├── Code/
+│   ├── docflow_src/      # 分析、规划与渲染源码
+│   ├── models/           # 版面、OCR、表格与字体模型
+│   ├── third_party/      # PaddleOCR 运行时
+│   ├── test.py           # 全流程入口
 │   └── requirement.txt   # Python 依赖
-├── test-result/          # 运行输出
-├── doc/                  # 详细文档
-│   ├── DEPLOYMENT.md     # 部署说明
-│   ├── TESTING.md        # 测试流程
-│   └── TROUBLESHOOTING.md
+├── tests/                # 单元测试
+├── test-result/          # 本地运行结果
+├── doc/                  # 部署、测试与设计文档
 └── README.md
 ```
 
-## 模型与数据
-
-版面检测、OCR 识别、表格结构等模型文件：
-
-- 百度网盘：[SoC_1-1](https://pan.baidu.com/s/12ouE5owq8Ii_KigQzOeirQ) 提取码：`4phe`
-
-解压后放入 `Code/models/` 目录。
-
-## 常见问题
-
-- **模型找不到**：确认 `Code/models/` 下模型目录结构正确，可参考 `doc/DEPLOYMENT.md`
-- **PDF 输出失败**：检查 LibreOffice 是否安装且 `soffice` 在 PATH 中
-- **版面还原偏差**：debug 目录下的 `*_layout_ocr.jpg` 和 `*_sorted_layout.jpg` 会展示版面检测和排序结果，有助于定位问题
-
-更多细节见 `doc/` 目录。
+详细说明见 [部署指南](doc/DEPLOYMENT.md)、[测试手册](doc/TESTING.md) 和 [故障排查](doc/TROUBLESHOOTING.md)。

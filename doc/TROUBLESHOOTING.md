@@ -2,12 +2,13 @@
 
 ## 1. 报错 `No module named ...`
 
-说明 Python 依赖未安装完整。请在 `Code/` 目录重新执行：
+说明 Python 依赖未安装完整。请在项目根目录重新执行：
 
 ```bash
-python -m pip install -r requirement.txt
-python -m pip install wheels/docflow-0.3.0-py3-none-any.whl
+python -m pip install -r Code/requirement.txt
 ```
+
+测试入口直接加载 `Code/docflow_src/`，无需安装项目 wheel。
 
 ## 2. 报错“缺少必要运行资产”
 
@@ -16,10 +17,11 @@ python -m pip install wheels/docflow-0.3.0-py3-none-any.whl
 - `Code/third_party/paddle_runtime/ppstructure`
 - `Code/third_party/paddle_runtime/ppocr`
 - `Code/third_party/paddle_runtime/tools`
-- `Code/models/layout/doclayout_yolo_docstructbench_headfloat100_runtime`
-- `Code/models/det/ch/PP-OCRv5_mobile_det_infer`
-- `Code/models/rec/ch/PP-OCRv5_mobile_rec_infer`
-- `Code/models/table/SLANet_plus_infer`
+- `Code/models/layout/pp-doclayout-v3/PP-DocLayoutV3.onnx`
+- `Code/models/det/ch/PP-OCRv6_small_det/PP-OCRv6_small_det.onnx`
+- `Code/models/rec/ch/PP-OCRv6_small_rec/PP-OCRv6_small_rec.onnx`
+- `Code/models/table/SLANet_plus/SLANet_plus.onnx`
+- `Code/models/font/mobilenetv3.ckpt`
 
 ## 3. PDF 输出失败
 
@@ -32,10 +34,10 @@ python -m pip install wheels/docflow-0.3.0-py3-none-any.whl
 可先执行：
 
 ```bash
-python test.py --input ../dataset --output ../test-result --formats docx,markdown
+python Code/test.py --input dataset --output test-result --formats docx,markdown
 ```
 
-成功后请到 `test-result/run_xxx/samples/<样例名>/` 下查看结果。
+成功后请到 `test-result/run_xxx/<样例名>/` 下查看结果。
 
 ## 4. Windows 无法激活虚拟环境
 
