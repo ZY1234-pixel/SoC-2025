@@ -158,6 +158,20 @@ def test_planner_uses_sequential_columns_when_model_order_finishes_each_lane() -
     assert section.row_heights_pt == pytest.approx((400 * 841.89 / 1400,))
 
 
+def test_sequential_columns_repair_model_order_within_each_lane() -> None:
+    elements = (
+        _element("left-body", (100, 180, 430, 300), 1),
+        _element("left-heading", (100, 140, 430, 170), 2, kind="heading"),
+        _element("right-body", (570, 180, 900, 300), 3),
+        _element("right-heading", (570, 140, 900, 170), 4, kind="heading"),
+    )
+
+    section = ReflowPlanner().plan(_analysis(elements)).pages[0].sections[0]
+
+    assert section.kind == FlowKind.SEQUENTIAL_COLUMNS
+    assert section.element_ids == ("left-heading", "left-body", "right-heading", "right-body")
+
+
 def test_full_width_paragraphs_do_not_become_a_third_column_lane() -> None:
     elements = (
         _element("wide-1", (100, 50, 900, 120), 1),
@@ -1167,7 +1181,7 @@ def test_page_geometry_floor_is_counted_once_across_model_order_sections() -> No
     assert [section.element_ids for section in page.sections] == [
         ("early-second", "early-right"),
         ("separator",),
-        ("late-first", "middle-last", "right-last"),
+        ("middle-last", "late-first", "right-last"),
     ]
 
 

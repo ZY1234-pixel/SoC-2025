@@ -99,7 +99,10 @@ def resolve_text_layout(element, role, container_width_pt: float, fit_scale: flo
         font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
         font_width_scale = 100
         fit_source_width = element.kind == "heading" or preserve_lines
-        if len(lines) > 1 and not tabular and fit_source_width:
+        if element.kind == "heading" and lines and not tabular:
+            line_widths = (max(available_width - first_indent, 1.0),) + (available_width,) * (len(lines) - 1)
+            font_size = fit_font_size_to_lines(font_size, lines, line_widths, 0.98)
+        elif len(lines) > 1 and not tabular and fit_source_width:
             line_widths = (max(available_width - first_indent, 1.0),) + (available_width,) * (len(lines) - 1)
             fitted_size = fit_font_size_to_lines(
                 font_size,

@@ -746,6 +746,13 @@ class DocumentAnalyzer:
                 if element.text_structure.orientation == "vertical":
                     line_count = max(sum(not char.isspace() for char in element.text), 1)
                     raw_size = content_bbox.height / line_count * scale / 1.05
+                elif element.kind == "heading" and line_count == 1:
+                    primary_bbox = (
+                        Rect.from_sequence(element.payload["primary_bbox"])
+                        if element.payload.get("primary_bbox")
+                        else element.bbox
+                    )
+                    raw_size = primary_bbox.height * scale / 1.05
                 elif line_heights and element.content_bbox is not None:
                     font = element.payload.get("font_family") or (
                         "黑体" if element.kind == "heading" else "宋体"

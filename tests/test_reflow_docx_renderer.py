@@ -226,7 +226,7 @@ def test_renderer_executes_resolved_text_layout_without_reinferring_payload() ->
     assert paragraph.paragraph_format.line_spacing.pt == 11
 
 
-def test_single_line_text_is_sized_to_its_source_width() -> None:
+def test_single_line_heading_fits_with_uniform_font_scaling() -> None:
     role = TypographicRole("heading", "黑体", "Times New Roman", 16, 1.0)
     element = SemanticElement(
         "heading",
@@ -244,8 +244,8 @@ def test_single_line_text_is_sized_to_its_source_width() -> None:
     paragraph = document.paragraphs[0]
     run = paragraph.runs[0]
 
-    assert run.font.size.pt == pytest.approx(round(role.font_size_pt * plan.pages[0].fit_scale * 2) / 2)
-    assert int(run._element.rPr.find(qn("w:w")).get(qn("w:val"))) < 100
+    assert run.font.size.pt <= round(role.font_size_pt * plan.pages[0].fit_scale * 2) / 2
+    assert run._element.rPr.find(qn("w:w")) is None
     assert paragraph._p.pPr.find(qn("w:shd")) is not None
 
 
@@ -726,11 +726,8 @@ def test_multiline_heading_font_fits_each_preserved_source_line() -> None:
     ReflowDocxRenderer()._render_element(container, element, {"heading": role}, 1.0, 100)
 
     run = container.paragraphs[-1].runs[0]
-    width_scale = int(run._element.rPr.find(qn("w:w")).get(qn("w:val")))
-    assert width_scale == 50
-    assert run.font.size.pt * width_scale / 100 <= (
-        100 * 0.90 / estimate_text_units("A deliberately long heading") + 0.1
-    )
+    assert run._element.rPr.find(qn("w:w")) is None
+    assert run.font.size.pt <= 100 * 0.98 / estimate_text_units("A deliberately long heading") + 0.1
 
 
 def test_centered_source_rows_fit_without_word_adding_wraps() -> None:

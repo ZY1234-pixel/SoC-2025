@@ -720,6 +720,14 @@ class ReflowPlanner:
                 available = max(usable_width - gutter * (len(logical_frames) - 1), 1.0)
                 frame_widths = [right - left for left, right in logical_frames]
                 column_widths = tuple(width / max(sum(frame_widths), 1.0) * available for width in frame_widths)
+            element_ids = tuple(
+                item.element_id
+                for column in sorted(set(placement.values()))
+                for item in sorted(
+                    (item for item in elements if placement[item.element_id] == column),
+                    key=lambda value: (self._layout_bbox(value).y1, self._layout_bbox(value).x1),
+                )
+            )
             return FlowSection(
                 section_id,
                 FlowKind.SEQUENTIAL_COLUMNS,

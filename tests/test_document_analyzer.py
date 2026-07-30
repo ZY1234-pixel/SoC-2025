@@ -699,6 +699,26 @@ def test_style_clustering_absorbs_a_noisy_long_paragraph_size() -> None:
     assert len(set(assignments.values())) == 1
 
 
+def test_single_line_heading_size_uses_region_height_instead_of_glyph_ink() -> None:
+    headings = tuple(
+        SemanticElement(
+            f"heading-{index}",
+            "heading",
+            Rect(100, 100 + index * 60, 700, 140 + index * 60),
+            index,
+            (f"raw-{index}",),
+            text=f"{chr(65 + index)}. Section heading",
+            payload={"lines": ("Section heading",), "line_heights_px": (ink_height,)},
+        )
+        for index, ink_height in enumerate((22, 30, 35))
+    )
+
+    roles, assignments = DocumentAnalyzer()._infer_roles((AnalysisPage(0, 1000, 1400, headings),))
+
+    assert len(roles) == 1
+    assert len(set(assignments.values())) == 1
+
+
 def test_style_clustering_raises_a_clipped_single_line_paragraph_to_body_consensus() -> None:
     elements = tuple(
         SemanticElement(
