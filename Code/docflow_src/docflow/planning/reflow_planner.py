@@ -29,7 +29,7 @@ from docflow.planning.text_metrics import (
 
 
 class ReflowPlanner:
-    GRID_WORD_SAFETY_FACTOR = 0.90
+    GRID_WORD_SAFETY_FACTOR = 0.94
 
     def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.94) -> None:
         self.page_long_edge_pt = float(page_long_edge_pt)
@@ -89,12 +89,16 @@ class ReflowPlanner:
         ]
         body = [element for element in page.elements if element not in furniture]
         bounds = self._union(element.bbox for element in body) if body else Rect(0, 0, page.width_px, page.height_px)
+        lower_furniture_top = min(
+            (element.bbox.y1 for element in furniture if element.bbox.y1 >= bounds.y2),
+            default=page.height_px,
+        )
         geometry = PageGeometry(
             width_pt,
             height_pt,
             bounds.y1 * scale,
             (page.width_px - bounds.x2) * scale,
-            (page.height_px - bounds.y2) * scale,
+            (page.height_px - lower_furniture_top) * scale,
             bounds.x1 * scale,
         )
         usable_width = geometry.width_pt - geometry.margin_left_pt - geometry.margin_right_pt
@@ -126,6 +130,14 @@ class ReflowPlanner:
             element.element_id: element.text_structure.hanging_indent_px * scale
             for element in page.elements
         }
+        background_indents = {
+            element.element_id: max(
+                self._content_bbox(element).x1 - self._background_bbox(element).x1,
+                0.0,
+            )
+            * scale
+            for element in page.elements
+        }
         body_font_size = role_by_id[default_body_role].font_size_pt if default_body_role in role_by_id else 10.5
         table_font_sizes = {
             element.element_id: self._table_font_size(element, scale, body_font_size)
@@ -147,7 +159,7 @@ class ReflowPlanner:
                         (
                             self._layout_bbox(element)
                             if element.kind == "figure_group"
-                            else self._content_bbox(element)
+                            else self._background_bbox(element)
                         ).width
                         / container_widths.get(element.element_id, max(bounds.width, 1.0)),
                         1.0,
@@ -158,6 +170,7 @@ class ReflowPlanner:
                         self._first_line_indent(element, scale)
                         - hanging_indents[element.element_id]
                         - option_indents[element.element_id]
+                        + background_indents[element.element_id]
                     ),
                     "left_indent_pt": horizontal_indents.get(
                         element.element_id,
@@ -456,8 +469,9 @@ class ReflowPlanner:
             source_width = max(right - left, 1.0)
             source_lines = element.text_rows or element.payload.get("lines") or ()
             content_bbox = ReflowPlanner._content_bbox(element)
+            visual_bbox = ReflowPlanner._background_bbox(element)
             centered = abs((content_bbox.x1 + content_bbox.x2 - left - right) / 2.0) <= source_width * 0.04
-            width_fraction = content_bbox.width / source_width
+            width_fraction = visual_bbox.width / source_width
             section_kind = section_kinds[element.element_id]
             single_flow_uses_full_width = element.element_id in wrapped_figure_ids or (
                 section_kind == FlowKind.SINGLE and (element.kind == "heading" or width_fraction > 0.85)
@@ -473,7 +487,7 @@ class ReflowPlanner:
                 result[element.element_id] = (
                     0.0
                     if centered or width_fraction > 0.85
-                    else max(content_bbox.x1 - left, 0.0) / source_width * target_widths[element.element_id],
+                    else max(visual_bbox.x1 - left, 0.0) / source_width * target_widths[element.element_id],
                     0.0,
                 )
                 continue
@@ -481,11 +495,11 @@ class ReflowPlanner:
                 result[element.element_id] = (0.0, 0.0)
                 continue
             target_width = target_widths[element.element_id]
-            right_indent = max(right - content_bbox.x2, 0.0) / source_width * target_width
+            right_indent = max(right - visual_bbox.x2, 0.0) / source_width * target_width
             if element.text_structure.preserve_source_lines:
                 right_indent = 0.0
             result[element.element_id] = (
-                max(content_bbox.x1 - left, 0.0) / source_width * target_width,
+                max(visual_bbox.x1 - left, 0.0) / source_width * target_width,
                 right_indent,
             )
         return result
@@ -496,12 +510,21 @@ class ReflowPlanner:
 
     @staticmethod
     def _layout_bbox(element) -> Rect:
-        bbox = element.payload.get("primary_bbox") or element.payload.get("source_bbox")
+        bbox = (
+            element.payload.get("background_bbox")
+            or element.payload.get("primary_bbox")
+            or element.payload.get("source_bbox")
+        )
         return Rect.from_sequence(bbox) if bbox else getattr(element, "bbox", Rect(0, 0, 1, 1))
 
     @staticmethod
     def _content_bbox(element) -> Rect:
         return element.content_bbox or ReflowPlanner._layout_bbox(element)
+
+    @staticmethod
+    def _background_bbox(element) -> Rect:
+        bbox = element.payload.get("background_bbox")
+        return Rect.from_sequence(bbox) if bbox else ReflowPlanner._content_bbox(element)
 
     def _narrow_section(self, elements, bounds: Rect, usable_width: float, section_index: int, fallback_lanes=()):
         if len(elements) == 1:
@@ -598,7 +621,9 @@ class ReflowPlanner:
                 )
             elif members:
                 visual_members = [
-                    item for item in members if item.kind in {"figure_group", "table_group"}
+                    item
+                    for item in members
+                    if item.kind in {"figure_group", "table_group"} or item.payload.get("background_bbox")
                 ]
                 frame_members = visual_members or members
                 updated_lane_bounds.append(
@@ -1396,7 +1421,7 @@ class ReflowPlanner:
                     lines = max(1, math.ceil(units * font_size / max((cell_width - 2.0) * 0.96, 1.0)))
                     row_height = max(row_height, lines * font_size * 1.2)
                 height += row_height + 3.0
-            height = max(height, float(element.payload.get("table_height_pt") or 0.0) * fit_scale)
+            height = max(height, float(element.payload.get("table_height_pt") or 0.0))
             return spacing + height + ReflowPlanner._caption_height(element, fit_scale)
         if role is not None and element.text:
             layouts = resolve_text_layout(element, role, width, fit_scale)

@@ -3,7 +3,12 @@ import base64
 import cv2
 import numpy as np
 
-from docflow.appearance.color_inferrer import infer_crop_style, infer_table_row_fills, infer_table_rule_style
+from docflow.appearance.color_inferrer import (
+    infer_background_extent,
+    infer_crop_style,
+    infer_table_row_fills,
+    infer_table_rule_style,
+)
 
 
 def test_crop_style_and_table_fill_are_inferred_from_region_pixels():
@@ -30,3 +35,13 @@ def test_table_rule_style_distinguishes_horizontal_rules_from_a_grid():
 
     assert infer_table_rule_style(encode(horizontal)) == "horizontal"
     assert infer_table_rule_style(encode(grid)) == "grid"
+
+
+def test_background_extent_follows_connected_band_beyond_text_box():
+    image = np.full((80, 300, 3), 255, dtype=np.uint8)
+    image[20:60, 30:270] = (70, 110, 160)
+    image[30:50, 80:150] = 255
+
+    extent = infer_background_extent(image, (70, 20, 160, 60), "#466EA0")
+
+    assert extent == (30.0, 20.0, 270.0, 60.0)

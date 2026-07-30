@@ -195,12 +195,15 @@ class TextParagraphLayout:
     right_indent_pt: float = 0.0
     right_tab_stop_pt: Optional[float] = None
     layout_reserve_pt: float = 0.0
+    font_width_scale_pct: int = 100
 
     def __post_init__(self) -> None:
         if self.alignment not in {"left", "center", "right", "justify"}:
             raise ValueError("invalid paragraph alignment")
         if self.font_size_pt <= 0 or self.line_height_pt <= 0 or self.rendered_line_count < 1:
             raise ValueError("invalid resolved text dimensions")
+        if not 1 <= self.font_width_scale_pct <= 600:
+            raise ValueError("invalid font width scale")
         if min(
             self.space_before_pt,
             self.left_indent_pt,

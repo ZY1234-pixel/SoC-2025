@@ -18,6 +18,7 @@ from docflow.model.stages import (
     TypographicRole,
 )
 from docflow.planning import ReflowPlanner
+from docflow.planning.text_metrics import resolve_text_layout
 
 
 def _element(
@@ -64,6 +65,20 @@ def test_planner_preserves_page_ratio_and_excludes_header_from_content_frame() -
     assert round(page.geometry.width_pt / page.geometry.height_pt, 4) == round(1000 / 1400, 4)
     assert page.geometry.margin_top_pt == pytest.approx(200 * 841.89 / 1400)
     assert page.header_element_ids == ("header",)
+
+
+def test_page_fit_can_use_blank_space_before_footer() -> None:
+    analysis = _analysis(
+        (
+            _element("body", (150, 200, 850, 1000), 1),
+            _element("footer", (100, 1250, 900, 1300), 2, "footer", "footer"),
+        )
+    )
+
+    page = ReflowPlanner().plan(analysis).pages[0]
+
+    assert page.geometry.margin_bottom_pt == pytest.approx((1400 - 1250) * 841.89 / 1400)
+    assert page.footer_element_ids == ("footer",)
 
 
 def test_full_width_body_with_leading_layout_space_is_left_aligned() -> None:
@@ -771,12 +786,41 @@ def test_auto_height_grid_does_not_reserve_fixed_track_overhead() -> None:
 
 
 def test_default_page_budget_reserves_incremental_text_box_wrap_error() -> None:
-    compact = ReflowPlanner().plan(_analysis((_element("compact", (100, 100, 900, 500), 1, "x" * 1760),))).pages[0]
+    compact = ReflowPlanner().plan(_analysis((_element("compact", (100, 100, 900, 500), 1, "x" * 6600),))).pages[0]
     fragmented = ReflowPlanner().plan(
-        _analysis(tuple(_element(f"part-{index}", (100, 100, 900, 500), index, "x" * 88) for index in range(20)))
+        _analysis(tuple(_element(f"part-{index}", (100, 100, 900, 500), index, "x" * 330) for index in range(20)))
     ).pages[0]
 
     assert compact.fit_scale > fragmented.fit_scale
+
+
+def test_background_text_width_does_not_shrink_with_page_fit() -> None:
+    element = PlannedElement(
+        "label",
+        "heading",
+        "heading",
+        "投资评级：买入（维持）",
+        payload={"background_color": "#4671A6", "width_fraction": 0.8},
+    )
+    role = TypographicRole("heading", "黑体", "Times New Roman", 16, 1.0)
+
+    full = resolve_text_layout(element, role, 200, 1.0)[0]
+    scaled = resolve_text_layout(element, role, 200, 0.8)[0]
+
+    assert full.right_indent_pt == pytest.approx(scaled.right_indent_pt)
+    assert scaled.rendered_line_count <= full.rendered_line_count
+
+
+def test_background_extent_is_part_of_visual_layout_geometry() -> None:
+    element = _element(
+        "band",
+        (100, 100, 200, 140),
+        1,
+        kind="heading",
+        payload={"background_bbox": (80, 90, 500, 150)},
+    )
+
+    assert ReflowPlanner._layout_bbox(element) == Rect(80, 90, 500, 150)
 
 
 def test_planner_preserves_vertical_gap_from_nearest_overlapping_predecessor() -> None:

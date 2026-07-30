@@ -93,23 +93,32 @@ def resolve_text_layout(element, role, container_width_pt: float, fit_scale: flo
         first_indent = 0.0 if reset_indents else float(payload.get("first_line_indent_pt", 0.0)) * fit_scale
         width_fraction = 1.0 if reset_indents else float(payload.get("width_fraction", 1.0))
         if payload.get("background_color"):
-            visual_width = container_width_pt * width_fraction * fit_scale
+            visual_width = container_width_pt * width_fraction
             right_indent = max(container_width_pt - left_indent - visual_width, 0.0)
         available_width = max(container_width_pt - left_indent - right_indent, 1.0)
         font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
-        if len(lines) > 1 and not tabular:
+        font_width_scale = 100
+        fit_source_width = element.kind == "heading" or preserve_lines
+        if len(lines) > 1 and not tabular and fit_source_width:
             line_widths = (max(available_width - first_indent, 1.0),) + (available_width,) * (len(lines) - 1)
-            font_size = fit_font_size_to_lines(
+            fitted_size = fit_font_size_to_lines(
                 font_size,
                 lines,
                 line_widths,
                 0.90 if element.kind == "heading" or preserve_lines else 0.99,
             )
-        elif len(lines) == 1 and element.text_structure.orientation != "vertical" and not tabular:
-            font_size = min(
-                font_size,
-                container_width_pt * width_fraction * 0.90 / max(estimate_text_units(text), 1.0),
-            )
+            font_width_scale = max(round(fitted_size / font_size * 100), 50)
+            if font_width_scale == 50 and fitted_size < font_size * 0.50:
+                font_size = fitted_size * 2.0
+        elif (
+            len(lines) == 1
+            and element.text_structure.orientation != "vertical"
+            and not tabular
+        ):
+            fitted_size = min(font_size, container_width_pt * width_fraction * 0.90 / max(estimate_text_units(text), 1.0))
+            font_width_scale = max(round(fitted_size / font_size * 100), 50)
+            if font_width_scale == 50 and fitted_size < font_size * 0.50:
+                font_size = fitted_size * 2.0
 
         source_line_count = len(lines) if preserve_lines else int(payload.get("visual_line_count") or len(lines) or 1)
         content_bbox = element.content_bbox or Rect.from_sequence(payload.get("source_bbox") or (0, 0, 1, 1))
@@ -119,7 +128,14 @@ def resolve_text_layout(element, role, container_width_pt: float, fit_scale: flo
             if tabular
             else max(len(lines), 1)
             if preserve_lines
-            else estimate_wrapped_lines(text, font_size, available_width, source_line_count, source_width, fit_scale)
+            else estimate_wrapped_lines(
+                text,
+                font_size * font_width_scale / 100.0,
+                available_width,
+                source_line_count,
+                source_width,
+                fit_scale,
+            )
         )
         measured_line_height = float(payload.get("line_height_pt") or font_size * role.line_spacing)
         line_height = max(measured_line_height * fit_scale, font_size * 1.05)
@@ -156,6 +172,7 @@ def resolve_text_layout(element, role, container_width_pt: float, fit_scale: flo
                 right_indent_pt=right_indent,
                 right_tab_stop_pt=(max(container_width_pt - right_indent, 1.0) if tabular else None),
                 layout_reserve_pt=reserve,
+                font_width_scale_pct=font_width_scale,
             )
         )
     return tuple(layouts)

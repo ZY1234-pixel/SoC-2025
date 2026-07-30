@@ -22,6 +22,40 @@ def infer_crop_style(image_base64: Optional[str]) -> Optional[CropStylePredictio
     return _infer_pixels_style(image) if image is not None else None
 
 
+def infer_background_extent(
+    image_rgb: np.ndarray,
+    bbox: tuple[float, float, float, float],
+    color: str,
+) -> Optional[tuple[float, float, float, float]]:
+    """Return the connected page-color region overlapping a recognized text box."""
+    if image_rgb.ndim != 3 or image_rgb.shape[2] != 3 or len(color) != 7:
+        return None
+    try:
+        target = np.array([int(color[index : index + 2], 16) for index in (1, 3, 5)], dtype=np.int16)
+    except ValueError:
+        return None
+    mask = (np.linalg.norm(image_rgb.astype(np.int16) - target, axis=2) <= 48).astype(np.uint8)
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if count <= 1:
+        return None
+    height, width = mask.shape
+    x1, y1, x2, y2 = (
+        max(0, min(width, round(bbox[0]))),
+        max(0, min(height, round(bbox[1]))),
+        max(0, min(width, round(bbox[2]))),
+        max(0, min(height, round(bbox[3]))),
+    )
+    if x2 <= x1 or y2 <= y1:
+        return None
+    overlaps = np.bincount(labels[y1:y2, x1:x2].ravel(), minlength=count)
+    overlaps[0] = 0
+    label = int(overlaps.argmax())
+    if overlaps[label] < max((x2 - x1) * (y2 - y1) * 0.08, 16):
+        return None
+    left, top, region_width, region_height, _area = stats[label]
+    return float(left), float(top), float(left + region_width), float(top + region_height)
+
+
 def infer_table_row_fills(image_base64: Optional[str], row_count: int) -> tuple[tuple[int, str, str], ...]:
     image = _decode_image(image_base64)
     if image is None or row_count <= 0:

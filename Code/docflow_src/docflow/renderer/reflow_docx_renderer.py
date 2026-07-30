@@ -412,6 +412,10 @@ class ReflowDocxRenderer:
         paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
         run = paragraph.add_run(layout.text)
         self._style_run(run, role, 1.0, font_size_pt=layout.font_size_pt)
+        if layout.font_width_scale_pct != 100:
+            width = OxmlElement("w:w")
+            width.set(qn("w:val"), str(layout.font_width_scale_pct))
+            run._element.get_or_add_rPr().append(width)
         self._shade(paragraph._p.get_or_add_pPr(), element.payload.get("background_color"))
         paragraph.paragraph_format.widow_control = False
         paragraph.paragraph_format.keep_together = False
@@ -576,7 +580,7 @@ class ReflowDocxRenderer:
         )
         if fit_size >= minimum_size:
             font_size = min(font_size, fit_size)
-        source_row_height = float(element.payload.get("table_height_pt") or 0.0) * fit_scale / rows
+        source_row_height = float(element.payload.get("table_height_pt") or 0.0) / rows
         row_heights = [max(source_row_height, font_size * 1.2 + 2.0) for _ in range(rows)]
         for row_index, column, row_span, span, cell in placements:
             cell_width = sum(column_widths[column : column + span])

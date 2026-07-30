@@ -244,7 +244,8 @@ def test_single_line_text_is_sized_to_its_source_width() -> None:
     paragraph = document.paragraphs[0]
     run = paragraph.runs[0]
 
-    assert run.font.size.pt < role.font_size_pt * plan.pages[0].fit_scale
+    assert run.font.size.pt == pytest.approx(round(role.font_size_pt * plan.pages[0].fit_scale * 2) / 2)
+    assert int(run._element.rPr.find(qn("w:w")).get(qn("w:val"))) < 100
     assert paragraph._p.pPr.find(qn("w:shd")) is not None
 
 
@@ -622,7 +623,7 @@ def test_native_table_uses_source_height_as_row_minimum() -> None:
 
     ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 0.8, 100)
 
-    assert all(row.height.pt == pytest.approx(40) for row in container.tables[0].rows)
+    assert all(row.height.pt == pytest.approx(50) for row in container.tables[0].rows)
     assert all(row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY for row in container.tables[0].rows)
 
 
@@ -724,7 +725,10 @@ def test_multiline_heading_font_fits_each_preserved_source_line() -> None:
 
     ReflowDocxRenderer()._render_element(container, element, {"heading": role}, 1.0, 100)
 
-    assert container.paragraphs[-1].runs[0].font.size.pt <= (
+    run = container.paragraphs[-1].runs[0]
+    width_scale = int(run._element.rPr.find(qn("w:w")).get(qn("w:val")))
+    assert width_scale == 50
+    assert run.font.size.pt * width_scale / 100 <= (
         100 * 0.90 / estimate_text_units("A deliberately long heading") + 0.1
     )
 
@@ -746,7 +750,7 @@ def test_centered_source_rows_fit_without_word_adding_wraps() -> None:
     assert paragraph.runs[0].font.size.pt < role.font_size_pt
 
 
-def test_continuous_paragraph_fits_source_rows_without_hard_breaks() -> None:
+def test_continuous_paragraph_keeps_natural_character_width_without_hard_breaks() -> None:
     paragraph = Document().add_paragraph()
     line = "中文" * 10
     element = PlannedElement(
@@ -760,7 +764,8 @@ def test_continuous_paragraph_fits_source_rows_without_hard_breaks() -> None:
 
     ReflowDocxRenderer()._write_text(paragraph, element, {"body": role}, 1.0, 194)
 
-    assert paragraph.runs[0].font.size.pt == 9.5
+    assert paragraph.runs[0].font.size.pt == role.font_size_pt
+    assert paragraph.runs[0]._element.rPr.find(qn("w:w")) is None
     assert "\n" not in paragraph.text
 
 
@@ -938,7 +943,7 @@ def test_background_paragraph_uses_source_width() -> None:
 
     ReflowDocxRenderer()._write_text(paragraph, element, {"body": role}, 0.8, 100)
 
-    assert paragraph.paragraph_format.right_indent.pt == pytest.approx(80)
+    assert paragraph.paragraph_format.right_indent.pt == pytest.approx(75)
 
 
 def test_reflow_docx_writes_source_bbox_paragraph_indents(tmp_path) -> None:

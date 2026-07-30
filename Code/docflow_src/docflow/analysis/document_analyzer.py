@@ -11,9 +11,15 @@ from statistics import median
 from typing import Iterable, Optional
 
 from bs4 import BeautifulSoup
+import numpy as np
 from PIL import Image
 
-from docflow.appearance.color_inferrer import infer_crop_style, infer_table_row_fills, infer_table_rule_style
+from docflow.appearance.color_inferrer import (
+    infer_background_extent,
+    infer_crop_style,
+    infer_table_row_fills,
+    infer_table_rule_style,
+)
 from docflow.appearance.font_classifier import FONT_FAMILY_BY_LABEL, FONT_INK_HEIGHT_RATIO
 from docflow.appearance.text_weight_inferrer import infer_text_stroke_ratio
 from docflow.model.stages import (
@@ -92,6 +98,7 @@ class DocumentAnalyzer:
         return DocumentAnalysis(assigned_pages, roles, source_file=evidence.source_file)
 
     def _analyze_page(self, page) -> AnalysisPage:
+        page_image = self._load_page_image(page.image_path, page.page_index)
         items, duplicate_children, diagnostics = self._merge_duplicates(page.items)
         by_id = {item.evidence_id: item for item in page.items}
         consumed: set[str] = set()
@@ -199,6 +206,7 @@ class DocumentAnalyzer:
                 [by_id[source_id] for source_id in captions[item.evidence_id]],
                 formula_numbers.get(item.evidence_id),
                 page.page_index,
+                page_image,
             )
             elements.append(element)
             if element.payload.get("structure_missing"):
@@ -221,6 +229,7 @@ class DocumentAnalyzer:
         captions: list[RecognitionItem],
         formula_number: Optional[str],
         page_index: int,
+        page_image: Optional[Image.Image] = None,
     ) -> SemanticElement:
         kind = self._kind(primary)
         visible_lines = self._visible_lines(primary)
@@ -261,6 +270,14 @@ class DocumentAnalyzer:
             ),
         }
         payload.update(self._infer_visual_style(primary))
+        if page_image is not None and payload.get("background_color"):
+            background_bbox = infer_background_extent(
+                np.asarray(page_image),
+                (primary.bbox.x1, primary.bbox.y1, primary.bbox.x2, primary.bbox.y2),
+                payload["background_color"],
+            )
+            if background_bbox is not None:
+                payload["background_bbox"] = background_bbox
         if primary.category == "formula":
             number_item = next((item for item in related[1:] if self._is_formula_number(item)), None)
             detected_line = next(
@@ -294,6 +311,17 @@ class DocumentAnalyzer:
             content_bbox=content_bbox,
             text_rows=text_rows,
         )
+
+    @staticmethod
+    def _load_page_image(path: Optional[str], page_index: int) -> Optional[Image.Image]:
+        if not path:
+            return None
+        try:
+            image = Image.open(path)
+            image.seek(page_index)
+            return image.convert("RGB")
+        except (OSError, EOFError):
+            return None
 
     @staticmethod
     def _text_structure(
