@@ -1,55 +1,63 @@
-from pathlib import Path
-import sys
+import base64
 
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "Code" / "docflow_src"))
+from docflow.appearance.color_inferrer import (
+    infer_background_extent,
+    infer_crop_style,
+    infer_table_row_fills,
+    infer_table_rule_style,
+)
 
-from docflow.layout.color_inferrer import infer_text_colors
-from docflow.model.base import BBox, BlockType
-from docflow.model.blocks.text_block import TextBlock, TextLine
-from docflow.model.page import Page
+
+def test_crop_style_and_table_fill_are_inferred_from_region_pixels():
+    image = np.full((60, 180, 3), 255, dtype=np.uint8)
+    image[30:, :] = (130, 75, 35)
+    cv2.putText(image, "HEAD", (8, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    encoded = base64.b64encode(cv2.imencode(".png", image)[1]).decode("ascii")
+
+    style = infer_crop_style(encoded)
+
+    assert style is not None
+    row_styles = infer_table_row_fills(encoded, 2)
+    assert row_styles[0][:2] == (1, "#234B82")
 
 
-def test_infer_text_colors_promotes_consistent_red_block(tmp_path):
-    image = np.full((80, 220, 3), 255, dtype=np.uint8)
-    cv2.putText(
-        image,
-        "TEST",
-        (20, 52),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1.4,
-        (0, 0, 180),
-        4,
-        cv2.LINE_AA,
-    )
-    image_path = tmp_path / "red_text.png"
-    cv2.imwrite(str(image_path), image)
+def test_table_rule_style_distinguishes_horizontal_rules_from_a_grid():
+    horizontal = np.full((100, 300, 3), 255, dtype=np.uint8)
+    for y in (5, 35, 95):
+        cv2.line(horizontal, (0, y), (299, y), (0, 0, 0), 2)
+    grid = horizontal.copy()
+    for x in (5, 150, 295):
+        cv2.line(grid, (x, 0), (x, 99), (0, 0, 0), 2)
+    encode = lambda image: base64.b64encode(cv2.imencode(".png", image)[1]).decode("ascii")
 
-    page = Page(index=0, image_width=220, image_height=80, image_path=str(image_path))
-    block = TextBlock(
-        bbox=BBox(15, 15, 145, 60),
-        block_type=BlockType.TITLE,
-        lines=[
-            TextLine(
-                text="TEST",
-                text_region=[[15, 15], [150, 15], [150, 65], [15, 65]],
-            )
-        ],
-    )
+    assert infer_table_rule_style(encode(horizontal)) == "horizontal"
+    assert infer_table_rule_style(encode(grid)) == "grid"
 
-    stats = infer_text_colors(page, [block])
 
-    assert stats["colored_blocks"] == 1
-    assert block.style is not None
-    assert block.style.color is not None
-    assert block.style.color != "#000000"
-    red = int(block.style.color[1:3], 16)
-    green = int(block.style.color[3:5], 16)
-    blue = int(block.style.color[5:7], 16)
-    assert red > green
-    assert red > blue
-    assert green < 80
-    assert blue < 100
+def test_background_extent_follows_connected_band_beyond_text_box():
+    image = np.full((80, 300, 3), 255, dtype=np.uint8)
+    image[20:60, 30:270] = (70, 110, 160)
+    image[30:50, 80:150] = 255
+
+    extent = infer_background_extent(image, (70, 20, 160, 60), "#466EA0")
+
+    assert extent == (30.0, 20.0, 270.0, 60.0)
+
+
+def test_background_extent_does_not_merge_a_light_band_with_the_white_page():
+    image = np.full((100, 300, 3), 255, dtype=np.uint8)
+    image[40:60, 80:220] = (229, 238, 245)
+
+    extent = infer_background_extent(image, (100, 40, 200, 60), "#E5EEF5")
+
+    assert extent == (80.0, 40.0, 220.0, 60.0)
+
+
+def test_background_extent_keeps_only_the_local_band_of_an_adjacent_image():
+    image = np.full((160, 300, 3), 255, dtype=np.uint8)
+    image[20:120, 80:220] = (229, 238, 245)
+
+    assert infer_background_extent(image, (100, 100, 180, 120), "#E5EEF5") == (80.0, 100.0, 220.0, 120.0)

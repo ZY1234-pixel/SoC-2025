@@ -1,93 +1,92 @@
-# 部署指南
+# 部署说明
 
-## 1. 适用范围
+本文说明图片文本解析及矢量化转换模块的本地部署方法。所有命令均从仓库根目录执行。
 
-本交付包用于本地验证以下能力：
+## 运行环境
 
-`图片 / PDF -> OCR + 版面分析 -> DocFlow 恢复 -> docx / markdown / pdf`
+项目基于 Python 3.9 开发和测试，支持 Linux 与 Windows。生成 DOCX 和 Markdown 不依赖桌面软件；导出 PDF 需要安装 LibreOffice，并确保 `libreoffice`、`soffice` 或 `soffice.exe` 可从命令行调用。
 
+仓库根目录应包含 `Code/`、`dataset/` 和 `doc/`。`test-result/` 无需提前创建，脚本会在首次运行时生成。
 
-## 2. 环境要求
+## 安装 Python 依赖
 
-- Python 3.9 及以上，推荐 3.9 / 3.10
-- Linux 或 Windows
-- 若要输出 PDF，需预装 LibreOffice，并保证命令可直接调用
-  - Linux: `libreoffice` 或 `soffice`
-  - Windows: `soffice.exe`
-
-## 3. 目录确认
-
-进入交付包后，先确认以下目录存在：
-
-- `Code/`
-- `dataset/`
-- `test-result/`
-- `doc/`
-
-再进入代码目录：
+Linux：
 
 ```bash
-cd Code
-```
-
-## 4. 安装步骤
-
-### 4.1 创建虚拟环境
-
-```bash
-python -m venv .venv
-```
-
-### 4.2 Linux 安装命令
-
-```bash
+python3.9 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -r requirement.txt
-python -m pip install wheels/docflow-0.3.0-py3-none-any.whl
+python -m pip install -r Code/requirement.txt
 ```
 
-### 4.3 Windows PowerShell 安装命令
+Windows PowerShell：
 
 ```powershell
+py -3.9 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -r requirement.txt
-python -m pip install wheels\docflow-0.3.0-py3-none-any.whl
+python -m pip install -r Code\requirement.txt
 ```
 
-## 5. 安装完成后的最小验证
+项目源码无需单独安装为 wheel。运行 `Code/test.py` 时，脚本会将 `Code/docflow_src/` 和仓库内的 PaddleOCR 运行时加入 Python 路径。
 
-在 `Code/` 目录执行：
+## 模型与运行时
+
+默认配置依赖以下文件：
+
+```text
+Code/models/layout/pp-doclayout-v3/PP-DocLayoutV3.onnx
+Code/models/det/ch/PP-OCRv6_small_det/PP-OCRv6_small_det.onnx
+Code/models/rec/ch/PP-OCRv6_small_rec/PP-OCRv6_small_rec.onnx
+Code/models/table/SLANet_plus/SLANet_plus.onnx
+Code/models/font/mobilenetv3.ckpt
+```
+
+PaddleOCR 运行时应包含以下目录：
+
+```text
+Code/third_party/paddle_runtime/ppstructure
+Code/third_party/paddle_runtime/ppocr
+Code/third_party/paddle_runtime/tools
+```
+
+模型下载地址和目录示例见项目 [README](../README.md#模型准备)。
+
+## 单样本验证
+
+首次验证建议只生成 DOCX 和 Markdown，以便将 Python、模型问题与 LibreOffice 转换问题分开排查：
 
 ```bash
-python test.py --input ../dataset/exam_paper_02.png --output ../test-result --formats docx,markdown
+python Code/test.py --input dataset/exam_paper_02.png --output test-result --formats docx,markdown
 ```
 
-如果需要验证 PDF 导出：
+命令成功后，终端会显示“全部样本处理成功”。结果保存在最新的 `test-result/run_YYYYMMDD_HHMMSS/`。
+
+确认基础输出正常后，再验证 PDF 导出：
 
 ```bash
-python test.py --input ../dataset/exam_paper_02.png --output ../test-result --formats docx,markdown,pdf
+python Code/test.py --input dataset/exam_paper_02.png --output test-result --formats docx,markdown,pdf
 ```
 
-## 6. 输出位置说明
+## 输出目录
 
-输出默认写入 `../test-result/run_YYYYMMDD_HHMMSS/`，典型结构如下：
+每次运行创建一个独立目录，各样本结果分别保存在子目录中：
 
 ```text
 test-result/
 └── run_YYYYMMDD_HHMMSS/
     ├── run_manifest.json
-    └── samples/
-        └── <样例名>/
-            ├── <样例名>.json
-            ├── <样例名>.docx
-            ├── <样例名>.md
-            ├── <样例名>.pdf
-            ├── <样例名>_assets/
-            └── debug/
+    ├── _runtime/
+    └── <样本名>/
+        ├── raw_result.json
+        ├── <样本名>.recognition.json
+        ├── <样本名>.json
+        ├── <样本名>.render_plan.json
+        ├── <样本名>.docx
+        ├── <样本名>.md
+        ├── <样本名>.pdf
+        ├── <样本名>_assets/
+        └── debug/
 ```
 
-## 7. 推荐下一步
-
-部署完成后，请按 `doc/TESTING.md` 执行统一测试流程并做效果验收。
+文件会随 `--formats` 和 `--no-debug-vis` 的设置增减。批量运行和版面检查方法写在 [TESTING.md](TESTING.md)；启动失败时先查 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
