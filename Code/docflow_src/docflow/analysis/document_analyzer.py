@@ -61,6 +61,9 @@ _FURNITURE = {"header", "footer", "page_number"}
 _LIST_MARKER_RE = re.compile(
     r"^\s*(?:[\u2022\u25cf\u25aa\u25e6]|[\u2460-\u2473]|(?:\(?\d{1,3}\)?|[A-Za-z])[.)\u3001\uff0e])"
 )
+_INLINE_LIST_MARKER_RE = re.compile(
+    r"[;\uff1b]\s*(?:[\u2460-\u2473]|(?:\(?\d{1,3}\)?|[A-Za-z])[.)\u3001\uff0e])"
+)
 
 
 def _join_text_segments(left: str, right: str) -> str:
@@ -332,8 +335,12 @@ class DocumentAnalyzer:
     ) -> TextStructure:
         lines = tuple(row.text for row in text_rows) or tuple(value for _line, value, _bbox in visible_lines)
         marked = tuple(bool(_LIST_MARKER_RE.match(str(line))) for line in lines)
-        preserve_lines = tabular_rows or len(lines) >= 2 and sum(marked) >= 2 and (
-            all(marked) or not marked[0] and all(marked[1:])
+        inline_list = any(_INLINE_LIST_MARKER_RE.search(str(line)) for line in lines)
+        preserve_lines = tabular_rows or (
+            not inline_list
+            and len(lines) >= 2
+            and sum(marked) >= 2
+            and (all(marked) or not marked[0] and all(marked[1:]))
         )
         boxes = tuple(row.bbox for row in text_rows)
         if len(boxes) == len(lines) and len(boxes) >= 2:

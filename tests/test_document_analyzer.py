@@ -333,6 +333,29 @@ def test_analyzer_records_list_lines_and_geometry_once() -> None:
     assert element.text_structure.hanging_indent_px == 40
 
 
+def test_analyzer_reflows_inline_numbered_list_across_ocr_rows() -> None:
+    item = RecognitionItem(
+        "risks",
+        "text",
+        Rect(100, 100, 900, 180),
+        1,
+        text_lines=(
+            TextEvidence(
+                "1) First; 2) Second; 3) Third;",
+                polygon=((100, 100), (900, 100), (900, 130), (100, 130)),
+            ),
+            TextEvidence("4) Fourth.", polygon=((100, 145), (300, 145), (300, 175), (100, 175))),
+        ),
+    )
+
+    element = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))
+    ).pages[0].elements[0]
+
+    assert element.text_structure.is_list is True
+    assert element.text_structure.preserve_source_lines is False
+
+
 def test_analyzer_uses_polygon_thickness_for_rotated_text_height() -> None:
     item = RecognitionItem(
         "rotated",
