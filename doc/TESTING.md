@@ -1,98 +1,71 @@
-# 测试操作手册
+# 测试说明
 
+自动测试负责检查内容有没有丢失、表格有没有退化、输出有没有超页。至于版面是否像原图，仍要把 DOCX 转成图片后人工对照。
 
-## 1. 测试前检查
+以下命令都从仓库根目录执行。先按 [DEPLOYMENT.md](DEPLOYMENT.md) 配好 Python 和模型；测试 PDF 输出时还要安装 LibreOffice。
 
-开始前请确认：
+## 单元测试
 
-- 已按 `DEPLOYMENT.md` 完成环境安装
-- `dataset/` 目录中已放入待测图片或 PDF
-- 若要测试 PDF 输出，系统命令行可直接调用 `soffice`
-
-## 2. 主测试命令
+代码改动后先跑：
 
 ```bash
-python Code/test.py --input <输入路径> --output <输出路径> --formats <格式列表>
+pytest -q
 ```
 
-参数说明：
+## 全流程测试
 
-- `--input/-i`：输入文件或目录，默认 `dataset/`
-- `--output/-o`：结果根目录，默认 `test-result/`
-- `--formats/-f`：输出格式，支持 `docx,markdown,pdf`
-- `--pdf-dpi`：PDF 转图片 DPI，默认 `200`
-- `--no-debug-vis`：关闭可视化图导出
-- `--layout-model`：选择版面分析模型，默认 `pp-doclayout-v3`
+`Code/test.py` 接受一张图片、一个 PDF 或一个目录：
 
-## 3. 推荐测试流程
+```bash
+python Code/test.py --input <输入路径> --output <输出目录> --formats <格式列表>
+```
 
-### 3.1 单样本冒烟
+| 参数 | 用法 |
+|------|------|
+| `--input`, `-i` | 输入文件或目录，默认读取 `dataset/` |
+| `--output`, `-o` | 结果保存目录，默认为 `test-result/` |
+| `--formats`, `-f` | `docx`、`markdown`、`pdf`，用逗号连接 |
+| `--layout-model` | 版面模型，默认 `pp-doclayout-v3` |
+| `--pdf-dpi` | 输入 PDF 转图片时使用的 DPI，默认 `200` |
+| `--no-debug-vis` | 不保存版面框和阅读顺序图 |
 
-用于确认环境、模型和主流程可跑通：
+第一次验证环境时只跑一张图：
 
 ```bash
 python Code/test.py --input dataset/exam_paper_02.png --output test-result --formats docx,markdown
 ```
 
-通过标准：
-
-- 命令正常结束
-- 输出目录出现对应的 `json / docx / md`
-- 控制台无未处理异常
-
-### 3.2 目录级批量测试
-
-用于验证主流程稳定性：
-
-```bash
-python Code/test.py --input dataset --output test-result --formats docx,markdown
-```
-
-通过标准：
-
-- 输入目录中的样本都能被识别
-- 每个样本目录下都能产出对应 `json / docx / md`
-- 每个样本目录下的 `debug/` 中能看到版面分析与排序结果
-
-### 3.3 带 PDF 的完整测试
-
-在系统可用 `soffice` 的前提下执行：
+改动涉及版面分析、布局规划或 DOCX 渲染时，处理完整数据集：
 
 ```bash
 python Code/test.py --input dataset --output test-result --formats docx,markdown,pdf
 ```
 
-通过标准：
+PDF 输出会调用 LibreOffice。程序随后检查 PDF 页数；某个样本超过源页数时，本次运行会记为失败。
 
-- 每个样例目录下会额外产出 `<样例名>.pdf`
-- PDF 与 DOCX 主体内容保持一致
+## 先看运行摘要
 
-## 4. 验收项
+`run_manifest.json` 汇总了样本数量、页数、失败列表、原生表格数量和布局类型。批量运行后先看这里，`failures` 非空就不必逐个打开文件。
 
-### 4.1 JSON
+每个样本有三份阶段数据：
 
-- `pages[].blocks` 是否非空
-- `image_path` 是否与输入一致
-- 结构块类别是否基本合理
+- `<样本名>.recognition.json`：`pages[].items` 是 OCR 和版面模型留下的原始证据。
+- `<样本名>.json`：`pages[].elements` 是合并后的段落、标题、表格和媒体块。
+- `<样本名>.render_plan.json`：`pages[].sections` 记录分栏或网格结构，`pages[].fit_scale` 是页面缩放结果。
 
-### 4.2 DOCX
+如果启用了 debug 图，`debug/page_0001.layout_ocr.jpg` 显示检测框，`debug/page_0001.reading_order_columns.jpg` 显示模型顺序。它们适合排查漏检、错栏和跨栏范围错误。
 
-- 阅读顺序是否正确
-- 分栏是否符合原页面结构
-- 标题、正文、表格、图片位置是否合理
-- 是否存在明显错栏、串栏、多页溢出或异常断行
+## 人工检查 DOCX
 
-### 4.3 Markdown
+建议把 DOCX 转成 PDF 或图片，再和原图并排查看。检查顺序如下：
 
-- 表格是否能直接渲染
-- 图片资源路径是否存在
-- 文本顺序和层次是否正确
+1. 先数页数，确认没有空白页或内容溢到下一页。
+2. 看大结构：栏数、阅读顺序、跨栏图片和页眉页脚。
+3. 看完整性：表格行、公式、图片和图注有没有被裁掉。
+4. 最后看样式：字号、行距、对齐、段落间距和字体是否接近原图。
 
-### 4.4 Debug 可视化
+Markdown 主要检查文本顺序、标题层级、表格语法和图片路径。它不负责复刻页面版式。
 
-检查 `test-result/run_xxx/<样例名>/debug/` 下的：
+## 记录问题
 
-- `page_0001.layout_ocr.jpg`
-- `page_0001.reading_order_columns.jpg`
-
-重点看检测框、排序顺序和最终版面块是否符合直觉。
+发现回归时，至少保留原图、执行命令、`run_manifest.json`、对应样本目录和渲染截图。描述问题时指出页面位置和现象，例如“第二栏末行被裁掉”，比只写“排版不对”更容易复现。

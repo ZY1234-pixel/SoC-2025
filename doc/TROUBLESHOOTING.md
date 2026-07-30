@@ -1,94 +1,91 @@
-# 故障排查
+# 常见问题
 
-## 1. 报错 `No module named ...`
+下面的问题按实际排查顺序整理。命令默认从仓库根目录执行。
 
-说明 Python 依赖未安装完整。请在项目根目录重新执行：
+## `No module named ...`
+
+先确认当前终端使用的是刚创建的虚拟环境：
+
+```bash
+python --version
+python -m pip --version
+```
+
+然后重新安装依赖：
 
 ```bash
 python -m pip install -r Code/requirement.txt
 ```
 
-测试入口直接加载 `Code/docflow_src/`，无需安装项目 wheel。
+`Code/test.py` 会直接加载 `Code/docflow_src/`，不需要安装 DocFlow wheel。如果报错来自其他入口，请确认它是否自行配置了源码路径。
 
-## 2. 报错“缺少必要运行资产”
+## 报错“缺少必要运行资产”
 
-通常表示打包目录不完整或文件被移动。请确认以下路径存在：
+脚本启动时会检查 PaddleOCR 运行时和默认模型。逐项确认这些路径：
 
-- `Code/third_party/paddle_runtime/ppstructure`
-- `Code/third_party/paddle_runtime/ppocr`
-- `Code/third_party/paddle_runtime/tools`
-- `Code/models/layout/pp-doclayout-v3/PP-DocLayoutV3.onnx`
-- `Code/models/det/ch/PP-OCRv6_small_det/PP-OCRv6_small_det.onnx`
-- `Code/models/rec/ch/PP-OCRv6_small_rec/PP-OCRv6_small_rec.onnx`
-- `Code/models/table/SLANet_plus/SLANet_plus.onnx`
-- `Code/models/font/mobilenetv3.ckpt`
-
-## 3. PDF 输出失败
-
-请依次检查：
-
-- 是否已安装 LibreOffice
-- `soffice` 是否可在命令行直接运行
-- 是否先用 `docx,markdown` 跑通过主链路
-
-可先执行：
-
-```bash
-python Code/test.py --input dataset --output test-result --formats docx,markdown
+```text
+Code/third_party/paddle_runtime/ppstructure
+Code/third_party/paddle_runtime/ppocr
+Code/third_party/paddle_runtime/tools
+Code/models/layout/pp-doclayout-v3/PP-DocLayoutV3.onnx
+Code/models/det/ch/PP-OCRv6_small_det/PP-OCRv6_small_det.onnx
+Code/models/rec/ch/PP-OCRv6_small_rec/PP-OCRv6_small_rec.onnx
+Code/models/table/SLANet_plus/SLANet_plus.onnx
+Code/models/font/mobilenetv3.ckpt
 ```
 
-成功后请到 `test-result/run_xxx/<样例名>/` 下查看结果。
+路径存在但仍报错时，检查模型是否被放进了同名的双层目录，例如 `Code/models/models/...`。
 
-## 4. Windows 无法激活虚拟环境
+## PDF 没有生成
 
-如果 PowerShell 禁止执行脚本，可管理员身份运行一次：
+先看系统能否找到 LibreOffice：
+
+```bash
+soffice --version
+```
+
+Linux 上命令也可能叫 `libreoffice`。如果系统找不到它，安装 LibreOffice 并重新打开终端。随后先排除 DOCX 生成问题：
+
+```bash
+python Code/test.py --input dataset/exam_paper_02.png --output test-result --formats docx,markdown
+```
+
+这一步成功后再加入 `pdf`。转换失败时保留终端报错；已经生成的 DOCX 仍在对应的运行目录中。
+
+## Word 和 LibreOffice 的页数不同
+
+两者的字体度量和分页行为并不完全一致。程序会检查 LibreOffice 导出的 PDF 页数，但无法预先知道另一台电脑上的 Word 会怎样分页。
+
+先确认使用的是同一份 DOCX，再比较发生换页前的字号、行距和表格高度。如果只在 Word 中多出空白页，记录 Word 版本，并同时保留 LibreOffice 的 PDF 作为对照。
+
+## 运行很慢
+
+第一次运行会加载多个模型，比后续单页处理慢。输入是 PDF 时，可以把 `--pdf-dpi` 从 `200` 调到 `150` 试跑；图片输入不受这个参数影响。
+
+debug 图也会占用一些时间和磁盘。只做吞吐测试时加上 `--no-debug-vis`。
+
+## ONNX Runtime 打印形状警告
+
+`MergeShapeInfo` 或 `VerifyOutputSizes` 一类信息来自 ONNX Runtime。只要命令最后显示“全部样本处理成功”，并且 `run_manifest.json` 中的 `failures` 为空，就可以把这些行当作运行时警告。若进程同时退出或结果缺失，请保留完整日志。
+
+## `No ccache found`
+
+这是编译缓存提示，不影响推理结果。没有源码编译需求时可以忽略。需要安装时，使用系统包管理器即可，例如：
+
+```bash
+sudo apt-get install ccache
+```
+
+## PowerShell 不允许激活虚拟环境
+
+可以为当前用户放开本地脚本执行权限：
 
 ```powershell
 Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
-## 5. 速度较慢
+重新打开 PowerShell 后再执行 `.\.venv\Scripts\Activate.ps1`。
 
-- 首次运行会加载模型，速度通常偏慢
-- 批量 PDF 可先尝试 `--pdf-dpi 150`
-- 开启每页 `debug/` 可视化图会增加一定输出时间
+## 提交一个可复现问题
 
-## 6. 警告 `No ccache found`
-
-如果你看到：
-
-`UserWarning: No ccache found...`
-
-这是警告，不是错误，通常不会导致流程失败。它的含义只是本机没有安装编译缓存工具 `ccache`。
-
-可选处理方式：
-
-- 直接忽略：只要结果正常产出即可继续测试
-- 安装 `ccache`
-
-```bash
-conda install -c conda-forge ccache
-```
-
-或：
-
-```bash
-sudo apt-get update
-sudo apt-get install -y ccache
-```
-
-安装后可执行：
-
-```bash
-ccache --version
-```
-
-## 7. 如何提供可复现问题
-
-建议打包以下内容反馈：
-
-- 原始输入文件
-- 执行命令
-- 终端完整日志
-- 失败对应输出文件
-- 操作系统和 Python 版本
+请附上原始输入、执行命令、操作系统和 Python 版本、终端日志，以及失败样本的完整输出目录。版面问题再加一张标出位置的截图，通常就足够定位。

@@ -1,44 +1,40 @@
-# DocFlow 图片文档结构化还原
+# DocFlow：把图片文档还原成可编辑 DOCX
 
-DocFlow 将扫描图片或 PDF 转换为可编辑的 DOCX、Markdown 和 PDF。当前分支采用流式排版：保留阅读顺序、分栏、表格、图片和主要样式，并严格约束源页面与输出页面一一对应。
+DocFlow 读取扫描图片或 PDF，经过 OCR、版面分析和布局规划，输出 DOCX、Markdown，也可以调用 LibreOffice 导出 PDF。
 
-本项目优先保证内容可编辑和文档结构可维护，不以文本框绝对定位的方式逐像素复刻原图。
+这个分支使用 Word 原生的段落、分栏和表格来组织页面。生成的文字和表格可以继续编辑，版面则尽量贴近原图。它不是按 bbox 放置文本框的绝对定位方案，所以不同版本的 Word 或 LibreOffice 仍可能出现细小的字体度量差异。
 
-## 效果展示
+## 还原效果
 
-以下结果均由当前流式排版流程生成，第三列是 DOCX 经 LibreOffice 渲染后的页面。
+下面四组结果由当前代码生成。第三列是 DOCX 经 LibreOffice 转出的页面，不是直接拼接的图片。
 
-### 学术论文：双栏、公式与复杂表格
+### 学术论文：双栏、公式和复杂表格
 
 | 原图 | 版面分析 | DOCX 渲染 |
 |:----:|:--------:|:---------:|
 | <img src="doc/assets/readme/academic_paper_01/original.jpg" width="320"> | <img src="doc/assets/readme/academic_paper_01/layout.jpg" width="320"> | <img src="doc/assets/readme/academic_paper_01/rendered.jpg" width="320"> |
 
-### 复杂表格：原生可编辑表格与单页约束
+### 连续表格：五张可编辑表格保持在同一页
 
 | 原图 | 版面分析 | DOCX 渲染 |
 |:----:|:--------:|:---------:|
 | <img src="doc/assets/readme/docstructbench_01/original.jpg" width="320"> | <img src="doc/assets/readme/docstructbench_01/layout.jpg" width="320"> | <img src="doc/assets/readme/docstructbench_01/rendered.jpg" width="320"> |
 
-### 金融研报：密集双栏、图表与中文样式
+### 金融研报：密集双栏、图表和中文样式
 
 | 原图 | 版面分析 | DOCX 渲染 |
 |:----:|:--------:|:---------:|
 | <img src="doc/assets/readme/eastmoney_02/original.jpg" width="320"> | <img src="doc/assets/readme/eastmoney_02/layout.jpg" width="320"> | <img src="doc/assets/readme/eastmoney_02/rendered.jpg" width="320"> |
 
-### 报纸：四栏、跨栏图片与图注
+### 报纸：四栏、跨栏图片和两行图注
 
 | 原图 | 版面分析 | DOCX 渲染 |
 |:----:|:--------:|:---------:|
 | <img src="doc/assets/readme/newspaper_01/original.jpg" width="320"> | <img src="doc/assets/readme/newspaper_01/layout.jpg" width="320"> | <img src="doc/assets/readme/newspaper_01/rendered.jpg" width="320"> |
 
-## 快速开始
+## 开始使用
 
-### 环境要求
-
-- Python 3.9，支持 Linux 和 Windows
-- 完整的 `Code/models/` 模型目录
-- 输出 PDF 时需要 LibreOffice，并确保 `libreoffice` 或 `soffice` 位于 `PATH`
+下面的命令都在仓库根目录执行。项目按 Python 3.9 开发和测试；只有导出 PDF 时才需要安装 LibreOffice。
 
 ### Linux
 
@@ -58,38 +54,32 @@ python -m pip install --upgrade pip
 python -m pip install -r Code\requirement.txt
 ```
 
-代码直接从 `Code/docflow_src/` 加载，不需要额外安装项目 wheel。
+`Code/test.py` 会直接加载 `Code/docflow_src/`，不用另装项目 wheel。
 
-### 单样本验证
-
-```bash
-python Code/test.py \
-  --input dataset/exam_paper_02.png \
-  --output test-result \
-  --formats docx,markdown
-```
-
-### 全量测试
+先跑一个样本，确认模型和依赖都能正常加载：
 
 ```bash
-python Code/test.py \
-  --input dataset \
-  --output test-result \
-  --formats docx,markdown,pdf
+python Code/test.py --input dataset/exam_paper_02.png --output test-result --formats docx,markdown
 ```
 
-常用参数：
+处理整个 `dataset/`，并把 DOCX 转成 PDF：
 
-| 参数 | 说明 |
+```bash
+python Code/test.py --input dataset --output test-result --formats docx,markdown,pdf
+```
+
+`test.py` 常用参数如下：
+
+| 参数 | 用法 |
 |------|------|
-| `--input`, `-i` | 输入图片、PDF 或目录，默认 `dataset/` |
-| `--output`, `-o` | 结果根目录，默认 `test-result/` |
-| `--formats`, `-f` | `docx,markdown,pdf` 的任意组合 |
-| `--layout-model` | 选择版面分析模型，默认 `pp-doclayout-v3` |
-| `--pdf-dpi` | PDF 转图片的 DPI，默认 `200` |
-| `--no-debug-vis` | 不生成版面分析可视化图 |
+| `--input`, `-i` | 图片、PDF 或目录，默认读取 `dataset/` |
+| `--output`, `-o` | 结果保存目录，默认为 `test-result/` |
+| `--formats`, `-f` | 从 `docx,markdown,pdf` 中选择一种或多种格式 |
+| `--layout-model` | 切换版面模型，默认使用 `pp-doclayout-v3` |
+| `--pdf-dpi` | 输入 PDF 转图片时使用的 DPI，默认 `200` |
+| `--no-debug-vis` | 关闭版面框和阅读顺序图 |
 
-## 处理流程
+## 代码怎么处理一页文档
 
 ```text
 图片 / PDF
@@ -97,29 +87,32 @@ python Code/test.py \
   -> Recognition Evidence
   -> Document Analysis
   -> Reflow Layout Plan
-  -> DOCX / Markdown Renderer
-  -> LibreOffice 导出 PDF（可选）
+  -> DOCX / Markdown
+  -> PDF（可选）
 ```
 
-- **Recognition Evidence**：保存模型阅读顺序、OCR 行、原始区域和来源标识。
-- **Document Analysis**：组合段落、标题、表格、图片、公式及图注，并推断文档级样式角色。
-- **Reflow Layout Plan**：在 `single_flow`、`sequential_columns` 和 `grid_flow` 中选择页面结构，统一规划间距与单页缩放。
-- **Renderer**：机械执行布局计划，不在渲染阶段重新推断版面。
+| 阶段 | 负责什么 | 保存结果 |
+|------|----------|----------|
+| Recognition Evidence | 接收模型输出，保留 OCR 行、区域、模型顺序和来源标识 | `<样本名>.recognition.json` |
+| Document Analysis | 合并段落、标题、表格、图片、公式和图注，归纳文档内的样式 | `<样本名>.json` |
+| Reflow Layout Plan | 决定分栏结构、元素间距、尺寸和页内缩放 | `<样本名>.render_plan.json` |
+| Renderer | 按计划写入 DOCX 或 Markdown，不再猜测版面 | DOCX / Markdown |
 
-规划阶段仅执行一次静态页容量计算，不使用“生成 DOCX、检测分页、反复缩放重生成”的闭环。
+布局计划有三种基本结构：普通单栏使用 `single_flow`，连续多栏使用 `sequential_columns`，图文混排或跨栏页面使用 `grid_flow`。
 
-## 当前能力
+每张源页面对应一张输出页面。规划器在写 DOCX 之前估算一次页面容量，必要时统一缩放；它不会反复生成 DOCX 再检测分页。
 
-- 段落、标题和图注保持可编辑，支持字号、行距、对齐、颜色及字重推断。
-- 中文字体识别支持宋体、黑体、楷体和仿宋。
-- 表格还原为原生可编辑 Word 表格，并保留跨行、跨列和主要边框样式。
-- 支持单栏、多栏、规则网格、跨栏图片、图文混排、公式和页眉页脚。
-- 每个源页面对应一个输出页面，页面规划会在必要时进行一次保守缩放。
-- Evidence、Analysis 和 Render Plan 均保留为 JSON，便于定位识别、分析或渲染问题。
+## 目前能还原什么
 
-## 输出目录
+正文、标题和图注会写成可编辑段落。系统会推断字号、行距、对齐、颜色和字重，中文字体分类包括宋体、黑体、楷体和仿宋。
 
-每次执行会创建独立的时间戳目录：
+检测到的表格会写成 Word 原生表格，跨行、跨列和主要边框仍可编辑。图片和公式作为媒体元素嵌入页面，布局规划支持单栏、多栏、跨栏图片、图文混排及页眉页脚。
+
+三阶段 JSON 都带有来源关系。遇到错栏、漏块或样式异常时，可以判断问题出在模型识别、文档分析还是最终布局。
+
+## 输出内容
+
+每次运行都会新建一个时间戳目录。同名样本的结果放在自己的子目录里：
 
 ```text
 test-result/
@@ -140,11 +133,11 @@ test-result/
             └── page_0001.reading_order_columns.jpg
 ```
 
-未请求的输出格式不会生成；`raw_result.json` 和 `debug/` 可通过 `--no-debug-vis` 关闭。
+只会生成 `--formats` 中指定的文件。使用 `--no-debug-vis` 后，`raw_result.json` 和 `debug/` 不再输出。
 
-## 模型文件
+## 准备模型
 
-运行前应确保以下模型存在：
+默认流程会读取这些文件：
 
 ```text
 Code/models/
@@ -155,46 +148,44 @@ Code/models/
 └── font/mobilenetv3.ckpt
 ```
 
-模型下载：百度网盘 [SoC_1-1](https://pan.baidu.com/s/12ouE5owq8Ii_KigQzOeirQ)，提取码 `4phe`。解压后放入 `Code/models/`。
+模型可以从百度网盘 [SoC_1-1](https://pan.baidu.com/s/12ouE5owq8Ii_KigQzOeirQ) 下载，提取码为 `4phe`。解压后保持上面的目录结构。
 
-## 测试与验收
+## 测试和版面检查
 
-运行单元测试：
+单元测试在仓库根目录运行：
 
 ```bash
 pytest -q
 ```
 
-版面质量以渲染结果人工对照原图验收，重点检查：
+自动检查会拦截来源丢失、表格退化和 PDF 超页。版面是否接近原图仍要看渲染结果，通常按下面的顺序检查：
 
-- 阅读顺序、栏结构和跨栏范围
-- 字号、行距、对齐和段落间距
-- 图片比例、图注位置和表格完整性
-- 输出页数是否与源页面一致
+1. 输出页数是否与输入一致。
+2. 阅读顺序、栏数和跨栏范围是否正确。
+3. 表格是否完整，图片比例和图注位置是否合理。
+4. 字号、行距、对齐和段落间距是否接近原图。
 
-主流程还会自动检查 Evidence 来源完整性、原生表格数量和 PDF 页数。
+更具体的命令和检查方法见 [部署说明](doc/DEPLOYMENT.md)、[测试说明](doc/TESTING.md) 和 [常见问题](doc/TROUBLESHOOTING.md)。
 
-## 能力边界
+## 已知限制
 
-- 当前方向是可编辑的流式 DOCX，不是基于绝对定位文本框的像素级 Replica DOCX。
-- DOCX 在 Microsoft Word 与 LibreOffice 中可能存在字体度量和分页差异。
-- OCR 或版面检测错误会传递到后续结构分析，优先通过 `debug/` 和三阶段 JSON 定位问题。
+- 这是可编辑的流式 DOCX 方案，不是按原始 bbox 放置文本框的 Replica DOCX。
+- Microsoft Word 和 LibreOffice 使用的字体度量并不完全相同，同一份 DOCX 可能有少量换行或分页差异。
+- OCR 和版面模型如果漏检或识别错误，后面的分析阶段不会凭空补回内容。此时应先看 `debug/` 和三阶段 JSON。
 
-## 目录结构
+## 仓库结构
 
 ```text
 .
 ├── dataset/              # 测试样本
 ├── Code/
-│   ├── docflow_src/      # 分析、规划与渲染源码
-│   ├── models/           # 版面、OCR、表格与字体模型
+│   ├── docflow_src/      # 分析、规划和渲染代码
+│   ├── models/           # 版面、OCR、表格和字体模型
 │   ├── third_party/      # PaddleOCR 运行时
 │   ├── test.py           # 全流程入口
 │   └── requirement.txt   # Python 依赖
 ├── tests/                # 单元测试
 ├── test-result/          # 本地运行结果
-├── doc/                  # 部署、测试与设计文档
+├── doc/                  # 部署、测试和排障文档
 └── README.md
 ```
-
-详细说明见 [部署指南](doc/DEPLOYMENT.md)、[测试手册](doc/TESTING.md) 和 [故障排查](doc/TROUBLESHOOTING.md)。
