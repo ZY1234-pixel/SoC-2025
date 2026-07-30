@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
-from difflib import SequenceMatcher
+from collections import Counter
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 import cv2
+import fitz
 from docx import Document as DocxDocument
 
 CODE_ROOT = Path(__file__).resolve().parent
@@ -25,14 +26,17 @@ from model import LayoutModelSpec, RuntimePaths
 from preprocess import expand_to_pages
 from utils import ensure_runtime_paths, find_libreoffice, parse_formats, print_list
 from docflow.adapters.paddle_adapter import PaddleAdapter
-from docflow.pipeline import RecoveryPipeline
+from docflow.analysis import DocumentAnalyzer
+from docflow.appearance.font_classifier import FontClassifier
+from docflow.model.stages import RecognitionEvidence
+from docflow.planning import ReflowPlanner
+from docflow.renderer.reflow_docx_renderer import ReflowDocxRenderer
+from docflow.renderer.reflow_markdown_renderer import ReflowMarkdownRenderer
 from docflow.utils.result_layout import (
     ResultRunLayout,
     build_main_run_manifest,
-    merge_page_documents,
     write_json,
 )
-from docflow.utils.render_plan import build_render_plan
 
 
 TEXT_TYPES = {
@@ -62,7 +66,6 @@ DEFAULT_LAYOUT_SCORE_THRESHOLD = 0.50
 DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD = 0.50
 DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD = 0.18
 RAW_RESULT_PREVIEW_MAX_TEXT = 300
-OCR_RECHECK_TYPES = {"title", "text", "header"}
 PICODET_LAYOUT_17CLS_LABELS = [
     "text",
     "title",
@@ -376,392 +379,87 @@ def summarize_raw_result(result: list) -> dict:
     return {"regions": regions}
 
 
-def _converted_blocks_to_debug_regions(page_document: dict) -> list[dict]:
-    pages = page_document.get("pages") if isinstance(page_document, dict) else None
-    if not pages:
-        return []
-    page = pages[0] or {}
-    regions: list[dict] = []
-    for block in page.get("blocks") or []:
-        if not isinstance(block, dict):
-            continue
-        region: dict = {
-            "type": block.get("category", block.get("type", "?")),
-            "bbox": block.get("bbox", [0, 0, 0, 0]),
-            "score": float(block.get("confidence", block.get("score", 0.0)) or 0.0),
-            "res": [],
-        }
-        if block.get("text_lines"):
-            converted_lines = []
-            for line in block.get("text_lines") or []:
-                if not isinstance(line, dict):
-                    continue
-                converted_lines.append(
-                    {
-                        "text": line.get("text", ""),
-                        "confidence": line.get("confidence", 1.0),
-                        "text_region": line.get("poly"),
-                    }
-                )
-            region["res"] = converted_lines
-        elif block.get("text"):
-            region["res"] = [{"text": block.get("text", "")}]
-        regions.append(region)
-    return regions
-
-
-def _line_texts(region: dict) -> list[str]:
-    texts: list[str] = []
-    for item in region.get("res") or []:
-        if isinstance(item, dict):
-            text = str(item.get("text", "") or "").strip()
-        elif isinstance(item, (list, tuple)) and len(item) == 2:
-            rhs = item[1]
-            text = str(rhs[0] if isinstance(rhs, (list, tuple)) and rhs else rhs).strip()
-        else:
-            text = ""
-        if text:
-            texts.append(text)
-    return texts
-
-
-def _ocr_lines_from_crop(engine, crop) -> list[dict]:
-    boxes, recs, _ = engine.text_system(crop)
-    if boxes is None or recs is None:
-        return []
-    lines: list[dict] = []
-    for box, rec in zip(boxes, recs):
-        text = str(rec[0] or "").strip()
-        if not text:
-            continue
-        lines.append(
-            {
-                "text": text,
-                "confidence": float(rec[1] or 0.0),
-                "text_region": box.tolist() if hasattr(box, "tolist") else box,
-            }
-        )
-    return lines
-
-
-def _offset_text_regions(lines: list[dict], x_offset: int, y_offset: int) -> list[dict]:
-    shifted: list[dict] = []
-    for line in lines:
-        item = dict(line)
-        region = item.get("text_region")
-        if isinstance(region, list):
-            item["text_region"] = [
-                [float(point[0]) + x_offset, float(point[1]) + y_offset]
-                for point in region
-                if isinstance(point, (list, tuple)) and len(point) >= 2
-            ]
-        shifted.append(item)
-    return shifted
-
-
-def _clean_text_len(lines: list[dict] | list[str]) -> int:
-    total = 0
-    for item in lines:
-        text = item.get("text", "") if isinstance(item, dict) else str(item)
-        total += len("".join(str(text).split()))
-    return total
-
-
-def _should_accept_ocr_recheck(region: dict, candidate_lines: list[dict]) -> bool:
-    if not candidate_lines:
-        return False
-    current_texts = _line_texts(region)
-    current_len = _clean_text_len(current_texts)
-    candidate_len = _clean_text_len(candidate_lines)
-    if current_texts and abs(len(candidate_lines) - len(current_texts)) > 1:
-        return False
-    avg_conf = sum(float(line.get("confidence", 0.0) or 0.0) for line in candidate_lines) / len(candidate_lines)
-    if avg_conf < 0.90:
-        return False
-    if candidate_len > current_len:
-        return True
-    current_joined = "".join(current_texts)
-    candidate_joined = "".join(str(line.get("text", "") or "") for line in candidate_lines)
-    similarity = SequenceMatcher(None, current_joined, candidate_joined).ratio()
-    return candidate_joined != current_joined and similarity >= 0.72
-
-
-def _merge_rechecked_lines(region: dict, candidate_lines: list[dict]) -> list[dict]:
-    current = [
-        dict(item) for item in (region.get("res") or [])
-        if isinstance(item, dict) and str(item.get("text", "") or "").strip()
-    ]
-    if not current:
-        return candidate_lines
-
-    def _y_center(line: dict) -> float | None:
-        region = line.get("text_region")
-        if not isinstance(region, list) or not region:
-            return None
-        ys = [
-            float(point[1])
-            for point in region
-            if isinstance(point, (list, tuple)) and len(point) >= 2
-        ]
-        if not ys:
-            return None
-        return (min(ys) + max(ys)) * 0.5
-
-    merged: list[dict] = []
-    changed = False
-    used_candidates: set[int] = set()
-    for old in current:
-        old_text = str(old.get("text", "") or "").strip()
-        old_y = _y_center(old)
-        best_index = -1
-        best_score = -1.0
-        for idx, candidate in enumerate(candidate_lines):
-            if idx in used_candidates:
-                continue
-            new_text = str(candidate.get("text", "") or "").strip()
-            if not new_text:
-                continue
-            similarity = SequenceMatcher(None, old_text, new_text).ratio()
-            if similarity < 0.55:
-                continue
-            new_y = _y_center(candidate)
-            y_score = 1.0
-            if old_y is not None and new_y is not None:
-                y_score = max(0.0, 1.0 - abs(old_y - new_y) / 64.0)
-            score = similarity * 0.75 + y_score * 0.25
-            if score > best_score:
-                best_score = score
-                best_index = idx
-
-        if best_index < 0:
-            merged.append(old)
-            continue
-
-        new = candidate_lines[best_index]
-        new_text = str(new.get("text", "") or "").strip()
-        old_conf = float(old.get("confidence", 0.0) or 0.0)
-        new_conf = float(new.get("confidence", 0.0) or 0.0)
-        similarity = SequenceMatcher(None, old_text, new_text).ratio()
-        use_new = (
-            new_text
-            and new_text != old_text
-            and similarity >= 0.60
-            and (
-                len("".join(new_text.split())) > len("".join(old_text.split()))
-                or new_conf >= old_conf + 0.02
-                or (new_conf >= 0.95 and old_conf < 0.95)
-            )
-        )
-        if use_new:
-            merged.append(new)
-            changed = True
-            used_candidates.add(best_index)
-        else:
-            merged.append(old)
-
-    def _line_key(line: dict) -> tuple[float, float]:
-        text_region = line.get("text_region")
-        if not isinstance(text_region, list) or not text_region:
-            return (float("inf"), float("inf"))
-        xs = [
-            float(point[0])
-            for point in text_region
-            if isinstance(point, (list, tuple)) and len(point) >= 2
-        ]
-        ys = [
-            float(point[1])
-            for point in text_region
-            if isinstance(point, (list, tuple)) and len(point) >= 2
-        ]
-        return ((min(ys) + max(ys)) * 0.5, min(xs)) if xs and ys else (float("inf"), float("inf"))
-
-    existing_texts = {str(line.get("text", "") or "").strip() for line in merged if str(line.get("text", "") or "").strip()}
-    for idx, candidate in enumerate(candidate_lines):
-        if idx in used_candidates:
-            continue
-        candidate_text = str(candidate.get("text", "") or "").strip()
-        if not candidate_text or candidate_text in existing_texts:
-            continue
-        if any(SequenceMatcher(None, candidate_text, existing).ratio() >= 0.86 for existing in existing_texts):
-            continue
-        if float(candidate.get("confidence", 0.0) or 0.0) < 0.88:
-            continue
-        merged.append(candidate)
-        existing_texts.add(candidate_text)
-        changed = True
-
-    if changed:
-        merged.sort(key=_line_key)
-        return merged
-    return current
-
-
-def recheck_text_ocr_with_preprocessing(engine, image, result: list) -> int:
-    """用扩边二值化 OCR 复核容易漏行/漏字符的标题和页首短文本块。"""
-    if not result:
-        return 0
-    h, w = image.shape[:2]
-    changed = 0
-    for region in result:
-        region_type = str(region.get("type", "") or "").lower()
-        if region_type not in OCR_RECHECK_TYPES:
-            continue
-        bbox = region.get("bbox")
-        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
-            continue
-        texts = _line_texts(region)
-        if not texts or len(texts) > 5:
-            continue
-        x1, y1, x2, y2 = [int(round(float(v))) for v in bbox]
-        bw = max(1, x2 - x1)
-        bh = max(1, y2 - y1)
-        is_top_text = region_type in {"text", "header"} and y1 <= max(96, int(round(h * 0.07)))
-        if region_type not in {"title"} and not is_top_text:
-            continue
-        pad_x = max(16, int(round(bw * 0.08)))
-        pad_y = max(8, int(round(bh * 0.12)))
-        pad_top = max(pad_y, 36, int(round(bh * 0.45))) if is_top_text else pad_y
-        ex1 = max(0, x1 - pad_x)
-        ey1 = max(0, y1 - pad_top)
-        ex2 = min(w, x2 + pad_x)
-        ey2 = min(h, y2 + pad_y)
-        crop = image[ey1:ey2, ex1:ex2]
-        if crop.size == 0:
-            continue
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        binary_bgr = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
-        candidate_lines = _ocr_lines_from_crop(engine, binary_bgr)
-        if not _should_accept_ocr_recheck(region, candidate_lines):
-            continue
-        shifted_candidates = _offset_text_regions(candidate_lines, ex1, ey1)
-        region["res"] = _merge_rechecked_lines(region, shifted_candidates)
-        xs = []
-        ys = []
-        for line in region["res"]:
-            for point in line.get("text_region") or []:
-                if isinstance(point, (list, tuple)) and len(point) >= 2:
-                    xs.append(float(point[0]))
-                    ys.append(float(point[1]))
-        if xs and ys:
-            region["bbox"] = [max(0, min(xs)), max(0, min(ys)), min(w, max(xs)), min(h, max(ys))]
-        region.setdefault("attributes", {})
-        region["ocr_rechecked"] = True
-        changed += 1
-    return changed
-
-
-def analyze_page(engine, adapter: PaddleAdapter, image, page_index: int, source_path: str) -> tuple[dict, list, float]:
+def analyze_page(engine, adapter: PaddleAdapter, image, page_index: int, source_path: str) -> tuple[RecognitionEvidence, list, float]:
     started_at = time.time()
     result, _ = engine(image, img_idx=page_index)
-    recheck_text_ocr_with_preprocessing(engine, image, result)
     elapsed = time.time() - started_at
-    page_document = adapter.convert(result, image, img_idx=page_index)
-    page_document["pages"][0]["image_path"] = source_path
-    return page_document, result, elapsed
+    evidence = adapter.collect_evidence(result, image, img_idx=page_index, source_file=source_path)
+    return evidence, result, elapsed
 
 
 def save_debug_images(
-    pipeline: RecoveryPipeline,
     image,
     result: list,
-    page_document: dict,
     sample_layout,
     page_index: int,
 ) -> None:
     from docflow.utils.visualization import (
         draw_layout_ocr,
         draw_sorted_layout,
-        extract_sorted_blocks,
     )
-
-    def _remap_to_source_bboxes(ordered_blocks: list[dict], source_page: dict) -> list[dict]:
-        def _should_use_source_bbox(current_bbox: list[float], source_bbox: list[float]) -> bool:
-            if len(current_bbox) != 4 or len(source_bbox) != 4:
-                return False
-            curr_w = max(0.0, float(current_bbox[2]) - float(current_bbox[0]))
-            curr_h = max(0.0, float(current_bbox[3]) - float(current_bbox[1]))
-            src_w = max(0.0, float(source_bbox[2]) - float(source_bbox[0]))
-            src_h = max(0.0, float(source_bbox[3]) - float(source_bbox[1]))
-            curr_area = curr_w * curr_h
-            src_area = src_w * src_h
-            if curr_area <= 1.0 or src_area <= 1.0:
-                return True
-
-            edge_delta = max(
-                abs(float(current_bbox[0]) - float(source_bbox[0])),
-                abs(float(current_bbox[1]) - float(source_bbox[1])),
-                abs(float(current_bbox[2]) - float(source_bbox[2])),
-                abs(float(current_bbox[3]) - float(source_bbox[3])),
-            )
-            area_ratio = curr_area / src_area
-            # 仅在 bbox 基本一致时回写 source 坐标，避免把 flow 内合并/裁剪后的
-            # 最终几何退回到原始 OCR 框，导致调试图“最后一行掉出框外”。
-            return edge_delta <= 12.0 and 0.85 <= area_ratio <= 1.15
-
-        source_by_id = {
-            str(block.get("id", "")): block
-            for block in source_page.get("blocks", [])
-        }
-        remapped: list[dict] = []
-        for block in ordered_blocks:
-            source = source_by_id.get(str(block.get("id", "")))
-            remapped_block = dict(block)
-            if (
-                source
-                and isinstance(source.get("bbox"), list)
-                and len(source["bbox"]) == 4
-                and _should_use_source_bbox(
-                    list(remapped_block.get("bbox", []) or []),
-                    source["bbox"],
-                )
-            ):
-                remapped_block["bbox"] = [float(v) for v in source["bbox"]]
-            remapped.append(remapped_block)
-        return remapped
 
     sample_layout.debug_dir.mkdir(parents=True, exist_ok=True)
     layout_path = sample_layout.debug_image_path(page_index, "layout_ocr")
     order_columns_path = sample_layout.debug_image_path(page_index, "reading_order_columns")
-    clean_regions = _converted_blocks_to_debug_regions(page_document)
     vis_layout = draw_layout_ocr(
         image,
-        clean_regions or result,
+        result,
         font_path=None,
         show_text_preview=True,
     )
     cv2.imwrite(str(layout_path), vis_layout)
-
-    actual_document = pipeline.build_document(deepcopy(page_document))
-    source_page = (page_document.get("pages") or [{}])[0]
-
-    ordered_blocks = _remap_to_source_bboxes(extract_sorted_blocks(actual_document, page_index=0), source_page)
+    ordered_blocks = [
+        {
+            "bbox": region.get("bbox", [0, 0, 0, 0]),
+            "col_index": 0,
+            "col_count": 1,
+            "spanned_cols": [0],
+        }
+        for region in sorted(
+            (item for item in result if isinstance(item, dict)),
+            key=lambda item: float(item.get("model_order") or 0.0),
+        )
+    ]
     vis_order_columns = draw_sorted_layout(image, ordered_blocks)
     cv2.imwrite(str(order_columns_path), vis_order_columns)
 
 
-def _sample_cleanup_removed_count(merged_document: dict) -> int:
-    total = 0
-    for page in merged_document.get("pages") or []:
-        attrs = page.get("attributes") or {}
-        total += int(attrs.get("cleanup_removed_count") or 0)
-    return total
-
-
 def _native_docx_table_count(path: Path) -> int:
     if not path.exists():
-        return 0
-    try:
-        document = DocxDocument(path)
-        return len(document.tables)
-    except Exception:
-        return 0
+        raise RuntimeError(f"DOCX was not produced: {path}")
+    document = DocxDocument(path)
+    return len(
+        document.element.body.xpath(
+            './/w:tbl[w:tblPr/w:tblCaption[@w:val="docflow-native-table"] or '
+            'w:tblPr/w:tblStyle[@w:val="TableGrid"]]'
+        )
+    )
+
+
+def _validate_content_integrity(evidence, analysis) -> None:
+    source_ids = Counter(
+        item.evidence_id
+        for page in evidence.pages
+        for item in page.items
+    )
+    resolved_ids = Counter(
+        source_id
+        for page in analysis.pages
+        for element in page.elements
+        for source_id in element.source_ids
+    )
+    if source_ids != resolved_ids:
+        missing = sorted((source_ids - resolved_ids).elements())
+        duplicated = sorted((resolved_ids - source_ids).elements())
+        raise RuntimeError(
+            f"Document Analysis provenance mismatch: missing={missing}, duplicated={duplicated}"
+        )
 
 
 def run_sample(
     engine,
     adapter: PaddleAdapter,
-    pipeline: RecoveryPipeline,
+    analyzer: DocumentAnalyzer,
     sample_path: Path,
     sample_layout,
     formats: list[str],
@@ -769,64 +467,64 @@ def run_sample(
     save_debug_vis: bool,
 ) -> int:
     pages = expand_to_pages(sample_path, dpi=pdf_dpi) if is_pdf_file(sample_path) else expand_to_pages(sample_path)
-    page_documents = []
+    evidence_pages = []
     for page_index, image in [(idx, img) for idx, (_page_name, img) in enumerate(pages)]:
         height, width = image.shape[:2]
         print(f"[页面] {sample_path.name} p{page_index + 1} ({width}x{height})")
-        page_document, result, elapsed = analyze_page(engine, adapter, image, page_index, str(sample_path))
+        evidence, result, elapsed = analyze_page(engine, adapter, image, page_index, str(sample_path))
         print(f"[分析] {sample_path.name} p{page_index + 1}: 检测到 {len(result)} 个区域，耗时 {elapsed:.2f}s")
         print_regions(result)
         if save_debug_vis:
             write_json(sample_layout.sample_dir / "raw_result.json", summarize_raw_result(result))
-            save_debug_images(pipeline, image, result, page_document, sample_layout, page_index)
-        page_documents.append(page_document)
+            save_debug_images(image, result, sample_layout, page_index)
+        evidence_pages.extend(evidence.pages)
 
-    merged_document = merge_page_documents(page_documents, source_path=str(sample_path))
-    document = pipeline.build_document(merged_document)
-    render_plan = build_render_plan(document, output_format="docx")
-    write_json(sample_layout.render_plan_path, render_plan)
-
-    # 将 RenderPlan 的 per-page render_mode 注入 document 和 merged_document，
-    # 使 docx renderer 和 pipeline.recover() 中的 renderer 都可以消费该提示。
-    for page_info in render_plan.get("pages", []):
-        idx = page_info["page_index"]
-        render_mode = page_info.get("render_mode", "")
-        # 注入到 merged_document（供 pipeline.recover 使用）
-        if idx < len(merged_document["pages"]):
-            page_entry = merged_document["pages"][idx]
-            if page_entry.get("attributes") is None:
-                page_entry["attributes"] = {}
-            page_entry["attributes"]["render_mode"] = render_mode
-        # 注入到 document（供 docx renderer 使用）
-        if idx < len(document.pages):
-            if document.pages[idx].attributes is None:
-                document.pages[idx].attributes = {}
-            document.pages[idx].attributes["render_mode"] = render_mode
+    evidence = RecognitionEvidence(tuple(evidence_pages), source_file=str(sample_path))
+    write_json(sample_layout.recognition_path, evidence.to_dict())
+    analysis = analyzer.analyze(evidence)
+    _validate_content_integrity(evidence, analysis)
+    write_json(sample_layout.json_path, analysis.to_dict())
+    reflow_plan = ReflowPlanner().plan(analysis)
+    write_json(sample_layout.render_plan_path, reflow_plan.to_dict())
 
     native_docx_table_count = 0
-    if "docx" in formats:
-        renderer = pipeline._get_renderer("docx")
-        renderer.render(document, str(sample_layout.docx_path))
-        # 将 build/render 阶段写入 page.attributes 的信息回写到 JSON
-        # （如字体分类统计、render_fit 与 style_inferred）。
-        for page_index, page in enumerate(document.pages):
-            if page_index >= len(merged_document["pages"]):
-                continue
-            page_entry = merged_document["pages"][page_index]
-            if page_entry.get("attributes") is None:
-                page_entry["attributes"] = {}
-            attrs = page_entry["attributes"]
-            if page.attributes:
-                attrs.update(page.attributes)
-        write_json(sample_layout.json_path, merged_document)
+    if "docx" in formats or "pdf" in formats:
+        ReflowDocxRenderer().render(reflow_plan, str(sample_layout.docx_path))
         native_docx_table_count = _native_docx_table_count(sample_layout.docx_path)
-    else:
-        write_json(sample_layout.json_path, merged_document)
+        semantic_table_count = sum(
+            element.kind == "table_group"
+            for page in analysis.pages
+            for element in page.elements
+        )
+        if native_docx_table_count < semantic_table_count:
+            raise RuntimeError(
+                f"native table loss: expected at least {semantic_table_count}, got {native_docx_table_count}"
+            )
     if "markdown" in formats:
-        pipeline.recover(merged_document, str(sample_layout.markdown_path), format="markdown")
+        ReflowMarkdownRenderer().render(analysis, str(sample_layout.markdown_path))
     if "pdf" in formats:
-        pipeline.recover(merged_document, str(sample_layout.pdf_path), format="pdf")
-    return len(page_documents), native_docx_table_count
+        subprocess.run(
+            [
+                find_libreoffice(),
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(sample_layout.sample_dir),
+                str(sample_layout.docx_path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+        if not sample_layout.pdf_path.exists():
+            raise RuntimeError("LibreOffice conversion completed without producing the PDF")
+        with fitz.open(sample_layout.pdf_path) as pdf:
+            if len(pdf) != len(evidence_pages):
+                raise RuntimeError(
+                    f"Page Budget exceeded: source={len(evidence_pages)}, rendered={len(pdf)}"
+                )
+    return len(evidence_pages), native_docx_table_count
 
 
 def main() -> int:
@@ -866,18 +564,17 @@ def main() -> int:
     print(f"版面模型：{paths.layout_model_spec.name} -> {paths.layout_model}")
     engine = make_engine(paths, run_layout.runtime_dir)
     adapter = PaddleAdapter()
-    pipeline = RecoveryPipeline()
-
+    analyzer = DocumentAnalyzer(FontClassifier(str(paths.models_root / "font" / "mobilenetv3.ckpt")))
     failures: list[str] = []
     sample_records = []
     total_pages = 0
     quality_summary = {
-        "layout_profiles": {},
         "native_docx_table_count": 0,
-        "cleanup_removed_total": 0,
+        "analysis_diagnostics_total": 0,
+        "fit_scaled_pages": 0,
     }
     strategy_stats = {
-        "rendering_strategies": {},
+        "flow_kinds": {},
     }
     for sample_path in samples:
         sample_layout = run_layout.create_sample(sample_path)
@@ -885,7 +582,7 @@ def main() -> int:
             page_count = run_sample(
                 engine=engine,
                 adapter=adapter,
-                pipeline=pipeline,
+                analyzer=analyzer,
                 sample_path=sample_path,
                 sample_layout=sample_layout,
                 formats=formats,
@@ -897,23 +594,23 @@ def main() -> int:
             else:
                 native_docx_table_count = 0
             total_pages += page_count
-            cleanup_removed = _sample_cleanup_removed_count(
-                json.loads(sample_layout.json_path.read_text(encoding="utf-8"))
-            )
-            quality_summary["cleanup_removed_total"] += cleanup_removed
             quality_summary["native_docx_table_count"] += native_docx_table_count
-            render_plan = json.loads(sample_layout.render_plan_path.read_text(encoding="utf-8"))
-            for key, value in render_plan["summary"]["layout_profiles"].items():
-                quality_summary["layout_profiles"][key] = quality_summary["layout_profiles"].get(key, 0) + value
-            for key, value in render_plan["summary"]["rendering_strategies"].items():
-                strategy_stats["rendering_strategies"][key] = strategy_stats["rendering_strategies"].get(key, 0) + value
+            analysis_payload = json.loads(sample_layout.json_path.read_text(encoding="utf-8"))
+            diagnostic_count = sum(len(page.get("diagnostics") or []) for page in analysis_payload.get("pages") or [])
+            quality_summary["analysis_diagnostics_total"] += diagnostic_count
+            plan_payload = json.loads(sample_layout.render_plan_path.read_text(encoding="utf-8"))
+            for page in plan_payload.get("pages") or []:
+                quality_summary["fit_scaled_pages"] += int(float(page.get("fit_scale", 1.0)) < 1.0)
+                for section in page.get("sections") or []:
+                    key = section.get("kind", "unknown")
+                    strategy_stats["flow_kinds"][key] = strategy_stats["flow_kinds"].get(key, 0) + 1
             sample_records.append(
                 {
                     "sample_key": sample_layout.sample_key,
                     "source_path": str(sample_path),
                     "sample_dir": str(sample_layout.sample_dir),
                     "page_count": page_count,
-                    "cleanup_removed_count": cleanup_removed,
+                    "analysis_diagnostic_count": diagnostic_count,
                     "native_docx_table_count": native_docx_table_count,
                     "render_plan_path": str(sample_layout.render_plan_path),
                     "status": "ok",
@@ -927,7 +624,7 @@ def main() -> int:
                     "source_path": str(sample_path),
                     "sample_dir": str(sample_layout.sample_dir),
                     "page_count": 0,
-                    "cleanup_removed_count": 0,
+                    "analysis_diagnostic_count": 0,
                     "native_docx_table_count": 0,
                     "render_plan_path": str(sample_layout.render_plan_path),
                     "status": "failed",
