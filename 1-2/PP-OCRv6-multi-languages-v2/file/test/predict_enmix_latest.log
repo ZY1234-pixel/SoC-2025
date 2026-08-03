@@ -1,0 +1,18 @@
+/home/ww/anaconda3/envs/paddleocr37/lib/python3.9/site-packages/paddle/utils/cpp_extension/extension_utils.py:717: UserWarning: No ccache found. Please be aware that recompiling all source files may be required. You can download and install ccache from: https://github.com/ccache/ccache/blob/master/doc/INSTALL.md
+  warnings.warn(warning_message)
+[2026/08/03 23:13:25] ppocr WARNING: The first GPU is used for inference by default, GPU ID: 0
+[2026/08/03 23:13:25] ppocr INFO: In PP-OCRv3, rec_image_shape parameter defaults to '3, 48, 320', if you are using recognition model with PP-OCRv2 or an older version, please set --rec_image_shape='3,32,320
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/bg_en_1.png:('Ако използвате УРА, но паролата ви е "123456", хакер може да я разбие за по-малко от 1', 0.9681823253631592)
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/bg_en_2.png:('включете two - factor authentication - нали това е по-безопасно? Също така, не използвайте', 0.9657405614852905)
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/el_en_1.png:('Ανθες να μάθεις μια γλώσσα σε 6 μήνες, πρέπει να αφιερώνεις 1ώρα τη μέρα, αλλά με τη', 0.9787580370903015)
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/el_en_2.png:('language app, όπως το Duoling ο, και να εξασκείσαι 3ο λεπτά επιπλέον κάθε βράδυ; Ωστόσο, η', 0.9531840682029724)
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/kk_en_1.png:('Мен күн сайын 10о о00 қадам жасаймын деп ойлаймын, бірақ менің fitness tracker-імтек 8', 0.9770349264144897)
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/kk_en_2.png:('калибрленбеген, немесе мен телефонның steр counter-ін қосуды ұмытыппын; екі құрылғыны', 0.9656318426132202)
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/ko_en_1.png:('하루에 2시간만 AI 도구로 일하면 생산성이 30% 증가한다는 연구 결과가 있지만, 잘못 사용하면 오히려', 0.9806308746337891)
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/ko_en_2.png:('10% 감소할 수도 있다고 합니다; 그렇다면 우리는 어떻게 해야 할까요? 또한 매일 5분씩 피드백을 체크하', 0.9786241054534912)
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/ru_en_1.png:('специальные apps для ограничения времени, можно сократить до 1 часа; освободившиеся 2', 0.9821445345878601)
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/ru_en_2.png:('попробовать? Аесли добавить ещё 30 минут на медитацию, эффект будет ещё лучше!', 0.9860436916351318)
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/th_en_1.png:('ฉำคณไดรบ email Gส 5 ลงกโดย 3 ลงก้นปลอดภย แต 2 ลงกอาจเปนไวรส แลวคณจะเปด้งหมดหรอไม? ฉนขอ', 0.9427971243858337)
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/th_en_2.png:('แนะนาใหใช antivirus กอน และจำไววำ 80% ของการโจมสทางไซเบอรเรมจากลงกปลอม!', 0.9661725759506226)
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/uk_en_1.png:('Чи знає те ви, що 90 % людей не перевіряють факти в інтернеті, але якщо використовувати', 0.9758121967315674)
+[2026/08/03 23:13:26] ppocr INFO: Predicts of ./test-images/single7_en/uk_en_2.png:('fact - checking websites, так і як Snopes, Politico або Fact Check:org, то точність може зрости до', 0.9748964309692383)
