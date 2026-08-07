@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+.idea/
+
+# 权重与导出产物（不随仓库提供）
+weights/
+*.pt
+*.torchscript.pt
+*.pnnx.*
+*.ncnn.param
+*.ncnn.bin
+*.onnx
+
+# 训练输出
+runs/
+runs_heatmap/
+
+# 推理结果
+ncnn_results/
+ncnn_test/
+val_metrics/
+*.jpg
+*.png
+
+# 部署产物
+deploy/ncnn/build/
+deploy/ncnn/*.exe
+deploy/ncnn/*.dll
