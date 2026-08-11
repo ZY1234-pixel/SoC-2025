@@ -1,0 +1,26 @@
+# 数据集介绍
+
+2 种语言如下：
+——阿拉伯语：`ar`
+——希伯来语：`he`
+
+
+本数据集数据集通过“text-renderer”生成，语料主要来自 Wikimedia `pages-articles` dump，共11万张，包括训练集10万张，验证集1万张。
+本版重点解决 RTL 语言与英文、数字混排时的训练标签顺序和推理后处理问题。训练阶段标签采用适合 PaddleOCR 从左到右学习图像特征的视觉顺序；测试阶段再通过后处理将识别结果转换为与 `label.txt` 一致的逻辑文本顺序。
+
+# 数据集格式
+
+mixed2_data
+——images
+        ——train_word_xx.jpg
+        ——val_word_xx.jpg
+——dict.txt
+——train.txt
+——val.txt
+
+
+# 数据集路径
+
+通过网盘分享的文件：mixed2_data.zip
+链接: https://pan.baidu.com/s/1VfnL2pIKzyYlrU0lr5DZJg?pwd=ecaw 提取码: ecaw 
+--来自百度网盘超级会员v6的分享
