@@ -24,13 +24,13 @@ def main():
         "weight_decay": 0.0005,
         "warmup_epochs": 3.0,
 
-        # ---- 增强（旋转 + 透视组合；角点被移出画面时自动标记不可见并屏蔽 loss）----
+        # ---- 增强（v14：±45° 旋转 + 透视，scale 0.4 缩放留边；角点移出画面时自动标不可见并屏蔽 loss）----
         "mosaic": 0.0,
         "close_mosaic": 0,
-        "degrees": 10.0,
+        "degrees": 45.0,
         "shear": 0.0,
-        "perspective": 0.001,
-        "scale": 0.1,
+        "perspective": 0.002,
+        "scale": 0.4,
         "translate": 0.05,
         "fliplr": 0.5,
         "hsv_h": 0.02,
@@ -54,7 +54,7 @@ def main():
         "save": True,
         "plots": True,
         "project": "runs_heatmap",
-        "name": "heatmap_v12_512_aug",
+        "name": "heatmap_v14_512_aug",
         "exist_ok": True,
     }
 
@@ -63,10 +63,10 @@ def main():
     trainer.train()
 
     # 训练完成标记
-    done_path = os.path.join("runs_heatmap", "heatmap_v12_512_aug", "TRAINING_DONE.txt")
+    done_path = os.path.join("runs_heatmap", "heatmap_v14_512_aug", "TRAINING_DONE.txt")
     with open(done_path, "w", encoding="utf-8") as f:
         f.write("训练完成\n")
-    print("训练完成，权重保存在:", os.path.join("runs_heatmap", "heatmap_v12_512_aug", "weights"))
+    print("训练完成，权重保存在:", os.path.join("runs_heatmap", "heatmap_v14_512_aug", "weights"))
 
 
 if __name__ == "__main__":

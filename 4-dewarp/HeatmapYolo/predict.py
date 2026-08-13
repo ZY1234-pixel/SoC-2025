@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 import torch
 
+from corner_postprocess import postprocess_corners
 from heatmap_cls_model import HeatmapClsModel
 from heatmap_utils import decode_heatmap
 
@@ -37,7 +38,7 @@ def letterbox(im, new_shape=(512, 512), color=(114, 114, 114)):
 def main():
     ap = argparse.ArgumentParser(description="热力图角点检测 - 单张推理")
     ap.add_argument("--image", required=True, help="输入图片路径")
-    ap.add_argument("--weights", default="weights/heatmap_v12_512_aug/last.pt")
+    ap.add_argument("--weights", default="weights/heatmap_v14_512_aug/last.pt")
     ap.add_argument("--imgsz", type=int, default=512)
     ap.add_argument("--out", default="predict_result.jpg")
     args = ap.parse_args()
@@ -71,6 +72,9 @@ def main():
     coords_abs = np.zeros_like(coords_norm)
     coords_abs[:, 0] = (coords_norm[:, 0] * args.imgsz - dw) / r
     coords_abs[:, 1] = (coords_norm[:, 1] * args.imgsz - dh) / r
+    # 置信度门控 + 几何一致性后处理（防飞出画面 / 角点扎堆 / 连线交叉）
+    conf = kpt_heatmap[0].cpu().numpy().max(axis=(1, 2))
+    coords_abs = postprocess_corners(coords_abs, conf, img_raw.shape[1], img_raw.shape[0])
 
     print(f"类别: {cls_name}")
     print(f"角点坐标 (原图像素):\n{coords_abs.round(2)}")

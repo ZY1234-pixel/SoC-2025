@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import torch
 
+from corner_postprocess import postprocess_corners
 from heatmap_cls_model import HeatmapClsModel
 from heatmap_utils import decode_heatmap
 
@@ -51,6 +52,9 @@ def infer_one(model, img_path, device, imgsz):
     coords_abs = np.zeros_like(coords_norm)
     coords_abs[:, 0] = (coords_norm[:, 0] * imgsz - dw) / r
     coords_abs[:, 1] = (coords_norm[:, 1] * imgsz - dh) / r
+    # 置信度门控 + 几何一致性后处理（防飞出画面 / 角点扎堆 / 连线交叉）
+    conf = kpt_heatmap[0].cpu().numpy().max(axis=(1, 2))
+    coords_abs = postprocess_corners(coords_abs, conf, img_raw.shape[1], img_raw.shape[0])
 
     img_out = img_raw.copy()
     for i, (x, y) in enumerate(coords_abs):
@@ -68,7 +72,7 @@ def main():
     ap = argparse.ArgumentParser(description="热力图角点检测 - 批量推理")
     ap.add_argument("--input_dir", required=True)
     ap.add_argument("--output_dir", default="predict_results")
-    ap.add_argument("--weights", default="weights/heatmap_v12_512_aug/last.pt")
+    ap.add_argument("--weights", default="weights/heatmap_v14_512_aug/last.pt")
     ap.add_argument("--imgsz", type=int, default=512)
     args = ap.parse_args()
 

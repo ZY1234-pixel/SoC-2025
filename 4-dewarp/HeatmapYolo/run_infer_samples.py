@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import torch
 
+from corner_postprocess import postprocess_corners
 from heatmap_cls_model import HeatmapClsModel
 from heatmap_utils import decode_heatmap
 
@@ -17,6 +18,19 @@ from heatmap_utils import decode_heatmap
 VAL_LBL = r"D:\奔图\deeplabv3p_zzh\YoloV8_Pose\data\val\labels"
 WX_LBL = r"D:\奔图\deeplabv3p_zzh\YoloV8_Pose\data\0722WKX\Data\labels"
 NAMES = {0: "double_page_book", 1: "newspaper_poster", 2: "receipt", 3: "screen", 4: "single_page", 5: "unclassified"}
+
+
+def corner_strength(gray, x, y, half=40):
+    """预测点处图像边缘能量：文档角应有两组正交边缘交汇，背景/边框通常较弱"""
+    h, w = gray.shape
+    x0, x1 = max(0, int(x) - half), min(w, int(x) + half)
+    y0, y1 = max(0, int(y) - half), min(h, int(y) + half)
+    patch = gray[y0:y1, x0:x1]
+    if patch.size < 4:
+        return 0.0
+    gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1, ksize=3)
+    return float(np.sqrt(gx**2 + gy**2).mean())
 
 
 def letterbox(im, new_shape=(512, 512), color=(114, 114, 114)):
@@ -94,6 +108,8 @@ def main():
         cls_idx = int(cls_logits.argmax(-1).item())
         dec = decode_heatmap(hm)[0].cpu().numpy()
         pred = np.stack([(dec[:, 0] * args.imgsz - dw) / r, (dec[:, 1] * args.imgsz - dh) / r], axis=1)
+        conf = hm[0].cpu().numpy().max(axis=(1, 2))
+        post = postprocess_corners(pred, conf, W, H)
 
         lp = find_label(ip)
         gt_cls, gt_norm = load_gt(lp) if lp else (None, None)
@@ -101,20 +117,43 @@ def main():
 
         # 按原图分辨率输出，标注随宽度轻微缩放，圆点保持小尺寸
         out = img.copy()
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         font = cv2.FONT_HERSHEY_SIMPLEX
         fs = max(0.6, min(1.3, W / 2200.0))
         th = max(2, int(round(2.0 * fs)))
         rad = max(5, min(10, W // 500))
         off = max(10, W // 240)
         cv2.putText(out, f"pred: {NAMES.get(cls_idx, cls_idx)}", (off, int(44 * fs)), font, fs, (255, 0, 255), th)
-        cv2.putText(out, "p=pred(红) g=GT(绿) 黄=误差px", (off, int(70 * fs)), font, fs * 0.7, (255, 255, 255), max(1, th - 1))
+        edges = [float(np.linalg.norm(post[(i + 1) % 4] - post[i])) for i in range(4)]
+        thin = min(edges) / (max(edges) + 1e-6) < 0.08
+        strengths = [corner_strength(gray, post[i, 0], post[i, 1]) for i in range(4)]
+        mx_s = max(strengths) + 1e-6
+        weak_border = [
+            i
+            for i in range(4)
+            if strengths[i] < 0.5 * mx_s
+            and (
+                post[i, 0] < 0.02 * W
+                or post[i, 0] > 0.98 * W
+                or post[i, 1] < 0.02 * H
+                or post[i, 1] > 0.98 * H
+            )
+        ]
+        flag = " [LOW CONF: thin quad]" if thin else ""
+        flag += " [WEAK]" if weak_border else ""
+        cv2.putText(out, f"p=pred(红) g=GT(绿) 黄=误差px{flag}", (off, int(70 * fs)),
+                    font, fs * 0.7, (255, 255, 255), max(1, th - 1))
 
-        pts = pred.astype(np.int32)
+        pts = post.astype(np.int32)
         cv2.polylines(out, [pts], True, (0, 0, 255), th)
-        for i, (x, y) in enumerate(pred):
+        for i, (x, y) in enumerate(post):
             xi, yi = int(round(x)), int(round(y))
             cv2.circle(out, (xi, yi), rad, (0, 0, 255), -1)
             cv2.putText(out, f"p{i}", (xi + off, yi - off), font, fs, (0, 0, 255), th)
+        for i in weak_border:
+            xi, yi = int(round(post[i, 0])), int(round(post[i, 1]))
+            cv2.circle(out, (xi, yi), rad + 6, (0, 255, 255), 2)
+            cv2.putText(out, f"w{i}", (xi + off, yi + int(22 * fs)), font, fs, (0, 255, 255), th)
         if gt is not None:
             gpts = gt.astype(np.int32)
             cv2.polylines(out, [gpts], True, (0, 255, 0), th)
@@ -122,7 +161,7 @@ def main():
                 xi, yi = int(round(x)), int(round(y))
                 cv2.circle(out, (xi, yi), int(rad * 0.8), (0, 255, 0), -1)
                 cv2.putText(out, f"g{i}", (xi + off, yi + int(24 * fs)), font, fs, (0, 255, 0), th)
-                err = np.linalg.norm(pred[i] - gt[i])
+                err = np.linalg.norm(post[i] - gt[i])
                 cv2.putText(out, f"{err:.1f}px", (xi + off, yi + int(48 * fs)), font, fs * 0.85, (255, 255, 0), th)
         else:
             cv2.putText(out, "no GT", (off, int(96 * fs)), font, fs, (0, 255, 255), th)
