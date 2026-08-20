@@ -10,7 +10,7 @@ from typing import Iterable, List
 from model import RuntimePaths
 
 
-def ensure_runtime_paths(paths: RuntimePaths) -> None:
+def ensure_runtime_paths(paths: RuntimePaths, table_backend: str = "rapidai") -> None:
     required = [
         paths.docflow_src / "docflow",
         paths.paddle_root / "ppstructure",
@@ -19,8 +19,11 @@ def ensure_runtime_paths(paths: RuntimePaths) -> None:
         paths.layout_model,
         paths.det_model,
         paths.rec_model,
-        paths.table_model,
+        paths.rec_char_dict,
+        paths.rapidocr_rec_char_dict,
     ]
+    if table_backend == "slanet":
+        required.append(paths.table_model)
     missing = [str(p) for p in required if not p.exists()]
     if missing:
         raise RuntimeError("缺少必要运行资产：\n  " + "\n  ".join(missing))

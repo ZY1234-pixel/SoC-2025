@@ -9,6 +9,12 @@ Pillow>=9.0
 pyyaml>=6.0
 tqdm>=4.66
 requests>=2.31
+openvino>=2025.3,<2026
+onnx>=1.16.1,<=1.17.0
+rapidocr-onnxruntime==1.4.4
+wired-table-rec==1.2.0
+lineless-table-rec==0.1.0
+table-cls==1.2.0
 torch>=2.0
 torchvision>=0.15
 

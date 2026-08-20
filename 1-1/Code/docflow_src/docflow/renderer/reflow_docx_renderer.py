@@ -16,6 +16,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING, WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
+from PIL import Image
 
 from docflow.model.stages import FlowKind, Rect, ReflowLayoutPlan
 from docflow.planning.text_metrics import (
@@ -24,9 +25,12 @@ from docflow.planning.text_metrics import (
     visual_text,
 )
 from docflow.renderer.docx_utils.html_table import (
+    estimate_table_cell_lines,
     get_table_cell_placements,
+    get_table_cell_text_lines,
     get_table_column_weights,
     get_table_dimensions,
+    get_table_rows,
 )
 from docflow.renderer.docx_utils.table_fmt import (
     clear_table_borders,
@@ -545,7 +549,14 @@ class ReflowDocxRenderer:
             table.style = "Table Grid"
         elif rule_style == "horizontal":
             head = source.find("thead")
-            set_horizontal_table_borders(table, len(head.find_all("tr", recursive=False)) if head else 0)
+            header_rows = len(head.find_all("tr", recursive=False)) if head else 0
+            if not header_rows:
+                rows_with_cells = get_table_rows(source)
+                header_rows = next(
+                    (index for index, row in enumerate(rows_with_cells) if row.find("th", recursive=False) is None),
+                    len(rows_with_cells),
+                )
+            set_horizontal_table_borders(table, header_rows)
         else:
             clear_table_borders(table)
         left_indent = float(element.payload.get("left_indent_pt", 0.0))
@@ -560,7 +571,7 @@ class ReflowDocxRenderer:
                 "left": WD_TABLE_ALIGNMENT.LEFT,
                 "right": WD_TABLE_ALIGNMENT.RIGHT,
             }.get(element.payload.get("alignment"), WD_TABLE_ALIGNMENT.CENTER)
-        column_weights = get_table_column_weights(source)
+        column_weights = get_table_column_weights(source, element.payload.get("table_column_width_ratios") or ())
         table_width = container_width * float(element.payload.get("width_fraction", 1.0))
         column_widths = [table_width * weight / sum(column_weights) for weight in column_weights]
         set_table_col_widths(table, column_widths)
@@ -573,31 +584,49 @@ class ReflowDocxRenderer:
             (
                 (sum(column_widths[column : column + span]) - 2.0)
                 * 0.96
-                / max(estimate_text_units(cell.get_text(" ", strip=True)), 1.0)
+                / max((estimate_text_units(line) for line in get_table_cell_text_lines(cell)), default=1.0)
                 for _row, column, _row_span, span, cell in placements
             ),
             default=font_size,
         )
         if fit_size >= minimum_size:
             font_size = min(font_size, fit_size)
-        source_row_height = float(element.payload.get("table_height_pt") or 0.0) / rows
-        row_heights = [max(source_row_height, font_size * 1.2 + 2.0) for _ in range(rows)]
+        source_height = float(element.payload.get("table_height_pt") or 0.0) * fit_scale
+        row_ratios = element.payload.get("table_row_height_ratios") or ()
+        if len(row_ratios) == rows:
+            source_row_heights = [source_height * float(ratio) for ratio in row_ratios]
+        else:
+            source_row_height = 0.0 if element.payload.get("table_content_fit") else source_height / rows
+            source_row_heights = [source_row_height] * rows
+        row_heights = [max(source_row_heights[row], font_size * 1.2 + 2.0) for row in range(rows)]
         for row_index, column, row_span, span, cell in placements:
             cell_width = sum(column_widths[column : column + span])
             available_width = max((cell_width - 2.0) * 0.96, 1.0)
-            lines = max(1, math.ceil(estimate_text_units(cell.get_text(" ", strip=True)) * font_size / available_width))
+            lines = max(1, estimate_table_cell_lines(cell, font_size, available_width))
             required_per_row = (lines * font_size * 1.2 + 2.0) / max(row_span, 1)
             for target_row in range(row_index, min(row_index + row_span, rows)):
                 row_heights[target_row] = max(row_heights[target_row], required_per_row)
-        for row, row_height in zip(table.rows, row_heights):
+        image_rows = {
+            row_index
+            for row_index, _column, row_span, _span, cell in placements
+            if cell.find("img", src=True)
+            for row_index in range(row_index, min(row_index + row_span, rows))
+        }
+        for row_index, (row, row_height) in enumerate(zip(table.rows, row_heights)):
             row.height = Pt(row_height)
-            row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
+            row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST if row_index in image_rows else WD_ROW_HEIGHT_RULE.EXACTLY
         row_styles = {
             int(row): (fill, text_color)
             for row, fill, text_color in element.payload.get("table_row_styles", ())
         }
+        cell_styles = {
+            (int(row), int(column)): (alignment, bool(bold))
+            for row, column, alignment, bold in element.payload.get("table_cell_styles", ())
+        }
         for row_index, column_index, row_span, column_span, cell_source in placements:
             cell = table.cell(row_index, column_index)
+            cell_width = sum(column_widths[column_index : column_index + column_span])
+            available_width = max((cell_width - 2.0) * 0.96, 1.0)
             if row_span > 1 or column_span > 1:
                 cell = cell.merge(table.cell(row_index + row_span - 1, column_index + column_span - 1))
             paragraph = cell.paragraphs[0]
@@ -608,8 +637,36 @@ class ReflowDocxRenderer:
             paragraph.paragraph_format.widow_control = False
             paragraph.paragraph_format.keep_together = False
             paragraph.paragraph_format.keep_with_next = False
+            alignment, bold = cell_styles.get(
+                (row_index, column_index),
+                ("center" if cell_source.name == "th" else "left", cell_source.name == "th"),
+            )
+            paragraph.alignment = _ALIGNMENT.get(alignment, WD_ALIGN_PARAGRAPH.LEFT)
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             set_cell_margins(cell, top=20, bottom=20, start=20, end=20)
-            run = paragraph.add_run(cell_source.get_text(" ", strip=True))
+            image_nodes = cell_source.find_all("img", src=True)[:4]
+            cell_text = "\n".join(get_table_cell_text_lines(cell_source))
+            if image_nodes:
+                paragraph.paragraph_format.line_spacing = None
+                paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
+            text_lines = (
+                max(1, estimate_table_cell_lines(cell_source, font_size, available_width))
+                if cell_text
+                else 0
+            )
+            cell_height = sum(row_heights[row_index : row_index + row_span])
+            image_height = max(
+                (cell_height - text_lines * font_size * 1.2 - 2.0) / max(len(image_nodes), 1),
+                8.0,
+            )
+            for image_index, image_node in enumerate(image_nodes):
+                data = self._decode_image(image_node.get("src"))
+                if data:
+                    image_width, fitted_height = self._table_image_size(data, cell_width, image_height)
+                    paragraph.add_run().add_picture(io.BytesIO(data), width=Pt(image_width), height=Pt(fitted_height))
+                    if cell_text or image_index + 1 < len(image_nodes):
+                        paragraph.add_run().add_break()
+            run = paragraph.add_run(cell_text)
             self._style_run(
                 run,
                 role,
@@ -617,11 +674,29 @@ class ReflowDocxRenderer:
                 font_size_pt=font_size,
                 font_family=element.payload.get("font_family"),
             )
+            run.bold = bold
+            if "row-header" in (cell_source.get("class") or ()):
+                self._shade(cell._tc.get_or_add_tcPr(), "EEF7FF")
+                run.bold = True
+            elif cell_source.name == "th":
+                self._shade(cell._tc.get_or_add_tcPr(), "F2F5F8")
             if row_index in row_styles:
                 fill, text_color = row_styles[row_index]
                 self._shade(cell._tc.get_or_add_tcPr(), fill)
                 run.font.color.rgb = RGBColor.from_string(text_color.lstrip("#"))
         self._collapse_trailing_paragraph(container)
+
+    @staticmethod
+    def _table_image_size(data: bytes, cell_width: float, cell_height: float = 47.5) -> tuple[float, float]:
+        max_width = max(8.0, cell_width - 4.0)
+        max_height = max(8.0, cell_height - 4.0)
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                width, height = image.size
+            scale = min(max_width / max(width, 1), max_height / max(height, 1))
+            return max(1.0, width * scale), max(1.0, height * scale)
+        except (OSError, ValueError):
+            return max_width, max_height
 
     @staticmethod
     def _format_layout_table(table, widths, gutter_pt: float = 0.0) -> None:
@@ -688,8 +763,10 @@ class ReflowDocxRenderer:
     @staticmethod
     def _decode_image(value):
         try:
+            if isinstance(value, str) and value.startswith("data:"):
+                value = value.split(",", 1)[1]
             return base64.b64decode(value) if value else None
-        except (ValueError, TypeError):
+        except (IndexError, ValueError, TypeError):
             return None
 
     @staticmethod

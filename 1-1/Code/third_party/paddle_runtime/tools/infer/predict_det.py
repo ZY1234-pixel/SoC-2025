@@ -50,7 +50,7 @@ class TextDetector(object):
             logger = get_logger()
         self.args = args
         self.det_algorithm = args.det_algorithm
-        self.use_onnx = bool(args.use_onnx) or str(args.det_model_dir or "").lower().endswith(".onnx")
+        self.use_onnx = bool(args.use_onnx) or str(args.det_model_dir or "").lower().endswith((".onnx", ".xml"))
         args.use_onnx = self.use_onnx
         pre_process_list = [
             {

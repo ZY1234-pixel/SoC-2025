@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
+import numpy as np
 from PIL import Image, ImageEnhance, ImageOps
 
 
@@ -113,7 +114,6 @@ class FontClassifier:
         self.invert = bool(invert)
         self.transform = FixedWidthLineTransform(height, width, grayscale=grayscale, eval_crops=eval_crops)
         self._model = None
-        self._device = None
 
     @staticmethod
     def _resolve_checkpoint(checkpoint_path: str) -> Path:
@@ -122,66 +122,27 @@ class FontClassifier:
         if checkpoint_text:
             raw = Path(checkpoint_text).expanduser()
             candidates.append(raw if raw.is_absolute() else Path.cwd() / raw)
-        candidates.append(Path(__file__).resolve().parents[3] / "models" / "font" / "mobilenetv3.ckpt")
+        candidates.append(Path(__file__).resolve().parents[3] / "models_openvino" / "font_openvino" / "mobilenetv3.xml")
         for candidate in candidates:
             if candidate.is_file():
                 return candidate.resolve()
         raise FileNotFoundError(f"font checkpoint not found: {checkpoint_path}")
 
-    def _select_device(self):
-        import torch
-
-        name = str(self.device_name or "auto").lower()
-        if name == "auto":
-            return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        if name.startswith("cuda") and not torch.cuda.is_available():
-            return torch.device("cpu")
-        return torch.device(name)
-
     def _ensure_model(self):
         if self._model is not None:
             return self._model
-        import torch
-        import torch.nn as nn
+        from docflow.inference import OpenVINOInferSession
 
-        try:
-            import torchvision
-        except Exception as exc:  # pragma: no cover - environment dependent
-            raise RuntimeError("font classification requires torchvision") from exc
-
-        model = torchvision.models.mobilenet_v3_small(weights=None)
-        model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, len(LABELS))
-        checkpoint = torch.load(self.checkpoint_path, map_location="cpu")
-        expected_classes = int(checkpoint.get("hyper_parameters", {}).get("num_classes", len(LABELS)))
-        if expected_classes != len(LABELS):
-            raise RuntimeError(
-                f"font checkpoint has {expected_classes} classes; expected {len(LABELS)}: {list(LABELS)}"
-            )
-        state_dict = checkpoint.get("state_dict", checkpoint)
-        model_state = {
-            key.removeprefix("model."): value
-            for key, value in state_dict.items()
-            if key.startswith("model.")
-        } or dict(state_dict)
-        model.load_state_dict(model_state, strict=True)
-        self._device = self._select_device()
-        model.to(self._device)
-        model.eval()
-        self._model = model
-        return model
+        self._model = OpenVINOInferSession(self.checkpoint_path)
+        return self._model
 
     def predict_image(self, image: Image.Image) -> FontPrediction:
-        import torch
-
         model = self._ensure_model()
-        batch = self.transform(self._preprocess_crop(image)).unsqueeze(0).to(self._device or self._select_device())
-        with torch.inference_mode():
-            batch_size, crop_count, channels, height, width = batch.shape
-            logits = model(batch.reshape(batch_size * crop_count, channels, height, width))
-            probability = torch.softmax(
-                logits.view(batch_size, crop_count, -1).mean(dim=1) / self.temperature,
-                dim=1,
-            ).mean(dim=0).detach().cpu()
+        batch = self.transform(self._preprocess_crop(image)).numpy()
+        logits = model({"images": batch})[0].mean(axis=0) / self.temperature
+        logits -= logits.max()
+        probability = np.exp(logits)
+        probability /= probability.sum()
         scores = {label: float(probability[index]) for index, label in enumerate(LABELS)}
         ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         label, confidence = ranked[0]

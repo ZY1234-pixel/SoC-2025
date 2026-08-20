@@ -1,14 +1,18 @@
 # 部署说明
 
-本文说明图片文本解析及矢量化转换模块的本地部署方法。所有命令均从仓库根目录执行。
+本文说明开发人员拿到 Git 仓库后的环境配置、模型放置和最小验收方法。项目不依赖开发者本机的 Conda 环境，以下命令均从仓库根目录执行。
 
 ## 运行环境
 
-项目基于 Python 3.9 开发和测试，支持 Linux 与 Windows。生成 DOCX 和 Markdown 不依赖桌面软件；导出 PDF 需要安装 LibreOffice，并确保 `libreoffice`、`soffice` 或 `soffice.exe` 可从命令行调用。
+- Python 3.9
+- Linux 或 Windows x86-64
+- CPU 推理
+- OpenVINO 2025.3
+- 导出 PDF 时额外安装 LibreOffice
 
-仓库根目录应包含 `Code/`、`dataset/` 和 `doc/`。`test-result/` 无需提前创建，脚本会在首次运行时生成。
+REC 在 CPU 支持 BF16 时使用 BF16/FP32 混合执行；不支持时自动回退 FP32。
 
-## 安装 Python 依赖
+## 安装依赖
 
 Linux：
 
@@ -28,65 +32,85 @@ python -m pip install --upgrade pip
 python -m pip install -r Code\requirement.txt
 ```
 
-项目源码无需单独安装为 wheel。运行 `Code/test.py` 时，脚本会将 `Code/docflow_src/` 和仓库内的 PaddleOCR 运行时加入 Python 路径。
+`Code/test.py` 会直接加载仓库内的 `Code/docflow_src/` 和 PaddleOCR 前后处理代码，无需安装项目 wheel。
 
-## 模型与运行时
+## 放置模型
 
-默认配置依赖以下文件：
+模型不随 Git 仓库提交。
 
-```text
-Code/models/layout/pp-doclayout-v3/PP-DocLayoutV3.onnx
-Code/models/det/ch/PP-OCRv6_small_det/PP-OCRv6_small_det.onnx
-Code/models/rec/ch/PP-OCRv6_small_rec/PP-OCRv6_small_rec.onnx
-Code/models/table/SLANet_plus/SLANet_plus.onnx
-Code/models/font/mobilenetv3.ckpt
-```
+下载地址：**待项目负责人补充**
 
-PaddleOCR 运行时应包含以下目录：
+下载后保持以下目录结构：
 
 ```text
-Code/third_party/paddle_runtime/ppstructure
-Code/third_party/paddle_runtime/ppocr
-Code/third_party/paddle_runtime/tools
+Code/models_openvino/
+├── PP-DocLayoutV3_openvino/
+│   ├── PP-DocLayoutV3.xml
+│   └── PP-DocLayoutV3.bin
+├── PP-OCRv6_small_det_openvino/
+│   ├── PP-OCRv6_small_det_openvino_fp32.xml
+│   └── PP-OCRv6_small_det_openvino_fp32.bin
+├── PP-OCRv6_small_rec_openvino/
+│   ├── PP-OCRv6_small_rec_openvino_fp32.xml
+│   ├── PP-OCRv6_small_rec_openvino_fp32.bin
+│   ├── ppocrv6_dict.txt
+│   └── ppocrv6_rapidocr_dict.txt
+├── RapidAI_TableRec_openvino/
+│   ├── wired_table_v2/unet.xml + unet.bin
+│   ├── lineless_table/lore_detect.xml + lore_detect.bin
+│   ├── lineless_table/lore_process.xml + lore_process.bin
+│   ├── table_cls/yolo_cls.xml + yolo_cls.bin
+│   └── ocr_cls/ch_ppocr_mobile_v2.0_cls_infer.xml + .bin
+└── font_openvino/
+    ├── mobilenetv3.xml
+    └── mobilenetv3.bin
 ```
 
-模型下载地址和目录示例见项目 [README](../README.md#模型准备)。
+RapidAI 表格桥接和融合代码已经包含在仓库内，不需要另外下载 `TableRec` 工程。
 
-## 单样本验证
+## 最小验收
 
-首次验证建议只生成 DOCX 和 Markdown，以便将 Python、模型问题与 LibreOffice 转换问题分开排查：
+仓库只提交一张验收样例：
 
 ```bash
-python Code/test.py --input dataset/exam_paper_02.png --output test-result --formats docx,markdown
+python Code/test.py \
+  --input dataset/exam_paper_02.png \
+  --output test-result \
+  --formats markdown \
+  --no-debug-vis
 ```
 
-命令成功后，终端会显示“全部样本处理成功”。结果保存在最新的 `test-result/run_YYYYMMDD_HHMMSS/`。
+命令退出码为 `0`、终端显示“全部样本处理成功”，并在 `test-result/run_*/` 生成 Markdown 和三阶段 JSON，即表示基础环境、模型和调用路径正常。
 
-确认基础输出正常后，再验证 PDF 导出：
+需要验证 DOCX 和 PDF 时执行：
 
 ```bash
-python Code/test.py --input dataset/exam_paper_02.png --output test-result --formats docx,markdown,pdf
+python Code/test.py \
+  --input dataset/exam_paper_02.png \
+  --output test-result \
+  --formats docx,markdown,pdf
 ```
 
-## 输出目录
+PDF 输出依赖 `libreoffice` 或 `soffice` 命令。
 
-每次运行创建一个独立目录，各样本结果分别保存在子目录中：
+## 集成入口
 
-```text
-test-result/
-└── run_YYYYMMDD_HHMMSS/
-    ├── run_manifest.json
-    ├── _runtime/
-    └── <样本名>/
-        ├── raw_result.json
-        ├── <样本名>.recognition.json
-        ├── <样本名>.json
-        ├── <样本名>.render_plan.json
-        ├── <样本名>.docx
-        ├── <样本名>.md
-        ├── <样本名>.pdf
-        ├── <样本名>_assets/
-        └── debug/
-```
+- 统一模型调用：[MODEL_INTEGRATION.md](../MODEL_INTEGRATION.md)
+- 可复用运行入口：`Code/model_integration/runtime.py`
+- 模型路径：`Code/model.py`
+- OpenVINO 调用封装：`Code/docflow_src/docflow/inference/openvino_session.py`
+- RapidAI 表格调用：`Code/docflow_src/docflow/adapters/rapidai_table_adapter.py`
+- 模型初始化：`Code/model_integration/runtime.py` 中的 `make_engine()`
+- 完整流程组装：`Code/test.py` 中的 `main()`
 
-文件会随 `--formats` 和 `--no-debug-vis` 的设置增减。批量运行和版面检查方法写在 [TESTING.md](TESTING.md)；启动失败时先查 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
+## 参考测试
+
+以下数据只用于说明测试环境，不是所有电脑的固定结果：
+
+- AMD Ryzen 9 9900X，12 核 24 线程，16 GB 内存
+- Python 3.9.25，OpenVINO 2025.3
+- OmniDocBench OCR 平均耗时：`0.855 s/页`，包含 DET、裁剪、REC 和解码
+- 普通文档主进程峰值内存约 `2.84 GiB`
+- 包含 5 个表格的复杂页面主进程峰值内存约 `3.70 GiB`
+
+输入分辨率、文本行数、表格数量和 CPU 指令集都会影响实际结果。

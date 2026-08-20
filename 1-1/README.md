@@ -26,11 +26,6 @@
 |:----:|:--------:|:---------:|
 | <img src="doc/assets/readme/eastmoney_01/original.jpg" width="320"> | <img src="doc/assets/readme/eastmoney_01/layout.jpg" width="320"> | <img src="doc/assets/readme/eastmoney_01/rendered.jpg" width="320"> |
 
-该样本的 DOCX 同时包含宋体、黑体、楷体和仿宋。以下局部对照展示标题、栏目标签和正文的字体差异。
-
-| 原图细节 | DOCX 字体还原 |
-|:--------:|:-------------:|
-| <img src="doc/assets/readme/eastmoney_01/font_detail_original.jpg" width="480"> | <img src="doc/assets/readme/eastmoney_01/font_detail_rendered.jpg" width="480"> |
 
 ### 报纸：四栏、跨栏图片和两行图注
 
@@ -62,6 +57,10 @@ python -m pip install -r Code\requirement.txt
 
 `Code/test.py` 会直接加载 `Code/docflow_src/`，无需额外安装项目 wheel。
 
+模型目录、环境要求和验收方式见 [部署说明](doc/DEPLOYMENT.md)。
+
+需要在其他项目中直接调用版面分析、OCR 或表格识别模型时，见 [模型调用说明](MODEL_INTEGRATION.md)。
+
 ### 单样本验证
 
 使用单个样本确认依赖和模型可以正常加载：
@@ -86,6 +85,7 @@ python Code/test.py --input dataset --output test-result --formats docx,markdown
 | `--output`, `-o` | 结果保存目录，默认为 `test-result/` |
 | `--formats`, `-f` | 从 `docx,markdown,pdf` 中选择一种或多种格式 |
 | `--layout-model` | 切换版面模型，默认使用 `pp-doclayout-v3` |
+| `--table-backend` | 表格识别后端，默认使用 `rapidai`；旧版 `slanet` 仅作兼容 |
 | `--pdf-dpi` | 输入 PDF 转图片时使用的 DPI，默认 `200` |
 | `--no-debug-vis` | 关闭版面框和阅读顺序图 |
 
@@ -150,15 +150,23 @@ test-result/
 默认流程依赖以下模型文件：
 
 ```text
-Code/models/
-├── layout/pp-doclayout-v3/PP-DocLayoutV3.onnx
-├── det/ch/PP-OCRv6_small_det/PP-OCRv6_small_det.onnx
-├── rec/ch/PP-OCRv6_small_rec/PP-OCRv6_small_rec.onnx
-├── table/SLANet_plus/SLANet_plus.onnx
-└── font/mobilenetv3.ckpt
+Code/models_openvino/
+├── PP-DocLayoutV3_openvino/PP-DocLayoutV3.xml + .bin
+├── PP-OCRv6_small_det_openvino/PP-OCRv6_small_det_openvino_fp32.xml + .bin
+├── PP-OCRv6_small_rec_openvino/
+│   ├── PP-OCRv6_small_rec_openvino_fp32.xml + .bin
+│   ├── ppocrv6_dict.txt
+│   └── ppocrv6_rapidocr_dict.txt
+├── RapidAI_TableRec_openvino/
+│   ├── wired_table_v2/unet.xml + .bin
+│   ├── lineless_table/lore_detect.xml + .bin
+│   ├── lineless_table/lore_process.xml + .bin
+│   ├── table_cls/yolo_cls.xml + .bin
+│   └── ocr_cls/ch_ppocr_mobile_v2.0_cls_infer.xml + .bin
+└── font_openvino/mobilenetv3.xml + .bin
 ```
 
-模型可以从百度网盘 [SoC_1-1](https://pan.baidu.com/s/12ouE5owq8Ii_KigQzOeirQ) 下载，提取码为 `4phe`。解压后保持上面的目录结构。
+模型文件不随 Git 仓库提交。下载地址由项目负责人补充；下载后按上面的目录结构放置。
 
 ## 质量验证
 
@@ -175,7 +183,7 @@ pytest -q
 3. 表格是否完整，图片比例和图注位置是否合理。
 4. 字号、行距、对齐和段落间距是否接近原图。
 
-更具体的命令和检查方法见 [部署说明](doc/DEPLOYMENT.md)、[测试说明](doc/TESTING.md) 和 [常见问题](doc/TROUBLESHOOTING.md)。
+更具体的命令和检查方法见 [部署说明](doc/DEPLOYMENT.md)、[模型调用说明](MODEL_INTEGRATION.md)、[测试说明](doc/TESTING.md) 和 [常见问题](doc/TROUBLESHOOTING.md)。
 
 ## 已知限制
 
@@ -190,7 +198,7 @@ pytest -q
 ├── dataset/              # 测试样本
 ├── Code/
 │   ├── docflow_src/      # 分析、规划和渲染代码
-│   ├── models/           # 版面、OCR、表格和字体模型
+│   ├── models_openvino/  # 下载后放置 OpenVINO 模型运行资产
 │   ├── third_party/      # PaddleOCR 运行时
 │   ├── test.py           # 全流程入口
 │   └── requirement.txt   # Python 依赖

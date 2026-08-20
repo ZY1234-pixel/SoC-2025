@@ -125,6 +125,8 @@ class LayoutPredictor(object):
             inferred_onnx_size = self._infer_onnx_input_size(layout_model_path)
             if inferred_onnx_size is not None:
                 resize_size = inferred_onnx_size
+        elif layout_model_path.lower().endswith(".xml") and "pp-doclayoutv3" in layout_model_path.lower():
+            resize_size = [800, 800]
 
         pre_process_list = [
             {"Resize": {"size": resize_size}},
@@ -198,7 +200,7 @@ class LayoutPredictor(object):
                 self.output_tensors,
                 self.config,
             ) = utility.create_predictor(args, "layout", logger)
-            self.use_onnx = bool(args.use_onnx) or str(args.layout_model_dir or "").lower().endswith(".onnx")
+            self.use_onnx = bool(args.use_onnx) or str(args.layout_model_dir or "").lower().endswith((".onnx", ".xml"))
             args.use_onnx = bool(args.use_onnx)
             self.input_names = None if self.use_onnx else self.predictor.get_input_names()
 

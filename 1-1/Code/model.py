@@ -28,15 +28,19 @@ class RuntimePaths:
     docflow_src: Path
     paddle_root: Path
     models_root: Path
+    models_openvino_root: Path
     layout_model: Path
     layout_model_spec: LayoutModelSpec
     det_model: Path
     rec_model: Path
+    rec_char_dict: Path
+    rapidocr_rec_char_dict: Path
     table_model: Path
 
     @staticmethod
     def resolve_layout_model_spec(models_root: Path, layout_model_name: str) -> LayoutModelSpec:
         layout_root = models_root / "layout"
+        openvino_root = models_root.parent / "models_openvino"
         name = (layout_model_name or "").strip()
         if not name:
             raise ValueError("layout_model_name must not be empty")
@@ -44,13 +48,13 @@ class RuntimePaths:
         specs = {
             "pp-doclayout-v3": LayoutModelSpec(
                 name="pp-doclayout-v3",
-                model_path=layout_root / "pp-doclayout-v3" / "PP-DocLayoutV3.onnx",
+                model_path=openvino_root / "PP-DocLayoutV3_openvino" / "PP-DocLayoutV3.xml",
                 use_onnx=True,
                 dict_name="layout_pp_doclayout_v3_dict.txt",
             ),
             "PP-DocLayoutV3": LayoutModelSpec(
                 name="pp-doclayout-v3",
-                model_path=layout_root / "pp-doclayout-v3" / "PP-DocLayoutV3.onnx",
+                model_path=openvino_root / "PP-DocLayoutV3_openvino" / "PP-DocLayoutV3.xml",
                 use_onnx=True,
                 dict_name="layout_pp_doclayout_v3_dict.txt",
             ),
@@ -97,6 +101,7 @@ class RuntimePaths:
         docflow_src = code_root / "docflow_src"
         paddle_root = code_root / "third_party" / "paddle_runtime"
         models_root = code_root / "models"
+        models_openvino_root = code_root / "models_openvino"
         layout_model_spec = cls.resolve_layout_model_spec(models_root, layout_model_name)
         return cls(
             package_root=package_root,
@@ -106,9 +111,12 @@ class RuntimePaths:
             docflow_src=docflow_src,
             paddle_root=paddle_root,
             models_root=models_root,
+            models_openvino_root=models_openvino_root,
             layout_model=layout_model_spec.model_path,
             layout_model_spec=layout_model_spec,
-            det_model=models_root / "det" / "ch" / "PP-OCRv6_small_det" / "PP-OCRv6_small_det.onnx",
-            rec_model=models_root / "rec" / "ch" / "PP-OCRv6_small_rec" / "PP-OCRv6_small_rec.onnx",
+            det_model=models_openvino_root / "PP-OCRv6_small_det_openvino" / "PP-OCRv6_small_det_openvino_fp32.xml",
+            rec_model=models_openvino_root / "PP-OCRv6_small_rec_openvino" / "PP-OCRv6_small_rec_openvino_fp32.xml",
+            rec_char_dict=models_openvino_root / "PP-OCRv6_small_rec_openvino" / "ppocrv6_dict.txt",
+            rapidocr_rec_char_dict=models_openvino_root / "PP-OCRv6_small_rec_openvino" / "ppocrv6_rapidocr_dict.txt",
             table_model=models_root / "table" / "SLANet_plus" / "SLANet_plus.onnx",
         )
