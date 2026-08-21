@@ -4,24 +4,27 @@ import sys, os, json, cv2, numpy as np
 from pathlib import Path
 
 CODE_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = CODE_ROOT.parent
 os.chdir(str(CODE_ROOT))
 
-# Add Paddle runtime to path BEFORE importing anything else
+# 先加入项目根目录和 Paddle 运行时，确保脚本可直接通过 python Code/debug_raw_ocr.py 运行。
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 paddle_root = CODE_ROOT / "third_party" / "paddle_runtime"
 if str(paddle_root) not in sys.path:
     sys.path.insert(0, str(paddle_root))
 
 sys.path.insert(0, str(CODE_ROOT / "docflow_src"))
 
-from model import RuntimePaths
-from utils import ensure_runtime_paths
-from model_integration.runtime import make_engine
+from Code.model import RuntimePaths
+from Code.utils import ensure_runtime_paths
+from Code.model_integration.runtime import make_engine
 
 paths = RuntimePaths.discover()
 ensure_runtime_paths(paths)
 engine = make_engine(paths, None)
 
-from dataset import collect_samples
+from Code.dataset import collect_samples
 
 samples = collect_samples(input_path=str(CODE_ROOT.parent / "dataset" / "newspaper_01.png"))
 sample_path, _ = samples[0]

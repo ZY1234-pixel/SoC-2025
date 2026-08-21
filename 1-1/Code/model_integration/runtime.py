@@ -15,8 +15,8 @@ DOCFLOW_SRC_ROOT = CODE_ROOT / "docflow_src"
 if str(DOCFLOW_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(DOCFLOW_SRC_ROOT))
 
-from model import LayoutModelSpec, RuntimePaths
-from utils import ensure_runtime_paths
+from ..model import LayoutModelSpec, RuntimePaths
+from ..utils import ensure_runtime_paths
 from docflow.adapters.rapidai_table_adapter import RapidAITableAdapter
 
 DOCLAYOUT_YOLO_LABELS = [

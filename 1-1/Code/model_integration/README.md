@@ -21,15 +21,10 @@ model_integration/
 
 ## 初始化
 
-从仓库外部代码调用时，先将 `Code/` 加入 Python 路径：
+在仓库根目录启动程序时，可以直接导入统一运行接口：
 
 ```python
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path("Code").resolve()))
-
-from model_integration import OpenVINOModelRuntime
+from Code.model_integration import OpenVINOModelRuntime
 
 runtime = OpenVINOModelRuntime()
 ```

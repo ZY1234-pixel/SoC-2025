@@ -1,6 +1,6 @@
 import numpy as np
 
-from model_integration import OpenVINOModelRuntime
+from Code.model_integration import OpenVINOModelRuntime
 
 
 def test_model_runtime_normalizes_layout_and_ocr_outputs() -> None:

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from model import RuntimePaths
-from model_integration.runtime import build_layout_dict_from_inference
+from Code.model import RuntimePaths
+from Code.model_integration.runtime import build_layout_dict_from_inference
 
 
 def test_runtime_paths_default_models_point_to_pp_doclayout_v3_and_ppocr_v6() -> None:

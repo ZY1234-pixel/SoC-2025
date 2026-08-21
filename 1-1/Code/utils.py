@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Iterable, List
 
-from model import RuntimePaths
+from .model import RuntimePaths
 
 
 def ensure_runtime_paths(paths: RuntimePaths, table_backend: str = "rapidai") -> None:

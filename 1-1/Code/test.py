@@ -16,16 +16,18 @@ import fitz
 from docx import Document as DocxDocument
 
 CODE_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = CODE_ROOT.parent
 DOCFLOW_SRC_ROOT = CODE_ROOT / "docflow_src"
-docflow_src_str = str(DOCFLOW_SRC_ROOT)
-if docflow_src_str not in sys.path:
-    sys.path.insert(0, docflow_src_str)
+for import_root in (PROJECT_ROOT, DOCFLOW_SRC_ROOT):
+    import_root_str = str(import_root)
+    if import_root_str not in sys.path:
+        sys.path.insert(0, import_root_str)
 
-from dataset import collect_samples, is_pdf_file
-from model import RuntimePaths
-from model_integration.runtime import RAW_RESULT_PREVIEW_MAX_TEXT, bootstrap_import_paths, make_engine
-from preprocess import expand_to_pages
-from utils import ensure_runtime_paths, find_libreoffice, parse_formats, print_list
+from Code.dataset import collect_samples, is_pdf_file
+from Code.model import RuntimePaths
+from Code.model_integration.runtime import RAW_RESULT_PREVIEW_MAX_TEXT, bootstrap_import_paths, make_engine
+from Code.preprocess import expand_to_pages
+from Code.utils import ensure_runtime_paths, find_libreoffice, parse_formats, print_list
 from docflow.adapters.paddle_adapter import PaddleAdapter
 from docflow.adapters.rapidai_table_adapter import RapidAITableAdapter
 from docflow.analysis import DocumentAnalyzer
