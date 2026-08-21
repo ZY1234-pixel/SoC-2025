@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from docflow.planning.text_metrics import estimate_text_units
 
 
@@ -47,8 +49,21 @@ def get_table_cell_placements(table_soup) -> list[tuple[int, int, int, int, obje
     return placements
 
 
-def get_table_column_weights(table_soup) -> tuple[float, ...]:
+def get_table_cell_text_lines(cell_soup) -> tuple[str, ...]:
+    return tuple(line.strip() for line in cell_soup.get_text("\n", strip=True).splitlines() if line.strip())
+
+
+def estimate_table_cell_lines(cell_soup, font_size: float, available_width: float) -> int:
+    return sum(
+        max(1, math.ceil(estimate_text_units(line) * font_size / max(available_width, 1.0)))
+        for line in get_table_cell_text_lines(cell_soup)
+    )
+
+
+def get_table_column_weights(table_soup, source_weights=()) -> tuple[float, ...]:
     _rows, columns = get_table_dimensions(table_soup)
+    if len(source_weights) == columns and all(float(weight) > 0 for weight in source_weights):
+        return tuple(float(weight) for weight in source_weights)
     weights = [1.0] * columns
     for _row, column, _row_span, column_span, cell in get_table_cell_placements(table_soup):
         text = cell.get_text(" ", strip=True)

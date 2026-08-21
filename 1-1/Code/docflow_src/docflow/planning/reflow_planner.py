@@ -21,7 +21,12 @@ from docflow.model.stages import (
     ReflowLayoutPlan,
     ReflowPagePlan,
 )
-from docflow.renderer.docx_utils.html_table import get_table_cell_placements, get_table_column_weights
+from docflow.renderer.docx_utils.html_table import (
+    estimate_table_cell_lines,
+    get_table_cell_placements,
+    get_table_cell_text_lines,
+    get_table_column_weights,
+)
 from docflow.planning.text_metrics import (
     estimate_text_units,
     resolve_text_layout,
@@ -217,6 +222,12 @@ class ReflowPlanner:
                 ),
             )
             if section.kind == FlowKind.GRID
+            and not (
+                fit_scale <= 0.05
+                and section.row_heights_pt
+                and sum(self._grid_row_heights(section, planned, role_by_id, fit_scale))
+                > sum(section.row_heights_pt) * fit_scale * 1.5
+            )
             else section
             for section in sections
         )
@@ -1274,7 +1285,14 @@ class ReflowPlanner:
                 totals[column] += self._element_height(element, roles, widths[column], fit_scale)
             source_height = section.row_heights_pt[0] * fit_scale if section.row_heights_pt else 0.0
             return max(max(totals, default=0.0), source_height)
-        return sum(self._grid_row_heights(section, elements, roles, fit_scale))
+        tracks = self._grid_row_heights(section, elements, roles, fit_scale)
+        source_height = sum(section.row_heights_pt) * fit_scale
+        # ponytail: only use source tracks after the font floor exposes overlap double-counting.
+        return (
+            source_height
+            if fit_scale <= 0.05 and source_height and sum(tracks) > source_height * 1.5
+            else sum(tracks)
+        )
 
     def _grid_row_heights(self, section, elements, roles, fit_scale: float) -> tuple[float, ...]:
         by_id = {element.element_id: element for element in elements}
@@ -1423,13 +1441,12 @@ class ReflowPlanner:
             soup = BeautifulSoup(str(element.payload["html"]), "html.parser")
             table = soup.find("table")
             rows = table.find_all("tr") if table else []
-            weights = get_table_column_weights(table) if table else (1.0,)
+            weights = get_table_column_weights(table, element.payload.get("table_column_width_ratios") or ()) if table else (1.0,)
             base_size = float(element.payload.get("table_font_size_pt") or (role.font_size_pt if role else 10.5))
             font_size = max(
                 round(base_size * fit_scale * 2) / 2.0,
                 float(element.payload.get("table_min_font_size_pt", 0.5)),
             )
-            height = 0.0
             placements = get_table_cell_placements(table) if table else []
             table_width = width * float(element.payload.get("width_fraction", 1.0))
             minimum_size = float(element.payload.get("table_min_font_size_pt", 0.5))
@@ -1437,24 +1454,28 @@ class ReflowPlanner:
                 (
                     (table_width * sum(weights[column : column + span]) / max(sum(weights), 1.0) - 2.0)
                     * 0.96
-                    / max(estimate_text_units(cell.get_text(" ", strip=True)), 1.0)
+                    / max((estimate_text_units(line) for line in get_table_cell_text_lines(cell)), default=1.0)
                     for _row, column, _row_span, span, cell in placements
                 ),
                 default=font_size,
             )
             if fit_size >= minimum_size:
                 font_size = min(font_size, fit_size)
-            for row_index, _row in enumerate(rows):
-                row_height = font_size * 1.2
-                for _source_row, column, _row_span, span, cell in placements:
-                    if _source_row != row_index:
-                        continue
-                    cell_width = table_width * sum(weights[column : column + span]) / max(sum(weights), 1.0)
-                    units = estimate_text_units(cell.get_text(" ", strip=True))
-                    lines = max(1, math.ceil(units * font_size / max((cell_width - 2.0) * 0.96, 1.0)))
-                    row_height = max(row_height, lines * font_size * 1.2)
-                height += row_height + 3.0
-            height = max(height, float(element.payload.get("table_height_pt") or 0.0))
+            source_height = float(element.payload.get("table_height_pt") or 0.0) * fit_scale
+            row_ratios = element.payload.get("table_row_height_ratios") or ()
+            if len(row_ratios) == len(rows):
+                source_rows = [source_height * float(ratio) for ratio in row_ratios]
+            else:
+                source_row = 0.0 if element.payload.get("table_content_fit") else source_height / max(len(rows), 1)
+                source_rows = [source_row] * len(rows)
+            row_heights = [max(height, font_size * 1.2 + 3.0) for height in source_rows]
+            for row_index, column, row_span, span, cell in placements:
+                cell_width = table_width * sum(weights[column : column + span]) / max(sum(weights), 1.0)
+                lines = max(1, estimate_table_cell_lines(cell, font_size, (cell_width - 2.0) * 0.96))
+                required = (lines * font_size * 1.2 + 3.0) / max(row_span, 1)
+                for target_row in range(row_index, min(row_index + row_span, len(rows))):
+                    row_heights[target_row] = max(row_heights[target_row], required)
+            height = sum(row_heights)
             return spacing + height + ReflowPlanner._caption_height(element, fit_scale)
         if role is not None and element.text:
             layouts = resolve_text_layout(element, role, width, fit_scale)

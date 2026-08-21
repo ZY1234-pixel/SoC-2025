@@ -22,10 +22,12 @@ if docflow_src_str not in sys.path:
     sys.path.insert(0, docflow_src_str)
 
 from dataset import collect_samples, is_pdf_file
-from model import LayoutModelSpec, RuntimePaths
+from model import RuntimePaths
+from model_integration.runtime import RAW_RESULT_PREVIEW_MAX_TEXT, bootstrap_import_paths, make_engine
 from preprocess import expand_to_pages
 from utils import ensure_runtime_paths, find_libreoffice, parse_formats, print_list
 from docflow.adapters.paddle_adapter import PaddleAdapter
+from docflow.adapters.rapidai_table_adapter import RapidAITableAdapter
 from docflow.analysis import DocumentAnalyzer
 from docflow.appearance.font_classifier import FontClassifier
 from docflow.model.stages import RecognitionEvidence
@@ -49,102 +51,8 @@ TEXT_TYPES = {
     "table_caption",
 }
 
-DOCLAYOUT_YOLO_LABELS = [
-    "title",
-    "plain text",
-    "abandon",
-    "figure",
-    "figure_caption",
-    "table",
-    "table_caption",
-    "table_footnote",
-    "isolate_formula",
-    "formula_caption",
-]
-
-DEFAULT_LAYOUT_SCORE_THRESHOLD = 0.50
-DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD = 0.50
-DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD = 0.18
-RAW_RESULT_PREVIEW_MAX_TEXT = 300
-PICODET_LAYOUT_17CLS_LABELS = [
-    "text",
-    "title",
-    "list",
-    "table",
-    "figure",
-    "header",
-    "footer",
-    "reference",
-    "equation",
-    "abstract",
-    "content",
-    "figure_caption",
-    "table_caption",
-    "table_footnote",
-    "formula_caption",
-    "algorithm",
-    "seal",
-]
-PP_DOCLAYOUT_M_LABELS = [
-    "paragraph_title",
-    "image",
-    "text",
-    "number",
-    "abstract",
-    "content",
-    "figure_title",
-    "formula",
-    "table",
-    "table_title",
-    "reference",
-    "doc_title",
-    "footnote",
-    "header",
-    "algorithm",
-    "footer",
-    "seal",
-    "chart_title",
-    "chart",
-    "formula_number",
-    "header_image",
-    "footer_image",
-    "aside_text",
-]
-PP_DOCLAYOUT_V3_LABELS = [
-    "abstract",
-    "algorithm",
-    "aside_text",
-    "chart",
-    "content",
-    "display_formula",
-    "doc_title",
-    "figure_title",
-    "footer",
-    "footer_image",
-    "footnote",
-    "formula_number",
-    "header",
-    "header_image",
-    "image",
-    "inline_formula",
-    "number",
-    "paragraph_title",
-    "reference",
-    "reference_content",
-    "seal",
-    "table",
-    "text",
-    "vertical_text",
-    "vision_footnote",
-]
 
 
-def bootstrap_import_paths(paths: RuntimePaths) -> None:
-    """将打包内的 Paddle 运行时与 DocFlow 源码加入导入路径。"""
-    for path in (paths.paddle_root, paths.docflow_src):
-        path_str = str(path)
-        if path_str not in sys.path:
-            sys.path.insert(0, path_str)
 
 
 def resolve_cli_path(raw_path: str | None, default_path: Path) -> Path:
@@ -160,155 +68,6 @@ def resolve_cli_path(raw_path: str | None, default_path: Path) -> Path:
     return Path(normalized).resolve()
 
 
-def resolve_layout_score_threshold(layout_spec: LayoutModelSpec) -> str:
-    """Resolve layout score threshold with a lower doclayout-yolo default.
-
-    The doclayout-yolo detector tends to miss sparse centered section headings
-    around tables when the threshold is too high, so we use a lower default for
-    that model family and keep an env override for quick ablation.
-    """
-    raw_override = os.environ.get("DOCFLOW_LAYOUT_SCORE_THRESHOLD", "").strip()
-    if raw_override:
-        try:
-            value = float(raw_override)
-        except ValueError:
-            value = DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD
-        else:
-            value = min(1.0, max(0.01, value))
-        return f"{value:.2f}"
-
-    spec_name = layout_spec.name.lower()
-    if "pp-doclayout-v3" in spec_name:
-        return f"{DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD:.2f}"
-    if "doclayout_yolo" in spec_name:
-        return f"{DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD:.2f}"
-    return f"{DEFAULT_LAYOUT_SCORE_THRESHOLD:.2f}"
-
-
-def build_layout_dict_from_inference(layout_spec: LayoutModelSpec, fallback_dict_path: Path, out_dir: Path) -> Path:
-    """按模型 inference.yml 自动生成 layout 字典文件。"""
-    layout_model_dir = layout_spec.model_path if layout_spec.model_path.is_dir() else layout_spec.model_path.parent
-    inference_yml = layout_model_dir / "inference.yml"
-    if not inference_yml.is_file():
-        explicit_labels = {
-            "picodet-l_layout_17cls": PICODET_LAYOUT_17CLS_LABELS,
-            "pp-doclayout-m": PP_DOCLAYOUT_M_LABELS,
-            "pp-doclayout-v3": PP_DOCLAYOUT_V3_LABELS,
-        }.get(layout_spec.name)
-        if explicit_labels:
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out_name = layout_spec.dict_name or f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
-            out_path = out_dir / out_name
-            out_path.write_text("\n".join(explicit_labels) + "\n", encoding="utf-8")
-            return out_path
-        metadata_yml = layout_model_dir / "metadata.yaml"
-        if metadata_yml.is_file():
-            try:
-                import yaml
-
-                metadata = yaml.safe_load(metadata_yml.read_text(encoding="utf-8")) or {}
-                names = metadata.get("names")
-                if isinstance(names, dict):
-                    ordered = [names[idx] for idx in sorted(names)]
-                    if ordered:
-                        out_dir.mkdir(parents=True, exist_ok=True)
-                        out_name = layout_spec.dict_name or f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
-                        out_path = out_dir / out_name
-                        out_path.write_text("\n".join(ordered) + "\n", encoding="utf-8")
-                        return out_path
-            except Exception:
-                pass
-        if "doclayout_yolo" in layout_spec.name.lower():
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out_name = layout_spec.dict_name or f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
-            out_path = out_dir / out_name
-            out_path.write_text("\n".join(DOCLAYOUT_YOLO_LABELS) + "\n", encoding="utf-8")
-            return out_path
-        return fallback_dict_path
-
-    labels = []
-    in_label_list = False
-    with open(inference_yml, "r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            stripped = raw_line.strip()
-            if not in_label_list:
-                if stripped == "label_list:":
-                    in_label_list = True
-                continue
-            if stripped.startswith("- "):
-                label = stripped[2:].strip()
-                if label:
-                    labels.append(label)
-                continue
-            if stripped and not stripped.startswith("-"):
-                break
-
-    if not labels:
-        return fallback_dict_path
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_name = layout_spec.dict_name or f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
-    out_path = out_dir / out_name
-    out_path.write_text("\n".join(labels) + "\n", encoding="utf-8")
-    return out_path
-
-
-def make_engine(paths: RuntimePaths, layout_dict_dir: Path):
-    """初始化 PaddleOCR 的 StructureSystem 引擎。"""
-    from ppstructure.utility import parse_args
-    from ppstructure.predict_system import StructureSystem
-
-    ppstructure_dir = paths.paddle_root / "ppstructure"
-    fallback_layout_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "layout_dict" / "layout_cdla_dict.txt"
-    rec_char_dict = (
-        paths.models_root
-        / "rec"
-        / "ch"
-        / "PP-OCRv6_small_rec"
-        / "ppocrv6_dict.txt"
-    )
-    table_char_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "table_structure_dict_ch.txt"
-    layout_dict = build_layout_dict_from_inference(paths.layout_model_spec, fallback_layout_dict, layout_dict_dir)
-    layout_score_threshold = resolve_layout_score_threshold(paths.layout_model_spec)
-
-    argv = [
-        "--recovery",
-        "True",
-        "--use_gpu",
-        "False",
-        "--formula",
-        "False",
-        "--show_log",
-        "False",
-        "--layout_model_dir",
-        str(paths.layout_model),
-        "--layout_score_threshold",
-        layout_score_threshold,
-        "--layout_dict_path",
-        str(layout_dict),
-        "--det_model_dir",
-        str(paths.det_model),
-        "--rec_model_dir",
-        str(paths.rec_model),
-        "--rec_char_dict_path",
-        str(rec_char_dict),
-        "--table_model_dir",
-        str(paths.table_model),
-        "--table_char_dict_path",
-        str(table_char_dict),
-    ]
-
-    old_argv = sys.argv[:]
-    old_cwd = os.getcwd()
-    os.chdir(ppstructure_dir)
-    try:
-        sys.argv = ["test.py"] + argv
-        args = parse_args()
-        engine = StructureSystem(args)
-    finally:
-        sys.argv = old_argv
-        os.chdir(old_cwd)
-    return engine
 
 
 def print_regions(result: list) -> None:
@@ -379,9 +138,19 @@ def summarize_raw_result(result: list) -> dict:
     return {"regions": regions}
 
 
-def analyze_page(engine, adapter: PaddleAdapter, image, page_index: int, source_path: str) -> tuple[RecognitionEvidence, list, float]:
+def analyze_page(
+    engine,
+    adapter: PaddleAdapter,
+    image,
+    page_index: int,
+    source_path: str,
+    table_adapter: RapidAITableAdapter | None = None,
+    table_output_dir: Path | None = None,
+) -> tuple[RecognitionEvidence, list, float]:
     started_at = time.time()
     result, _ = engine(image, img_idx=page_index)
+    if table_adapter is not None:
+        result = table_adapter.enrich(image, result, page_index, table_output_dir or Path.cwd())
     elapsed = time.time() - started_at
     evidence = adapter.collect_evidence(result, image, img_idx=page_index, source_file=source_path)
     return evidence, result, elapsed
@@ -465,13 +234,22 @@ def run_sample(
     formats: list[str],
     pdf_dpi: int,
     save_debug_vis: bool,
+    table_adapter: RapidAITableAdapter | None = None,
 ) -> int:
     pages = expand_to_pages(sample_path, dpi=pdf_dpi) if is_pdf_file(sample_path) else expand_to_pages(sample_path)
     evidence_pages = []
     for page_index, image in [(idx, img) for idx, (_page_name, img) in enumerate(pages)]:
         height, width = image.shape[:2]
         print(f"[页面] {sample_path.name} p{page_index + 1} ({width}x{height})")
-        evidence, result, elapsed = analyze_page(engine, adapter, image, page_index, str(sample_path))
+        evidence, result, elapsed = analyze_page(
+            engine,
+            adapter,
+            image,
+            page_index,
+            str(sample_path),
+            table_adapter,
+            sample_layout.sample_dir,
+        )
         print(f"[分析] {sample_path.name} p{page_index + 1}: 检测到 {len(result)} 个区域，耗时 {elapsed:.2f}s")
         print_regions(result)
         if save_debug_vis:
@@ -534,6 +312,18 @@ def main() -> int:
     parser.add_argument("--formats", "-f", default="docx,markdown,pdf", help="逗号分隔输出格式：docx,markdown,pdf")
     parser.add_argument("--pdf-dpi", type=int, default=200, help="PDF 转图像的 DPI，默认 200")
     parser.add_argument("--no-debug-vis", action="store_true", help="关闭 debug 可视化图导出")
+    parser.add_argument("--table-backend", choices=["slanet", "rapidai"], default="rapidai", help="表格识别后端。")
+    parser.add_argument(
+        "--rapidai-table-engine",
+        choices=["auto", "wired_table_v2", "lineless_table"],
+        default="auto",
+        help="RapidAI 表格结构模型，默认由分类器自动选择。",
+    )
+    parser.add_argument(
+        "--rapidai-full-page-fallback",
+        action="store_true",
+        help="版面模型未检出 table 时仍对整页执行 RapidAI（可能误识别，默认关闭）。",
+    )
     parser.add_argument(
         "--layout-model",
         default="pp-doclayout-v3",
@@ -547,7 +337,7 @@ def main() -> int:
     output_root = resolve_cli_path(args.output, paths.result_root)
     formats = parse_formats(args.formats)
 
-    ensure_runtime_paths(paths)
+    ensure_runtime_paths(paths, args.table_backend)
     if "pdf" in formats and find_libreoffice() is None:
         raise RuntimeError("你请求了 PDF 输出，但系统 PATH 中未找到 LibreOffice/soffice。")
 
@@ -562,9 +352,19 @@ def main() -> int:
     print(f"输出格式：{formats}")
     print(f"运行目录：{run_layout.run_dir}")
     print(f"版面模型：{paths.layout_model_spec.name} -> {paths.layout_model}")
-    engine = make_engine(paths, run_layout.runtime_dir)
+    engine = make_engine(paths, run_layout.runtime_dir, args.table_backend)
     adapter = PaddleAdapter()
-    analyzer = DocumentAnalyzer(FontClassifier(str(paths.models_root / "font" / "mobilenetv3.ckpt")))
+    table_adapter = None
+    if args.table_backend == "rapidai":
+        table_adapter = RapidAITableAdapter(
+            paths.models_openvino_root,
+            table_engine=args.rapidai_table_engine,
+            full_page_fallback=args.rapidai_full_page_fallback,
+        )
+        print(f"表格后端：RapidAI ({args.rapidai_table_engine})")
+    analyzer = DocumentAnalyzer(
+        FontClassifier(str(paths.models_openvino_root / "font_openvino" / "mobilenetv3.xml"))
+    )
     failures: list[str] = []
     sample_records = []
     total_pages = 0
@@ -588,6 +388,7 @@ def main() -> int:
                 formats=formats,
                 pdf_dpi=args.pdf_dpi,
                 save_debug_vis=not args.no_debug_vis,
+                table_adapter=table_adapter,
             )
             if isinstance(page_count, tuple):
                 page_count, native_docx_table_count = page_count

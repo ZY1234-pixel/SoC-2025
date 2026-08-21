@@ -27,14 +27,16 @@ python -m pip install -r Code/requirement.txt
 Code/third_party/paddle_runtime/ppstructure
 Code/third_party/paddle_runtime/ppocr
 Code/third_party/paddle_runtime/tools
-Code/models/layout/pp-doclayout-v3/PP-DocLayoutV3.onnx
-Code/models/det/ch/PP-OCRv6_small_det/PP-OCRv6_small_det.onnx
-Code/models/rec/ch/PP-OCRv6_small_rec/PP-OCRv6_small_rec.onnx
-Code/models/table/SLANet_plus/SLANet_plus.onnx
-Code/models/font/mobilenetv3.ckpt
+Code/models_openvino/PP-DocLayoutV3_openvino/PP-DocLayoutV3.xml
+Code/models_openvino/PP-OCRv6_small_det_openvino/PP-OCRv6_small_det_openvino_fp32.xml
+Code/models_openvino/PP-OCRv6_small_rec_openvino/PP-OCRv6_small_rec_openvino_fp32.xml
+Code/models_openvino/PP-OCRv6_small_rec_openvino/ppocrv6_dict.txt
+Code/models_openvino/PP-OCRv6_small_rec_openvino/ppocrv6_rapidocr_dict.txt
+Code/models_openvino/RapidAI_TableRec_openvino
+Code/models_openvino/font_openvino/mobilenetv3.xml
 ```
 
-路径存在但仍报错时，检查模型是否被放进了同名的双层目录，例如 `Code/models/models/...`。
+路径存在但仍报错时，检查模型是否被放进了同名的双层目录，例如 `Code/models_openvino/models_openvino/...`。
 
 ## PDF 没有生成
 
@@ -63,10 +65,6 @@ python Code/test.py --input dataset/exam_paper_02.png --output test-result --for
 首次运行需要加载多个模型，耗时通常高于后续单页处理。输入为 PDF 时，可将 `--pdf-dpi` 从 `200` 调整为 `150` 进行初步验证；图片输入不受该参数影响。
 
 debug 图也会占用一些时间和磁盘。只做吞吐测试时加上 `--no-debug-vis`。
-
-## ONNX Runtime 打印形状警告
-
-`MergeShapeInfo` 或 `VerifyOutputSizes` 一类信息来自 ONNX Runtime。若命令最终显示“全部样本处理成功”，且 `run_manifest.json` 中的 `failures` 为空，这些信息可作为运行时警告处理。若进程退出或结果缺失，请保留完整日志。
 
 ## `No ccache found`
 

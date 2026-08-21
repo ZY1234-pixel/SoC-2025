@@ -9,9 +9,15 @@ venv/
 # Build artifacts
 *.whl
 
-# Project data and outputs (do not commit)
-dataset/
-test-result/*
-!test-result/.examples/
-Code/models/
-Code/wheels/
+# Internal validation and generated outputs
+/internal_validation/
+/test-result/
+
+# Only the small smoke-test image is delivered
+/dataset/*
+!/dataset/exam_paper_02.png
+
+# Models are distributed separately
+/Code/models/
+/Code/models_openvino/
+/Code/wheels/

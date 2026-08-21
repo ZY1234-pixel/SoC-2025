@@ -200,8 +200,13 @@ class DocumentAnalyzer:
             if item.evidence_id in consumed:
                 continue
             source_ids = [item.evidence_id]
-            source_ids.extend(children[item.evidence_id])
-            source_ids.extend(captions[item.evidence_id])
+            pending = children[item.evidence_id] + captions[item.evidence_id]
+            for source_id in pending:
+                if source_id in source_ids:
+                    continue
+                source_ids.append(source_id)
+                pending.extend(children.get(source_id, ()))
+                pending.extend(captions.get(source_id, ()))
             related = [by_id[source_id] for source_id in source_ids]
             element = self._make_element(
                 item,
@@ -299,8 +304,35 @@ class DocumentAnalyzer:
         if primary.category == "table" and not primary.html and not primary.attributes.get("table_cells"):
             payload["structure_missing"] = True
         if primary.category == "table" and primary.html:
-            row_count = len(BeautifulSoup(primary.html, "html.parser").find_all("tr"))
-            payload["table_row_styles"] = infer_table_row_fills(primary.image_base64, row_count)
+            soup = BeautifulSoup(primary.html, "html.parser")
+            rows = soup.find_all("tr")
+            row_count = len(rows)
+            column_count = max(
+                (
+                    sum(max(int(cell.get("colspan", 1)), 1) for cell in row.find_all(["td", "th"], recursive=False))
+                    for row in rows
+                ),
+                default=0,
+            )
+            source_attributes = primary.attributes.get("source_attributes") or {}
+            if source_attributes.get("table_content_fit"):
+                payload["table_content_fit"] = True
+            cells = primary.attributes.get("table_cells") or ()
+            row_ratios = self._table_axis_ratios(cells, row_count, "row", "rowspan", 1, 3)
+            column_edges = self._table_column_edges(cells, column_count)
+            column_ratios = self._ratios_from_edges(column_edges)
+            if row_ratios:
+                payload["table_row_height_ratios"] = row_ratios
+            if column_ratios:
+                payload["table_column_width_ratios"] = column_ratios
+            try:
+                table_image = Image.open(io.BytesIO(base64.b64decode(primary.image_base64))).convert("RGB")
+            except Exception:
+                table_image = None
+            cell_styles = self._table_cell_styles(cells, column_edges, table_image)
+            if cell_styles:
+                payload["table_cell_styles"] = cell_styles
+            payload["table_row_styles"] = infer_table_row_fills(primary.image_base64, row_count, row_ratios)
             payload["table_rule_style"] = infer_table_rule_style(primary.image_base64)
         return SemanticElement(
             element_id=f"p{page_index:04d}_{kind}_{primary.evidence_id}",
@@ -903,6 +935,140 @@ class DocumentAnalyzer:
     @staticmethod
     def _area(rect: Rect) -> float:
         return max(rect.x2 - rect.x1, 0.0) * max(rect.y2 - rect.y1, 0.0)
+
+    @staticmethod
+    def _table_axis_ratios(cells, count: int, position_key: str, span_key: str, start: int, end: int):
+        samples = [[] for _ in range(count)]
+        for cell in cells:
+            try:
+                position = int(cell.get(position_key, 0))
+                span = max(int(cell.get(span_key, 1)), 1)
+                bbox = cell["bbox"]
+                size = (float(bbox[end]) - float(bbox[start])) / span
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
+            if size <= 0:
+                continue
+            for target in range(max(position, 0), min(position + span, count)):
+                samples[target].append(size)
+        if not samples or not all(samples):
+            return ()
+        sizes = [median(values) for values in samples]
+        total = sum(sizes)
+        return tuple(size / total for size in sizes) if total > 0 else ()
+
+    @staticmethod
+    def _table_column_edges(cells, count: int):
+        columns = [[] for _ in range(count)]
+        for cell in cells:
+            try:
+                if max(int(cell.get("colspan", 1)), 1) != 1:
+                    continue
+                column = int(cell.get("col", 0))
+                x1, y1, x2, y2 = map(float, cell["bbox"][:4])
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
+            if 0 <= column < count and x2 > x1 and y2 > y1:
+                columns[column].append((x1, x2))
+        if not columns or not all(columns):
+            return ()
+        lefts = [min(box[0] for box in boxes) for boxes in columns]
+        rights = [max(box[1] for box in boxes) for boxes in columns]
+        edges = [lefts[0], *((rights[index] + lefts[index + 1]) / 2.0 for index in range(count - 1)), rights[-1]]
+        return tuple(edges) if all(right > left for left, right in zip(edges, edges[1:])) else ()
+
+    @staticmethod
+    def _ratios_from_edges(edges):
+        if len(edges) < 2:
+            return ()
+        widths = [right - left for left, right in zip(edges, edges[1:])]
+        total = sum(widths)
+        return tuple(width / total for width in widths) if total > 0 else ()
+
+    @staticmethod
+    def _table_cell_styles(cells, column_edges, table_image=None):
+        if not column_edges:
+            return ()
+        styles = []
+        for cell in cells:
+            try:
+                row = int(cell.get("row", 0))
+                column = int(cell.get("col", 0))
+                span = max(int(cell.get("colspan", 1)), 1)
+                left, right = column_edges[column], column_edges[column + span]
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
+            text_boxes = []
+            for obj in cell.get("ocr_objects") or ():
+                try:
+                    if str(obj.get("text") or "").strip():
+                        x1, _y1, x2, _y2 = map(float, obj["bbox"][:4])
+                        if x2 > x1:
+                            text_boxes.append((x1, x2))
+                except (KeyError, TypeError, ValueError, IndexError):
+                    continue
+            if text_boxes:
+                text_left = min(box[0] for box in text_boxes)
+                text_right = max(box[1] for box in text_boxes)
+            else:
+                try:
+                    text_left, text_right = float(cell["bbox"][0]), float(cell["bbox"][2])
+                except (KeyError, TypeError, ValueError, IndexError):
+                    continue
+            left_gap, right_gap = max(text_left - left, 0.0), max(right - text_right, 0.0)
+            width = max(right - left, 1.0)
+            if abs(left_gap - right_gap) <= width * 0.12:
+                alignment = "center"
+            elif right_gap <= width * 0.06 and left_gap >= width * 0.12:
+                alignment = "right"
+            else:
+                alignment = "left"
+            if any(
+                str(obj.get("label") or "") in {"display_formula", "equation", "formula", "inline_formula"}
+                for obj in cell.get("layout_objects") or ()
+            ):
+                alignment = "center"
+            role = str(cell.get("role") or "body")
+            stroke_ratio = None
+            if table_image is not None:
+                try:
+                    y1 = min(float(obj["bbox"][1]) for obj in cell.get("ocr_objects") or () if str(obj.get("text") or "").strip())
+                    y2 = max(float(obj["bbox"][3]) for obj in cell.get("ocr_objects") or () if str(obj.get("text") or "").strip())
+                    crop = table_image.crop((max(text_left, 0), max(y1, 0), min(text_right, table_image.width), min(y2, table_image.height)))
+                    stroke_ratio = infer_text_stroke_ratio((crop,))
+                except (KeyError, TypeError, ValueError):
+                    pass
+            styles.append((row, column, alignment, role, stroke_ratio))
+        body_strokes = [stroke for _row, _column, _alignment, role, stroke in styles if role not in {"corner", "column_header"} and stroke is not None]
+        regular = median(body_strokes) if len(body_strokes) >= 3 else None
+        bold_candidates = {
+            (row, column): bool(
+                role in {"corner", "column_header"}
+                and regular is not None
+                and stroke is not None
+                and stroke >= regular * 1.08
+                and stroke - regular >= 0.006
+            )
+            for row, column, _alignment, role, stroke in styles
+        }
+        header_rows = {
+            row
+            for row in {row for row, _column, _alignment, role, _stroke in styles if role in {"corner", "column_header"}}
+            if (
+                sum(value for (candidate_row, _column), value in bold_candidates.items() if candidate_row == row)
+                / max(sum(candidate_row == row for candidate_row, _column in bold_candidates), 1)
+                >= 0.75
+            )
+        }
+        return tuple(
+            (
+                row,
+                column,
+                alignment,
+                row in header_rows and role in {"corner", "column_header"},
+            )
+            for row, column, alignment, role, stroke in styles
+        )
 
     @classmethod
     def _coverage(cls, outer: Rect, inner: Rect) -> float:

@@ -62,28 +62,55 @@ def infer_background_extent(
     return float(left), float(top), float(left + region_width), float(top + region_height)
 
 
-def infer_table_row_fills(image_base64: Optional[str], row_count: int) -> tuple[tuple[int, str, str], ...]:
+def infer_table_row_fills(
+    image_base64: Optional[str],
+    row_count: int,
+    row_height_ratios: tuple[float, ...] = (),
+) -> tuple[tuple[int, str, str], ...]:
     image = _decode_image(image_base64)
     if image is None or row_count <= 0:
         return ()
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     saturated = (hsv[:, :, 1] >= 45) & (hsv[:, :, 2] >= 40)
     colored_lines = np.flatnonzero(saturated.mean(axis=1) >= 0.45)
-    if not len(colored_lines):
-        return ()
-    runs = np.split(colored_lines, np.where(np.diff(colored_lines) > 1)[0] + 1)
     fills = {}
-    for run in runs:
-        if len(run) < 2:
+    if len(colored_lines):
+        runs = np.split(colored_lines, np.where(np.diff(colored_lines) > 1)[0] + 1)
+        for run in runs:
+            if len(run) < max(2, int(image.shape[0] * 0.03)):
+                continue
+            top, bottom = int(run[0]), int(run[-1]) + 1
+            band = image[top:bottom]
+            band_saturated = saturated[top:bottom]
+            if float(np.mean(np.any(band_saturated, axis=0))) < 0.70:
+                continue
+            style = _infer_pixels_style(band)
+            if style is None:
+                continue
+            row = min(int(((top + bottom) / 2) / image.shape[0] * row_count), row_count - 1)
+            fills[row] = (_hex_bgr(np.median(band[band_saturated], axis=0)), style.text_color)
+
+    ratios = row_height_ratios if len(row_height_ratios) == row_count and all(value > 0 for value in row_height_ratios) else (1.0 / row_count,) * row_count
+    boundaries = np.rint(np.cumsum((0.0, *ratios)) / sum(ratios) * image.shape[0]).astype(int)
+    border = np.concatenate((image[0], image[-1], image[:, 0], image[:, -1]))
+    background = np.median(border, axis=0)
+    for row, (top, bottom) in enumerate(zip(boundaries, boundaries[1:])):
+        if row in fills or bottom - top < 3:
             continue
-        top, bottom = int(run[0]), int(run[-1]) + 1
-        band = image[top:bottom]
-        band_saturated = saturated[top:bottom]
+        inset_y = max(1, (bottom - top) // 10)
+        inset_x = max(1, image.shape[1] // 50)
+        band = image[top + inset_y : bottom - inset_y, inset_x:-inset_x]
+        if not band.size:
+            continue
+        quantized = (band.reshape(-1, 3) // 16).astype(np.int16)
+        colors, counts = np.unique(quantized, axis=0, return_counts=True)
+        dominant = colors[int(counts.argmax())] * 16 + 8
+        close = np.linalg.norm(band.astype(np.int16) - dominant, axis=2) <= 18
+        if close.mean() < 0.45 or np.linalg.norm(dominant - background) < 18 or dominant.mean() < 48:
+            continue
         style = _infer_pixels_style(band)
-        if style is None:
-            continue
-        row = min(int(((top + bottom) / 2) / image.shape[0] * row_count), row_count - 1)
-        fills[row] = (_hex_bgr(np.median(band[band_saturated], axis=0)), style.text_color)
+        if style is not None:
+            fills[row] = (_hex_bgr(np.median(band[close], axis=0)), style.text_color)
     return tuple((row, *colors) for row, colors in sorted(fills.items()))
 
 

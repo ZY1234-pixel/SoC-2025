@@ -15,7 +15,7 @@ sys.path.insert(0, str(CODE_ROOT / "docflow_src"))
 
 from model import RuntimePaths
 from utils import ensure_runtime_paths
-from test import make_engine
+from model_integration.runtime import make_engine
 
 paths = RuntimePaths.discover()
 ensure_runtime_paths(paths)

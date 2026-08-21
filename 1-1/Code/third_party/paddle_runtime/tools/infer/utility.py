@@ -201,6 +201,21 @@ def create_predictor(args, mode, logger):
     if isinstance(model_dir, str) and model_dir.lower().endswith(".onnx"):
         use_onnx = True
 
+    if isinstance(model_dir, str) and model_dir.lower().endswith(".xml"):
+        from docflow.inference import OpenVINOInferSession
+
+        precision = "bf16" if mode == "rec" else "f32"
+        sess = OpenVINOInferSession(
+            {"model_path": model_dir, "inference_precision": precision}
+        )
+        inputs = sess.get_inputs()
+        return (
+            sess,
+            inputs[0] if len(inputs) == 1 else [item.name for item in inputs],
+            None,
+            None,
+        )
+
     if use_onnx:
         import onnxruntime as ort
 
