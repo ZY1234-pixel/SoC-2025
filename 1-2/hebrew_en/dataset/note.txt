@@ -1,0 +1,25 @@
+# 数据集介绍
+
+本数据集共包含训练数据15万张，验证数据1.5万张，包括希伯来语、英语、数字和标点。
+希伯来语：英语：混合=80：6：14
+单词：短句=28：72
+平均每行字符长度=19.93
+
+
+# 数据集格式
+
+hebrew
+——images
+        ——train_word_xx.jpg
+        ——val_word_xx.jpg
+——test
+——dict.txt
+——train.txt
+——val.txt
+
+
+# 数据集路径
+
+通过网盘分享的文件：hebrew_en.zip
+链接: https://pan.baidu.com/s/1jmjJA5pNvYKrQjNtfUK8Lg?pwd=hjxn 提取码: hjxn 
+--来自百度网盘超级会员v6的分享

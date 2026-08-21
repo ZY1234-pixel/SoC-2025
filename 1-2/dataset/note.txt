@@ -1,0 +1,17 @@
+# 数据集格式
+
+hebrew
+——images
+        ——train_word_xx.jpg
+        ——val_word_xx.jpg
+——test
+——dict.txt
+——train.txt
+——val.txt
+
+
+# 数据集路径
+
+通过网盘分享的文件：SoC_2026
+链接: https://pan.baidu.com/s/1LxTjnECcKLVmakA7TJCerg?pwd=myck 提取码: myck 
+--来自百度网盘超级会员v6的分享

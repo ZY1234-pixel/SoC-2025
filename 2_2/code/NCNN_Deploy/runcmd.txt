@@ -1,0 +1,31 @@
+# 转换权重
+python convert_weights_v2.py
+
+# 验证新模型
+python verify_v3.py
+
+# 导出 TorchScript
+python export_pnnx_v3.py
+
+# 使用 PNNX 转换
+pnnx nafnet_model.pt inputshape=[1,3,512,512]
+
+# 5. 检查生成的文件
+# 应该生成:
+# - nafnet_model.ncnn.param
+# - nafnet_model.ncnn.bin
+# - ......
+
+
+
+#=======================================================================
+# CPP配置
+mkdir build
+cd build
+cmake .. -G "Visual Studio 17 2022" -A x64
+cmake --build . --config Release
+
+#=======================================================================
+set(NCNN_DIR "D:/BT/ncnn/x64" CACHE PATH "Path to ncnn")
+set(OpenCV_DIR "D:/BT/opencv/opencv/build" CACHE PATH "Path to OpenCV")
+需要修改相应的ncnn和OpenCV安装位置目录

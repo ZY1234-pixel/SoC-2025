@@ -1,0 +1,30 @@
+image: ./test-images/single2_en/ar_en_1.png
+image_order: ساعة 24 انتظر مرتفعا،! Price ال كان إذا! Online ( الـ طريق عن Ticket تذكرة حجز تريد هل)
+predict: ) هل تريد حجز تذكرة Ticket عن طريق الـ (Online! إذا كان ال Price!مرتفعا، انتظر 24 ساعة
+label: هل تريد حجز تذكرة (Ticket) عن طريق الـOnline؟ إذا كان الـPrice مرتفعا، انتظر 24 ساعة!
+recall: 0.929412
+confidence: 0.988688
+
+image: ./test-images/single2_en/ar_en_2.png
+image_order: الدقة من 10% ستفقد وإلا يومين، كل بك الخاص. Report الـ تحديث يجب
+predict: يجب تحديث الـ Report.الخاص بك كل يومين، وإلا ستفقد 10% من الدقة
+label: يجب تحديث الـReport الخاص بك كل يومين، وإلا ستفقد 10% من الدقة.
+recall: 0.968254
+confidence: 0.995743
+
+image: ./test-images/single2_en/he_en_1.png
+image_order: ! VPN-ה את הפעל, חלש Wi-Fi-ה אם? שעות 3 כל שלך Data-ה את לבדוק תוכל האם
+predict: האם תוכל לבדוק את ה-Data שלך כל 3 שעות? אם ה-Wi-Fi חלש, הפעל את ה-VPN!
+label: האם תוכל לבדוק את ה‑Data שלך כל 3 שעות? אם ה‑Wi‑Fi חלש, הפעל את ה‑VPN!
+recall: 1.000000
+confidence: 0.975952
+
+image: ./test-images/single2_en/he_en_2.png
+image_order: ! כשכחה נגרמות מהבעיות 80% כי. Cloud-ב שלר Password-ה את לשמור תשכח אל
+predict: אל תשכח לשמור את ה-Password שלר ב-Cloud.כי 80% מהבעיות נגרמות כשכחה !
+label: אל תשכח לשמור את ה‑Password שלך ב‑Cloud! כי 80% מהבעיות נגרמות משכחה.
+recall: 0.927536
+confidence: 0.964133
+
+average_confidence: 0.981129
+average_recall: 0.956300
