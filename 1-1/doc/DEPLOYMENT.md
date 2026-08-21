@@ -95,7 +95,7 @@ PDF 输出依赖 `libreoffice` 或 `soffice` 命令。
 
 ## 集成入口
 
-- 统一模型调用：[MODEL_INTEGRATION.md](../MODEL_INTEGRATION.md)
+- 统一模型调用：[Code/model_integration/README.md](../Code/model_integration/README.md)
 - 可复用运行入口：`Code/model_integration/runtime.py`
 - 模型路径：`Code/model.py`
 - OpenVINO 调用封装：`Code/docflow_src/docflow/inference/openvino_session.py`

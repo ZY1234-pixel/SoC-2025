@@ -59,7 +59,7 @@ python -m pip install -r Code\requirement.txt
 
 模型目录、环境要求和验收方式见 [部署说明](doc/DEPLOYMENT.md)。
 
-需要在其他项目中直接调用版面分析、OCR 或表格识别模型时，见 [模型调用说明](MODEL_INTEGRATION.md)。
+需要在其他项目中直接调用版面分析、OCR 或表格识别模型时，见 [模型调用说明](Code/model_integration/README.md)。
 
 ### 单样本验证
 
@@ -173,7 +173,7 @@ Code/models_openvino/
 单元测试在仓库根目录运行：
 
 ```bash
-pytest -q
+pytest -q tests
 ```
 
 自动检查覆盖来源完整性、原生表格数量和 PDF 页数。视觉还原质量仍需对照渲染结果，建议按以下顺序验收：
@@ -183,7 +183,7 @@ pytest -q
 3. 表格是否完整，图片比例和图注位置是否合理。
 4. 字号、行距、对齐和段落间距是否接近原图。
 
-更具体的命令和检查方法见 [部署说明](doc/DEPLOYMENT.md)、[模型调用说明](MODEL_INTEGRATION.md)、[测试说明](doc/TESTING.md) 和 [常见问题](doc/TROUBLESHOOTING.md)。
+更具体的命令和检查方法见 [部署说明](doc/DEPLOYMENT.md)、[模型调用说明](Code/model_integration/README.md)、[测试说明](doc/TESTING.md) 和 [常见问题](doc/TROUBLESHOOTING.md)。
 
 ## 已知限制
 
