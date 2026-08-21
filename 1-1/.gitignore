@@ -20,4 +20,5 @@ venv/
 # Models are distributed separately
 /Code/models/
 /Code/models_openvino/
+/Code/models_openvino.zip*
 /Code/wheels/
