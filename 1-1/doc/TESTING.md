@@ -9,7 +9,7 @@
 代码改动后执行：
 
 ```bash
-pytest -q
+pytest -q tests
 ```
 
 ## 全流程测试
