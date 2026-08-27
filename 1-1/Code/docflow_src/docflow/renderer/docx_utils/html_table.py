@@ -9,9 +9,11 @@ from docflow.planning.text_metrics import estimate_text_units
 
 def get_table_rows(table_soup) -> list:
     rows = []
-    for section in table_soup.find_all(["thead", "tbody", "tfoot"], recursive=False):
-        rows.extend(section.find_all("tr", recursive=False))
-    rows.extend(row for row in table_soup.find_all("tr", recursive=False) if row not in rows)
+    for child in table_soup.find_all(["thead", "tbody", "tfoot", "tr"], recursive=False):
+        if child.name == "tr":
+            rows.append(child)
+        else:
+            rows.extend(child.find_all("tr", recursive=False))
     return rows
 
 

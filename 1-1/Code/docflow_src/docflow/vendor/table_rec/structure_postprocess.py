@@ -69,6 +69,11 @@ class StructurePostProcessor:
         self._remove_ghost_columns(cells, diagnostics)
         self._remove_ghost_rows(cells, diagnostics)
         self._repair_roles(cells)
+        diagnostics["wide_image_header_splits"] = self._split_wide_multi_image_header_cells(
+            cells,
+            layout_objects,
+            table_bbox,
+        )
 
         top_band = self._detect_missing_top_band(cells, layout_objects, ocr_objects, table_bbox)
         if top_band is not None:
@@ -91,6 +96,147 @@ class StructurePostProcessor:
         self._repair_roles(cells)
         diagnostics["row_count"], diagnostics["col_count"] = self._shape(cells)
         return diagnostics
+
+    def _split_wide_multi_image_header_cells(
+        self,
+        cells: list[object],
+        layout_objects: list[object],
+        table_bbox: Rect,
+    ) -> int:
+        """按正文列边界拆开被模型合并的多图片表头。"""
+        if not cells:
+            return 0
+        row_count, col_count = self._shape(cells)
+        if row_count < 2 or col_count < 3:
+            return 0
+
+        min_row = min(getattr(cell, "row") for cell in cells)
+        split_count = 0
+        for candidate in list(cells):
+            images = [
+                obj
+                for obj in getattr(candidate, "layout_objects", [])
+                if getattr(obj, "label", "") == "image"
+            ]
+            if (
+                getattr(candidate, "row") > min_row + 1
+                or len(images) < 2
+                or getattr(candidate, "bbox").w < table_bbox.w * 0.70
+            ):
+                continue
+
+            start_row = int(getattr(candidate, "row"))
+            row_span = max(1, int(getattr(candidate, "rowspan", 1)))
+            end_row = min(start_row + row_span, row_count)
+            col_bands = self._stable_column_bands(cells, end_row, col_count, table_bbox)
+            if len(col_bands) < 3:
+                continue
+            image_columns = {
+                min(col_bands, key=lambda col: abs(col_bands[col].cx - getattr(image, "bbox").cx))
+                for image in images
+            }
+            if len(image_columns) < 2:
+                continue
+
+            row_ranges = self._replacement_row_ranges(cells, candidate, start_row, end_row)
+            if len(row_ranges) != end_row - start_row:
+                continue
+
+            cells[:] = [
+                cell
+                for cell in cells
+                if not (start_row <= int(getattr(cell, "row")) < end_row)
+            ]
+            replacements: list[object] = []
+            for row, (y0, y1) in zip(range(start_row, end_row), row_ranges):
+                for col, col_rect in sorted(col_bands.items()):
+                    replacements.append(
+                        self._new_cell(
+                            row=row,
+                            col=col,
+                            bbox=Rect(col_rect.x0, y0, col_rect.x1, y1),
+                            text="",
+                            role=(
+                                "corner"
+                                if row == min_row and col == min(col_bands)
+                                else "column_header"
+                                if row == min_row
+                                else "row_header"
+                                if col == min(col_bands)
+                                else "body"
+                            ),
+                            confidence=min(0.75, float(getattr(candidate, "confidence", 1.0))),
+                        )
+                    )
+
+            for obj in layout_objects:
+                bbox = getattr(obj, "bbox")
+                if getattr(obj, "label", "") != "image" or not getattr(candidate, "bbox").contains_point(
+                    bbox.cx, bbox.cy, tol=4
+                ):
+                    continue
+                owner = min(
+                    replacements,
+                    key=lambda cell: abs(getattr(cell, "bbox").cx - bbox.cx)
+                    + abs(getattr(cell, "bbox").cy - bbox.cy),
+                )
+                owner.layout_objects.append(obj)
+
+            cells.extend(replacements)
+            split_count += 1
+        return split_count
+
+    def _stable_column_bands(
+        self,
+        cells: list[object],
+        first_body_row: int,
+        col_count: int,
+        table_bbox: Rect,
+    ) -> dict[int, Rect]:
+        bands: dict[int, Rect] = {}
+        for col in range(col_count):
+            boxes = [
+                getattr(cell, "bbox")
+                for cell in cells
+                if int(getattr(cell, "row")) >= first_body_row
+                and int(getattr(cell, "col")) == col
+                and max(1, int(getattr(cell, "colspan", 1))) == 1
+                and 1 < getattr(cell, "bbox").w < table_bbox.w * 0.60
+            ]
+            if not boxes:
+                continue
+            bands[col] = Rect(
+                float(np.median([box.x0 for box in boxes])),
+                table_bbox.y0,
+                float(np.median([box.x1 for box in boxes])),
+                table_bbox.y1,
+            )
+        return bands
+
+    def _replacement_row_ranges(
+        self,
+        cells: list[object],
+        candidate: object,
+        start_row: int,
+        end_row: int,
+    ) -> list[tuple[float, float]]:
+        bbox = getattr(candidate, "bbox")
+        boundaries = [bbox.y0]
+        for row in range(start_row + 1, end_row):
+            starts = [
+                getattr(cell, "bbox").y0
+                for cell in cells
+                if int(getattr(cell, "row")) == row
+                and cell is not candidate
+                and getattr(cell, "bbox").area > 0
+            ]
+            if not starts:
+                return []
+            boundaries.append(float(np.median(starts)))
+        boundaries.append(bbox.y1)
+        if any(right <= left for left, right in zip(boundaries, boundaries[1:])):
+            return []
+        return list(zip(boundaries, boundaries[1:]))
 
     def _insert_internal_missing_bands(
         self,
