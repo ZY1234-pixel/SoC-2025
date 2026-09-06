@@ -19,7 +19,16 @@ from models import paired_model_from_checkpoint
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
-CATEGORIES = ("日常图片水印", "电子文档水印", "试卷水印")
+def discover_categories(data_root: Path) -> list[str]:
+    """Find test categories that have both source and comparison folders."""
+    comparison_root = data_root / "对比结果"
+    if not comparison_root.is_dir():
+        return []
+    return sorted(
+        path.name
+        for path in comparison_root.iterdir()
+        if path.is_dir() and (data_root / path.name).is_dir()
+    )
 
 
 def images(root: Path) -> list[Path]:
@@ -142,8 +151,13 @@ def main() -> None:
     print(f"architecture={architecture}", flush=True)
     args.output.mkdir(parents=True, exist_ok=True)
 
+    categories = discover_categories(args.data_root)
+    if not categories:
+        raise FileNotFoundError(
+            f"No test categories found under {args.data_root}; expected source folders and 对比结果/<category>"
+        )
     all_records = []
-    for category in CATEGORIES:
+    for category in categories:
         records = match_category(
             args.data_root / category,
             args.data_root / "对比结果" / category,
@@ -195,7 +209,7 @@ def main() -> None:
         for result in results:
             handle.write(json.dumps(result, ensure_ascii=False) + "\n")
     summary = {}
-    for category in CATEGORIES:
+    for category in categories:
         category_results = [result for result in results if result["category"] == category]
         summary[category] = {
             "images": len(category_results),
