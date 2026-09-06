@@ -6,15 +6,15 @@
 
 ```text
 mask-model/
-├── handoff/README.md       # 使用说明
-├── handoff/infer.py        # 生产推理：滑动窗口
-├── handoff/visualize.ipynb # 可视化
+├── README.md               # 使用说明
+├── infer.py                # 生产推理：滑动窗口
+├── visualize.ipynb         # 可视化
 ├── models/                 # 模型结构
 ├── requirements.txt
 └── weights/                # 权重单独部署
 ```
 
-当前模型权重放在 `mask-model/handoff/weights/watermark_mask.pt`，权重文件不提交到代码仓库。
+模型权重请单独放在 `weights/watermark_mask.pt`，权重文件不提交到代码仓库。
 
 ## 安装
 
@@ -29,10 +29,10 @@ python -m pip install -r mask-model/requirements.txt
 ## 单张图推理
 
 ```bash
-python mask-model/handoff/infer.py \
+python 3-2/mask-model/infer.py \
   --source /path/to/watermarked.jpg \
   --candidate /path/to/clean_candidate.png \
-  --checkpoint mask-model/handoff/weights/watermark_mask.pt \
+  --checkpoint /path/to/weights/watermark_mask.pt \
   --output /path/to/output \
   --tile 512 --overlap 64 --threshold 0.5 --device auto
 ```
@@ -53,12 +53,12 @@ import sys
 from pathlib import Path
 import torch
 from PIL import Image
-sys.path.insert(0, str(Path("mask-model").resolve()))
+sys.path.insert(0, str(Path("3-2/mask-model").resolve()))
 from infer import predict_full_resolution
 from models import paired_model_from_checkpoint
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-checkpoint = torch.load("mask-model/handoff/weights/watermark_mask.pt", map_location="cpu", weights_only=False)
+checkpoint = torch.load("weights/watermark_mask.pt", map_location="cpu", weights_only=False)
 model, architecture = paired_model_from_checkpoint(checkpoint)
 model = model.to(device).eval()
 with Image.open("watermarked.jpg") as source, Image.open("candidate.png") as candidate:
@@ -68,13 +68,13 @@ mask = probability >= 0.5
 
 ## 可视化
 
-打开 `mask-model/handoff/visualize.ipynb`，选择 Python 内核并按顺序运行。Notebook 自动加载 `best.pt`，不存在时使用 `last.pt`，展示：
+打开 `3-2/mask-model/visualize.ipynb`，选择 Python 内核并按顺序运行。Notebook 自动加载权重，展示：
 
 ```text
 Watermarked source | Clean candidate | Mask probability | Overlay
 ```
 
-默认每类测试 3 张；将 `MAX_IMAGES_PER_CATEGORY` 改为 `0` 可运行全部图片。结果保存在 `runs/external_notebook/`。
+默认每类测试 3 张；将 `MAX_IMAGES_PER_CATEGORY` 改为 `0` 可运行全部图片。结果保存在 `external_notebook/`。
 
 ## 模型说明
 
