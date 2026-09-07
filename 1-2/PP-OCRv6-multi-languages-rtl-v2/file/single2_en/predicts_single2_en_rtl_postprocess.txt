@@ -1,0 +1,50 @@
+image: ./test-images/single2_en/ar_1.png
+predict: أقرأ ثلاثة كتب كل أسبوع، وبذلك سأقرأ اثني عشر كتابًا في الشهر.
+label: أقرأ ثلاثة كتب كل أسبوع، وبذلك سأقرأ اثني عشر كتابًا في الشهر.
+recall: 1.000000
+confidence: 0.983099
+
+image: ./test-images/single2_en/ar_2.png
+predict: ألا تعتقد أن الصحة أهم من الثروة؟ يكفي أن تمارس الرياضة نصف ساعة يوميًا.
+label: ألا تعتقد أن الصحة أهم من الثروة؟ يكفي أن تمارس الرياضة نصف ساعة يوميًا.
+recall: 1.000000
+confidence: 0.982567
+
+image: ./test-images/single2_en/ar_en_1.png
+predict: هل تريد حجز تذكرة (Ticket) عن طريق الـOnline ؟ إذا كان الـPrice مرتفعا، انتظر 24 ساعة!
+label: هل تريد حجز تذكرة (Ticket) عن طريق الـOnline؟ إذا كان الـPrice مرتفعا، انتظر 24 ساعة!
+recall: 1.000000
+confidence: 0.981670
+
+image: ./test-images/single2_en/ar_en_2.png
+predict: يجب تحديث الـReport الخاص بك كل يومين، وإلا ستفقد 10% من الدقة.
+label: يجب تحديث الـReport الخاص بك كل يومين، وإلا ستفقد 10% من الدقة.
+recall: 1.000000
+confidence: 0.994120
+
+image: ./test-images/single2_en/he_1.png
+predict: האם אתה לוחד שעתיים בכל יום? אם תחשיך כך שנה שלחה, תשיג הרבה ידע!
+label: האם אתה לומד שעתיים בכל יום? אם תמשיך כך שנה שלמה, תשיג הרבה ידע!
+recall: 0.953846
+confidence: 0.974088
+
+image: ./test-images/single2_en/he_2.png
+predict: איזה יום יפה! היום הלכתי חמישה קילוחטרים בפארק.
+label: איזה יום יפה! היום הלכתי חמישה קילומטרים בפארק.
+recall: 0.978723
+confidence: 0.972677
+
+image: ./test-images/single2_en/he_en_1.png
+predict: האם תוכל לבדוק את ה-Data שלך בל 3 שעות? אם ה-Wi-Fi חלש, הפעל את ה-VPN!
+label: האם תוכל לבדוק את ה‑Data שלך כל 3 שעות? אם ה‑Wi‑Fi חלש, הפעל את ה‑VPN!
+recall: 0.985714
+confidence: 0.969519
+
+image: ./test-images/single2_en/he_en_2.png
+predict: אל תשכח לשחור את ה-Password שלך ב-Cloud! כי 80% חהבעיות נגרחות חשכחה.
+label: אל תשכח לשמור את ה‑Password שלך ב‑Cloud! כי 80% מהבעיות נגרמות משכחה.
+recall: 0.942029
+confidence: 0.970534
+
+average_confidence: 0.978534
+average_recall: 0.982539
