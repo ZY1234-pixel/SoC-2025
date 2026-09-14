@@ -1,0 +1,11 @@
+# Install matching PyTorch/CUDA and Detectron2 0.6 separately.
+# Validated: Python 3.9.23, torch 1.11.0, torchvision 0.12.0, CUDA 11.3.
+# Build the two bundled CUDA extensions as described in README.md.
+Pillow==9.5.0
+mmcv-full==1.5.0
+mmsegmentation==0.27.0
+opencv-python==4.8.1.78
+timm==0.6.11
+numpy==1.26.4
+scipy==1.13.1
+pycocotools==2.0.11
