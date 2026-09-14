@@ -1,0 +1,9 @@
+# 公式识别
+
+公式识别算法目前基于PP-FormulaNet_plus-S模型进行量化，详细说明见README.md
+
+# 模型路径
+
+通过网盘分享的文件：formula
+链接: https://pan.baidu.com/s/1JSYUk6p06jEHv2tJW5adrw?pwd=yxc4 提取码: yxc4 
+--来自百度网盘超级会员v6的分享
