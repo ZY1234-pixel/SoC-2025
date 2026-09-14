@@ -1,0 +1,20 @@
+# 数据配置（注意：下列路径为本机绝对路径，使用前请按实际数据位置修改）
+path: D:/奔图/deeplabv3p_zzh/YoloV8_Pose/data
+train:
+  - synth_v8_implicit_corners/images
+  - 0722WKX/Data/images
+val: val/images
+test: val/images
+
+# 类别（与训练/推理脚本中的 names 保持一致）
+names:
+  0: double_page_book
+  1: newspaper_poster
+  2: receipt
+  3: screen
+  4: single_page
+  5: unclassified
+
+# 关键点格式：4 个角点，每个 (x, y, visible)
+kpt_shape: [4, 3]
+flip_idx: [1, 0, 3, 2]
