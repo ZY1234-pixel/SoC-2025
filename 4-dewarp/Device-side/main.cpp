@@ -300,11 +300,11 @@ int main(int argc, char** argv) {
 
             int processed = 0;
             int failed = 0;
-            for (const auto& entry : fs::directory_iterator(input_path)) {
+            for (const auto& entry : fs::recursive_directory_iterator(input_path)) {
                 if (!entry.is_regular_file() || !is_image_file(entry.path())) {
                     continue;
                 }
-                fs::path save_path = output_dir / entry.path().filename();
+                fs::path save_path = output_dir / fs::relative(entry.path(), input_path);
                 if (process_one(deeplab, entry.path(), save_path)) {
                     processed++;
                 } else {
@@ -326,13 +326,12 @@ int main(int argc, char** argv) {
 
     int processed = 0;
     int failed = 0;
-    for (const auto& entry : fs::directory_iterator(dir_origin_path)) {
+    for (const auto& entry : fs::recursive_directory_iterator(dir_origin_path)) {
         if (!entry.is_regular_file() || !is_image_file(entry.path())) {
             continue;
         }
 
-        std::string filename = entry.path().filename().string();
-        fs::path save_path = fs::path(dir_save_path) / filename;
+        fs::path save_path = dir_save_path / fs::relative(entry.path(), dir_origin_path);
         if (process_one(deeplab, entry.path(), save_path)) {
             processed++;
         } else {

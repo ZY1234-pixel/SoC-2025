@@ -8,6 +8,7 @@ from PIL import Image
 
 from inference_config import (
     BLEND_ALPHA,
+    BACKBONE,
     BOOK_THRESHOLD,
     DOWNSAMPLE_FACTOR,
     EDGE_WIDTH,
@@ -34,6 +35,7 @@ class DeeplabV3:
     def __init__(
         self,
         model_path=MODEL_PATH,
+        backbone=BACKBONE,
         input_shape=INPUT_SHAPE,
         downsample_factor=DOWNSAMPLE_FACTOR,
         book_threshold=BOOK_THRESHOLD,
@@ -42,6 +44,7 @@ class DeeplabV3:
         num_classes=NUM_CLASSES,
     ):
         self.model_path = model_path
+        self.backbone = backbone.lower()
         self.num_classes = num_classes
         self.input_shape = input_shape
         self.downsample_factor = downsample_factor
@@ -56,14 +59,24 @@ class DeeplabV3:
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"model weights not found: {self.model_path}")
 
-        net = DeepLab(num_classes=self.num_classes, downsample_factor=self.downsample_factor)
+        net = DeepLab(
+            num_classes=self.num_classes,
+            downsample_factor=self.downsample_factor,
+            backbone=self.backbone,
+        )
         state_dict = torch.load(self.model_path, map_location=self.device)
         if isinstance(state_dict, dict) and "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
         if all(key.startswith("module.") for key in state_dict.keys()):
             state_dict = {key[7:]: value for key, value in state_dict.items()}
 
-        net.load_state_dict(state_dict)
+        try:
+            net.load_state_dict(state_dict)
+        except RuntimeError as error:
+            raise RuntimeError(
+                f"Cannot load '{self.model_path}' with backbone '{self.backbone}'. "
+                "Choose the backbone used for training, then use its matching checkpoint."
+            ) from error
         net.eval()
         net.to(self.device)
         return net

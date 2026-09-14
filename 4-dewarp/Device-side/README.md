@@ -21,7 +21,6 @@ Device-side/
 ├── CornerLostProcess.cpp      # 缺角补绘相关处理
 ├── run.sh                    # 编译并运行脚本
 ├── deeplabv3p.ncnn.param      # NCNN 模型结构
-├── img/                       # 本地测试输入图片
 └── img_out/                   # 本地推理输出结果
 ```
 
@@ -39,7 +38,7 @@ ncnn-20260113/
 端侧模型的 Python 训练、测试和推理代码在项目外层：
 
 ```text
-Device_side_test/
+Semantic-Segmentation/Device_side_test/
 ```
 
 `Device_side_test` 用于训练端侧小模型、验证 Python 推理结果、测试中缝点输出，并生成或辅助转换端侧部署所需的模型文件。
@@ -69,11 +68,11 @@ Device-side:
 ```cpp
 static constexpr const char* kParamPath = "deeplabv3p.ncnn.param";
 static constexpr const char* kBinPath = "deeplabv3p.ncnn.bin";
-static constexpr const char* kDefaultInputPath = "img/";
+static constexpr const char* kDefaultInputPath = "../TEST_dewarp/";
 static constexpr const char* kDefaultSavePath = "img_out/";
 ```
 
-默认从 `img/` 读取图片，将推理结果保存到 `img_out/`。
+默认递归读取 `../TEST_dewarp/` 的图片，将推理结果保存到 `img_out/`。
 
 ## 输出模式
 
@@ -133,7 +132,7 @@ bash run.sh
 
 ## 提交说明
 
-`img/`、`img_out/`、`deeplabv3p.ncnn.bin` 和 `ncnn-20260113/` 是本地测试数据、输出结果、模型权重和本地依赖，不提交到 GitHub。交付时重点保留：
+`../TEST_dewarp/`、`img_out/`、`deeplabv3p.ncnn.bin` 和 `ncnn-20260113/` 是本地测试数据、输出结果、模型权重和本地依赖，不提交到 GitHub。交付时重点保留：
 
 ```text
 main.cpp
@@ -143,3 +142,5 @@ CornerLostProcess.cpp
 run.sh
 deeplabv3p.ncnn.param
 ```
+
+默认输入统一为 `4-dewarp/TEST_dewarp/`；输出中保留 `perspective/`、`instance/` 等子目录。

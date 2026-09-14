@@ -6,3 +6,8 @@ results/
 *.jpg
 *.png
 **/__pycache__/
+
+# 4-dewarp InternImage-L inference package local data and large artifacts
+4-dewarp/internimage-l-semantic-segmentation/img/
+4-dewarp/internimage-l-semantic-segmentation/outputs/
+4-dewarp/internimage-l-semantic-segmentation/checkpoints/*.pth

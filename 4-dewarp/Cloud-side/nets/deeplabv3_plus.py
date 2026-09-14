@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from nets.xception import xception
+from nets.mobilenetv3 import MobileNetV3_Large
 
 
 class ASPP(nn.Module):
@@ -56,12 +57,25 @@ class ASPP(nn.Module):
 
 
 class DeepLab(nn.Module):
-    def __init__(self, num_classes, downsample_factor=8):
+    SUPPORTED_BACKBONES = ("mobilenetv3", "xception")
+
+    def __init__(self, num_classes, downsample_factor=8, backbone="mobilenetv3"):
         super().__init__()
-        self.backbone = xception(downsample_factor=downsample_factor, pretrained=False)
-        self.aspp = ASPP(dim_in=2048, dim_out=256, rate=16 // downsample_factor)
+        backbone = backbone.lower()
+        if backbone == "mobilenetv3":
+            self.backbone = MobileNetV3_Large(downsample_factor=downsample_factor)
+            high_level_channels, low_level_channels = 960, 24
+        elif backbone == "xception":
+            self.backbone = xception(downsample_factor=downsample_factor, pretrained=False)
+            high_level_channels, low_level_channels = 2048, 256
+        else:
+            supported = ", ".join(self.SUPPORTED_BACKBONES)
+            raise ValueError(f"Unsupported backbone '{backbone}'. Choose one of: {supported}.")
+
+        self.backbone_name = backbone
+        self.aspp = ASPP(dim_in=high_level_channels, dim_out=256, rate=16 // downsample_factor)
         self.shortcut_conv = nn.Sequential(
-            nn.Conv2d(256, 48, 1),
+            nn.Conv2d(low_level_channels, 48, 1),
             nn.BatchNorm2d(48),
             nn.ReLU(inplace=True),
         )

@@ -15,7 +15,6 @@ Cloud-side/
 ├── nets/                   # DeepLabV3+ 网络结构
 ├── utils/                  # 图像预处理和通用工具
 ├── requirements.txt        # Python 依赖
-├── img/                    # 本地测试输入图片
 └── img_out/                # 本地推理输出结果
 ```
 
@@ -24,7 +23,7 @@ Cloud-side/
 云端模型训练代码在项目外层：
 
 ```text
-Cloud_side_train/
+Semantic-Segmentation/Cloud_side_train/
 ```
 
 `Cloud_side_train` 用于训练云端大模型、管理训练数据和生成 `.pth` 权重；本目录只保留推理交付需要的最小代码和权重。
@@ -42,6 +41,7 @@ best_epoch_weights.pth
 推理路径、模型参数和输出开关统一在 `inference_config.py` 中配置。`predict.py` 和 `deeplab.py` 都从这里读取默认值：
 
 ```python
+BACKBONE = "mobilenetv3"  # or "xception"
 OUTPUT_TYPE = "mask"
 EDGE_WIDTH = 2
 MIX_TYPE = 0
@@ -61,12 +61,21 @@ MIX_TYPE = 1          输出 0-255 黑白 mask/edge
 
 当 `OUTPUT_TYPE = "edge"` 时，程序直接输出轮廓边缘图，不使用混合显示，所以 `MIX_TYPE` 不生效。
 
+`BACKBONE` 必须和权重匹配：`best_hd95_epoch_85.pth` 使用 `mobilenetv3`，
+`best_epoch_weights.pth` 使用 `xception`。如果组合不匹配，加载阶段会明确报错，避免用错误架构开始推理。
+
+`best_hd95_epoch_85.pth` 对应训练输入为 `1024 × 1024`、`DOWNSAMPLE_FACTOR = 8`。
+MobileNetV3 推理骨干与 `Semantic-Segmentation/Cloud_side_train/nets/deeplabv3_plus.py` 中的实现保持一致：
+浅层特征取 `bneck[2]`，高层特征按配置转换为 8 或 16 倍下采样，包含残差分支及
+5×5 卷积的步长、膨胀率和 padding。以上参数不包含在 checkpoint 中；即使权重
+严格加载成功，使用未经转换的 32 倍下采样分类骨干也可能导致预测为空 mask。
+
 ## 输入输出路径
 
 默认输入目录：
 
 ```text
-img/
+../TEST_dewarp/
 ```
 
 默认输出目录：
@@ -75,7 +84,7 @@ img/
 img_out/
 ```
 
-`predict.py` 会遍历 `img/` 下的图片，并将结果保存到 `img_out/`。
+`predict.py` 会递归遍历 `../TEST_dewarp/` 下的图片，并将结果保存到 `img_out/`。
 
 ## 运行
 
@@ -89,7 +98,7 @@ python predict.py
 
 ## 提交说明
 
-`img/`、`img_out/` 和 `best_epoch_weights.pth` 是本地测试数据、输出结果和本地权重文件，不提交到 GitHub。交付时重点保留：
+`../TEST_dewarp/`、`img_out/` 和 `best_epoch_weights.pth` 是本地测试数据、输出结果和本地权重文件，不提交到 GitHub。交付时重点保留：
 
 ```text
 predict.py
@@ -99,3 +108,5 @@ nets/
 utils/
 requirements.txt
 ```
+
+默认输入统一为 `4-dewarp/TEST_dewarp/`；输出中保留 `perspective/`、`instance/` 等子目录。

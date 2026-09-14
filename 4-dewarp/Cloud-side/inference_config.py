@@ -4,14 +4,20 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Input/output paths for batch prediction.
-IMAGE_DIR = os.path.join(BASE_DIR, "img")
+IMAGE_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "TEST_dewarp"))
 SAVE_DIR = os.path.join(BASE_DIR, "img_out")
 IMAGE_EXTENSIONS = (".bmp", ".dib", ".png", ".jpg", ".jpeg", ".pbm", ".pgm", ".ppm", ".tif", ".tiff")
 
 # Model settings.
-MODEL_PATH = os.path.join(BASE_DIR, "best_epoch_weights.pth")
+# Select the model architecture.  The checkpoint must be trained with the
+# same backbone: best_hd95_epoch_85.pth is MobileNetV3, while
+# best_epoch_weights.pth is Xception.
+BACKBONE = "mobilenetv3"  # "mobilenetv3" or "xception"
+MODEL_PATH = os.path.join(BASE_DIR, "best_hd95_epoch_85.pth")
 NUM_CLASSES = 2
 INPUT_SHAPE = (1024, 1024)
+# Must match training: best_hd95_epoch_85.pth uses output stride 8.
+# Stride/dilation are architecture settings and are not stored in the weights.
 DOWNSAMPLE_FACTOR = 8
 BOOK_THRESHOLD = 0.60
 
