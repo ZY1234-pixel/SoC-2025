@@ -1,0 +1,6 @@
+# 运行环境（参考版本，实际以能跑通为准）
+ultralytics==8.4.48
+torch==2.7.1
+torchvision
+opencv-python
+numpy

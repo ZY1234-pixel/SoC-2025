@@ -1,0 +1,16 @@
+# 权重与导出物（不随代码入库，单独分发）
+weights/
+*.pt
+*.pth
+*.torchscript
+*.onnx
+*.param
+*.bin
+
+# 运行产物
+outputs/
+__pycache__/
+*.pyc
+*.log
+*.json
+!requirements.txt
