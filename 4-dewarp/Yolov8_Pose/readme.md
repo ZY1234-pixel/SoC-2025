@@ -8,7 +8,7 @@
 | 版本 | 时间 | 新增/变化 |
 |---|---|---|
 | 初版 | 2026-05 | `inference_intranet.py` 推理封装（内网服务用）＋ 端侧 C++/NCNN 部署 |
-| **0916** | **2026-09-16** | 新增 `predict.py`（推理）/ `corner_postprocess.py`（后处理）/ `evaluate.py`（评测）；输出口径统一为**"可见区域四边形"**；新增 `patch_env.py` 打环境补丁。训练与数据集不在本仓库内，权重单独分发 |
+| **0916** | **2026-09-16** | 新增 `predict.py`（推理）/ `corner_postprocess.py`（后处理）/ `evaluate.py`（评测）；输出口径统一为**"可见区域四边形"**；新增 `patch_env.py` 打环境补丁 |
 
 初版内容保留在本文档后半部分（"初版说明"两节），0916 的用法以本文档前半部分为准。
 
@@ -38,15 +38,6 @@
 两种推理入口的关系：`inference_intranet.py` 是内网封装版；`predict.py` 是命令行版，带后处理开关，
 便于评测与排查。两者共用同一份权重与同一套环境补丁，**输出口径以 `predict.py` 为准**。
 
-### 1.3 模型权重（另附）
-
-权重不随代码入库，单独分发（网盘）。解压后放到本目录 `weights/` 下：
-
-* `weights/best.pt`：0916 权重，`predict.py` 默认从这里读取（也可 `--weights` 指定）
-* `best.torchscript`、`model.ncnn.param`、`model.ncnn.bin`：初版端侧部署所用
-
----
-
 ## 二、快速开始（0916）
 
 ```bash
@@ -57,7 +48,7 @@ pip install -r requirements.txt
 python patch_env.py --check
 python patch_env.py --apply
 
-# 2) 放入权重：从发布包/网盘解压得到 best.pt -> weights/best.pt
+# 2) 放入权重：best.pt 放到本目录 weights/ 下
 
 # 3) 推理
 python predict.py --source <图片或目录> --out outputs/infer
@@ -77,8 +68,6 @@ python evaluate.py --ds <含 images/labels 的数据集目录>
 - 只有**边**被裁掉 → 输出目标与画面矩形的交集，角点落在画面边框上；
 - **角**被裁掉（交集是五边形以上）→ 取面积最大的内接四边形，结果里标记 `corner_cut=True`；
 - 四个角都在画面内 → 原样输出。
-
-下游若需要"真实角点（可能落在画面外）"，需另行约定，本版本不提供。
 
 ### 3.2 后处理：边拟合精修
 
