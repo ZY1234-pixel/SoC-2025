@@ -69,7 +69,24 @@ python evaluate.py --ds <含 images/labels 的数据集目录>
 - **角**被裁掉（交集是五边形以上）→ 取面积最大的内接四边形，结果里标记 `corner_cut=True`；
 - 四个角都在画面内 → 原样输出。
 
-### 3.2 后处理：边拟合精修
+### 3.2 类别输出
+
+模型同时输出目标类别与置信度，与角点一一对应（每条检测含 `cls` / `cls_name` / `conf`）。
+`predict.py` 的 `results.json` 顶层带 `names` 字段给出完整类别表：
+
+| id | 类别 |
+|---|---|
+| 0 | double_page_book（双页书） |
+| 1 | newspaper_poster（报纸/海报） |
+| 2 | receipt（小票） |
+| 3 | screen（屏幕） |
+| 4 | single_page（单页文档） |
+| 5 | unclassified（未分类） |
+| 6 | id_card（证件卡） |
+
+`evaluate.py` 会一并给出**类别准确率**与误判明细（如 `single_page->id_card×2`）。
+
+### 3.3 后处理：边拟合精修
 
 `corner_postprocess.py` 用图像梯度把预测四边形的四条边重新拟合再求交点，用于修正
 "缺边时画面内的角点被一起拉偏"的问题。带两重保护：
@@ -79,7 +96,7 @@ python evaluate.py --ds <含 images/labels 的数据集目录>
 
 可用 `predict.py --no-snap` 关闭做对照。
 
-### 3.3 环境补丁（重要）
+### 3.4 环境补丁（重要）
 
 ultralytics 需要 5 处补丁，`patch_env.py` 会自检并补齐（幂等，改前备份 `.bak_release`）：
 
@@ -94,7 +111,7 @@ ultralytics 需要 5 处补丁，`patch_env.py` 会自检并补齐（幂等，�
 版本基线：ultralytics 8.4.48、torch 2.7.1+cu118。`patch_env.py` 按精确文本替换，
 换 ultralytics 版本后若文本不匹配，需按上表手动改。
 
-### 3.4 评测说明
+### 3.5 评测说明
 
 `evaluate.py` 的指标：
 

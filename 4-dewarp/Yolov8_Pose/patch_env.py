@@ -163,13 +163,82 @@ def p4b_predict():
 P4B_CHECK = "clip=False"
 
 
+# 补丁 5 的原文/替换文本（与 ultralytics 8.4.48 一致；换版本若匹配不到会提示手动改）
+P5_OLD = '''class KeypointLoss(nn.Module):
+    """Criterion class for computing keypoint losses."""
+
+    def __init__(self, sigmas: torch.Tensor) -> None:
+        """Initialize the KeypointLoss class with keypoint sigmas."""
+        super().__init__()
+        self.sigmas = sigmas
+
+    def forward(
+        self, pred_kpts: torch.Tensor, gt_kpts: torch.Tensor, kpt_mask: torch.Tensor, area: torch.Tensor
+    ) -> torch.Tensor:
+        """Calculate keypoint loss factor and Euclidean distance loss for keypoints."""
+        d = (pred_kpts[..., 0] - gt_kpts[..., 0]).pow(2) + (pred_kpts[..., 1] - gt_kpts[..., 1]).pow(2)
+        kpt_loss_factor = kpt_mask.shape[1] / (torch.sum(kpt_mask != 0, dim=1) + 1e-9)
+        # e = d / (2 * (area * self.sigmas) ** 2 + 1e-9)  # from formula
+        e = d / ((2 * self.sigmas).pow(2) * (area + 1e-9) * 2)  # from cocoeval
+        return (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()'''
+P5_NEW = '''class KeypointLoss(nn.Module):
+    """Criterion class for computing keypoint losses."""
+
+    def __init__(self, sigmas: torch.Tensor) -> None:
+        """Initialize the KeypointLoss class with keypoint sigmas."""
+        super().__init__()
+        self.sigmas = sigmas
+
+    def forward(
+        self, pred_kpts: torch.Tensor, gt_kpts: torch.Tensor, kpt_mask: torch.Tensor, area: torch.Tensor
+    ) -> torch.Tensor:
+        """顺序无关 keypoint loss: 对 4 个角点取 4! 排列里误差最小者
+
+        避免逐通道监督把"点集正确、角色错位"判成超大误差, 从而逼模型输出折中几何。
+        K>6 (如 COCO 17 点) 时回退原逐通道实现。
+        """
+        import itertools
+
+        K = pred_kpts.shape[1]
+        if K > 6:
+            d = (pred_kpts[..., 0] - gt_kpts[..., 0]).pow(2) + (pred_kpts[..., 1] - gt_kpts[..., 1]).pow(2)
+            kpt_loss_factor = kpt_mask.shape[1] / (torch.sum(kpt_mask != 0, dim=1) + 1e-9)
+            e = d / ((2 * self.sigmas).pow(2) * (area + 1e-9) * 2)
+            return (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()
+
+        perms = list(itertools.permutations(range(K)))
+        P = len(perms)
+        dev = pred_kpts.device
+        perm_idx = torch.as_tensor(perms, dtype=torch.long, device=dev)  # (P,K)
+        N = pred_kpts.shape[0]
+        # (N,P,K,2): 每个排列下预测点坐标
+        pred = pred_kpts[:, None, :, :2].expand(N, P, K, 2)
+        idx = perm_idx[None, :, :, None].expand(N, P, K, 2)
+        pred_p = pred.gather(2, idx)
+        gt = gt_kpts[..., :2].unsqueeze(1)  # (N,1,K,2)
+        d = (pred_p - gt).pow(2).sum(-1)  # (N,P,K)
+        e = d / ((2 * self.sigmas).pow(2).view(1, 1, K) * (area[:, None] + 1e-9) * 2)
+        term = (1 - torch.exp(-e)) * kpt_mask.unsqueeze(1)  # (N,P,K)
+        best = term.sum(-1).min(-1).values  # (N,)
+        vis = torch.sum(kpt_mask != 0, dim=1)
+        return (best / (vis + 1e-9)).mean()'''
+
+
 def p5_loss():
     p = os.path.join(SP, "utils", "loss.py")
     t = read(p)
     if "顺序无关" in t:
         return 0
-    print("  [需手工] loss.py 的顺序无关改动较大，请先运行 scripts\\patch_venv_setloss.py")
-    return -1
+    if P5_OLD is None or P5_NEW is None:
+        print("  [跳过] loss.py：本脚本未内置该补丁文本（仅影响训练，不影响推理）")
+        return -1
+    n = t.count(P5_OLD)
+    if n != 1:
+        print(f"  [跳过] loss.py：待替换文本匹配到 {n} 处（期望 1 处），"
+              f"可能 ultralytics 版本不同，需手动按 README 3.3 表格修改")
+        return -1
+    write(p, t.replace(P5_OLD, P5_NEW, 1))
+    return 1
 
 
 P5_CHECK = "顺序无关"

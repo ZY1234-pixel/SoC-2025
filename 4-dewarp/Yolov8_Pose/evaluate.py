@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""四角点精度评测: 对含 images/ 与 labels/ 的数据集统计角点误差
+"""四角点精度评测: 对含 images/ 与 labels/ 的数据集统计角点误差与类别准确率
 
 口径与推理一致(可见区域四边形): GT 与预测都先裁到画面矩形。
 
@@ -9,6 +9,7 @@
 指标:
   点集误差 = 对 4 个角点的所有排列取最小的平均距离(与角点角色无关)
   另按"是否落在画面边框上"把角点分成 贴边角 / 画面内角 两类分别统计
+  类别准确率 = 预测类别与标签类别一致的图片占比
 """
 import argparse
 import glob
@@ -24,6 +25,8 @@ from corner_postprocess import refine_quad, visible_quad
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_WEIGHTS = os.path.join(HERE, "weights", "best.pt")
+NAMES = {0: "double_page_book", 1: "newspaper_poster", 2: "receipt", 3: "screen",
+         4: "single_page", 5: "unclassified", 6: "id_card"}
 
 
 def cv_imread(p):
@@ -35,7 +38,7 @@ def load_gt(lp, W, H):
     with open(lp, "r", encoding="utf-8") as f:
         toks = f.readline().split()
     vals = np.array([float(t) for t in toks[1:]])
-    return vals[4:].reshape(4, 3)[:, :2] * np.array([W, H])
+    return vals[4:].reshape(4, 3)[:, :2] * np.array([W, H]), int(float(toks[0]))
 
 
 def set_err4(gt, pred):
@@ -73,19 +76,25 @@ def main():
                    + glob.glob(os.path.join(args.ds, "images", "*.png")))
     set_errs, corner_all, corner_in, corner_border, rows = [], [], [], [], []
     n_det = 0
+    cls_ok = cls_tot = 0
+    cls_conf = []           # (真类, 预测类) 对, 用于混淆统计
     for ip in files:
         stem = os.path.splitext(os.path.basename(ip))[0]
         img = cv_imread(ip)
         if img is None:
             continue
         H, W = img.shape[:2]
-        gt_raw = load_gt(os.path.join(args.ds, "labels", stem + ".txt"), W, H)
+        gt_raw, gt_cls = load_gt(os.path.join(args.ds, "labels", stem + ".txt"), W, H)
         gt = reorder_corners(visible_quad(gt_raw, W, H)[0])
         r = model(img, imgsz=args.imgsz, conf=args.conf, verbose=False)[0]
         if r.boxes is None or len(r.boxes) == 0 or r.keypoints is None:
             rows.append({"stem": stem, "detected": False})
             continue
         j = int(r.boxes.conf.argmax())
+        pred_cls = int(r.boxes.cls[j].item())
+        cls_tot += 1
+        cls_ok += int(pred_cls == gt_cls)
+        cls_conf.append((gt_cls, pred_cls))
         pred = reorder_corners(r.keypoints.xy[j].cpu().numpy())
         if snap:
             pred = reorder_corners(refine_quad(img, pred)[0])
@@ -100,12 +109,21 @@ def main():
             (corner_border if min(gt[i][0], W - gt[i][0], gt[i][1], H - gt[i][1]) <= 2
              else corner_in).append(d)
         rows.append({"stem": stem, "detected": True, "conf": float(r.boxes.conf[j]),
+                     "cls_gt": gt_cls, "cls_pred": pred_cls,
+                     "cls_name": NAMES.get(pred_cls, "unknown"),
                      "set_err_px": round(e, 1),
                      "gt": np.round(gt, 1).tolist(), "pred": np.round(pred, 1).tolist()})
 
     print(f"数据集: {args.ds}")
     print(f"权重  : {args.weights}   边拟合精修: {'开' if snap else '关'}")
     print(f"检出  : {n_det}/{len(files)}")
+    if cls_tot:
+        print(f"类别  : 准确率 {cls_ok / cls_tot * 100:.1f}%  ({cls_ok}/{cls_tot})")
+        wrong = [(g, p) for g, p in cls_conf if g != p]
+        if wrong:
+            from collections import Counter
+            cnt = Counter(f"{NAMES.get(g, g)}->{NAMES.get(p, p)}" for g, p in wrong)
+            print("        误判: " + ", ".join(f"{k}×{v}" for k, v in cnt.most_common()))
     print(stat(set_errs, "点集误差"))
     print(stat(corner_all, "全部角点"))
     print(stat(corner_in, "画面内角点"))

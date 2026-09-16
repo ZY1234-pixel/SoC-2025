@@ -54,6 +54,7 @@ def predict(model, img, imgsz, conf, snap=True):
         kc = res.keypoints.conf[j].cpu().numpy() if res.keypoints.conf is not None else np.ones(4)
         dets.append({
             "cls": int(res.boxes.cls[j].item()),
+            "cls_name": NAMES.get(int(res.boxes.cls[j].item()), "unknown"),
             "conf": float(res.boxes.conf[j].item()),
             "box": res.boxes.xyxy[j].cpu().numpy().tolist(),
             "keypoints_raw": k_raw.tolist(),
@@ -166,7 +167,7 @@ def main():
             if os.path.isdir(s) else [s]
     os.makedirs(args.out, exist_ok=True)
     rec = {"weights": args.weights, "imgsz": args.imgsz, "convention": "visible_quad",
-           "edge_snap": snap, "images": []}
+           "edge_snap": snap, "names": NAMES, "images": []}
     for ip in files:
         img = cv_imread(ip)
         if img is None:
