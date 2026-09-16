@@ -62,11 +62,11 @@ def backup(p):
     return bak
 
 
-def sub_line_regex(text, pattern, repl, count=1):
-    """按行正则替换，保留缩进"""
+def sub_line_regex(text, pattern, repl, count=1, skip_comment=True):
+    """按行正则替换，保留缩进；默认跳过注释行（避免误改已注释的原文）"""
     out, n = [], 0
     for line in text.split("\n"):
-        if n < count and re.search(pattern, line):
+        if n < count and re.search(pattern, line) and not (skip_comment and line.lstrip().startswith("#")):
             out.append(re.sub(pattern, repl, line, count=1))
             n += 1
         else:
@@ -78,9 +78,7 @@ def sub_line_regex(text, pattern, repl, count=1):
 def p1_utils():
     p = os.path.join(SP, "data", "utils.py")
     t = read(p)
-    t, n1 = (t.replace("points = lb[:, 5:].reshape(-1, ndim)[:, :2]",
-                       "points = lb[:, 1:]"), 1) if "points = lb[:, 5:].reshape(-1, ndim)[:, :2]" in t \
-        else (t, 0)
+    # 只放宽两个坐标校验断言；points 取值那一行保持原样
     t, n2 = sub_line_regex(t, r"(?<=assert )points\.max\(\) <= 1\.01", "points.max() <= 999.0")
     t, n3 = sub_line_regex(t, r"non-normalized or out of bounds coordinates \{points\[points > 1\.01\]\}",
                            "non-normalized or out of bounds coordinates {points[points > 999.0]}")
@@ -88,7 +86,7 @@ def p1_utils():
     t, n5 = sub_line_regex(t, r"negative class labels or coordinate \{lb\[lb < -0\.01\]\}",
                            "negative class labels or bbox {lb[:, :5][lb[:, :5] < -0.01]}")
     write(p, t)
-    return n1 + n2 + n3 + n4 + n5
+    return n2 + n3 + n4 + n5
 
 
 P1_CHECK = "points.max() <= 999.0"
@@ -120,9 +118,21 @@ def p3_instance():
         return 0
     t = t.replace("    def clip(self, w: int, h: int) -> None:",
                   "    def clip(self, w: int, h: int, clip_keypoints: bool = True) -> None:", 1)
-    t = t.replace("        if self.keypoints is not None:",
-                  "        if self.keypoints is not None and clip_keypoints:", 1)
-    write(p, t)
+    # 注意: instance.py 里有 9 处同名的 `if self.keypoints is not None:`，
+    # 必须只改 clip() 函数体内那一处，否则会误改 scale/denormalize 等方法。
+    lines = t.split("\n")
+    start = next((i for i, l in enumerate(lines)
+                  if "def clip(self, w: int, h: int, clip_keypoints" in l), None)
+    if start is None:
+        return -1
+    for j in range(start, len(lines)):
+        if lines[j].strip() == "if self.keypoints is not None:":
+            lines[j] = lines[j].replace("if self.keypoints is not None:",
+                                        "if self.keypoints is not None and clip_keypoints:")
+            break
+    else:
+        return -1
+    write(p, "\n".join(lines))
     return 1
 
 
