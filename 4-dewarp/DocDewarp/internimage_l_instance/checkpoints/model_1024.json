@@ -1,0 +1,18 @@
+{
+  "input_size": [
+    1024,
+    1024
+  ],
+  "checkpoint": "best_hd95_1024.pth",
+  "sha256": "bf41b9d961226828f612752563b7869921c7a94aa5f6b30cb6b8cc04c83c3c80",
+  "source_checkpoint": "Instance/Train_InternImage-L-Instance/doc_instance_seg/checkpoints/best_hd95.pth",
+  "training_results": "Instance/Train_InternImage-L-Instance/doc_instance_seg/outputs/train",
+  "training_config": "Instance/Train_InternImage-L-Instance/doc_instance_seg/outputs/train/config.yaml",
+  "completed_iterations": 296910,
+  "selection": {
+    "value": 31.773448278455543,
+    "mode": "min",
+    "metric": "doc_val_single/doc_instance/dataset_p95_hd95",
+    "iteration": 19794
+  }
+}
