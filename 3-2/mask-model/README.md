@@ -2,14 +2,10 @@
 
 输入 **有水印原图** + **去水印候选图**，输出与原图同分辨率的**水印 Mask**。
 
-权重：`weights/watermark_mask.pt`（`difference_gate_scale`，epoch 6，val IoU 0.7642）。
-仓库里不含权重文件（37 MB，走 Git LFS 或单独传都不合适），需要单独获取后放到
-`weights/watermark_mask.pt`。
+权重：`weights/watermark_mask.pt`（val IoU 0.7642）。
 
 ## 目录结构
 
-目录名不影响运行——代码用自身所在目录定位，放在 `3-2/mask-model`、`mask-model`
-或 `handoff` 下都可以。
 
 ```text
 <mask-model>/
@@ -55,13 +51,11 @@ Python 调用：
 
 ```python
 from infer import load_model, predict
-from PIL import Image, ImageOps
+from PIL import Image
 
 model, device, info = load_model("weights/watermark_mask.pt")
-with Image.open("watermarked.jpg") as f:
-    source = ImageOps.exif_transpose(f).convert("RGB")
-with Image.open("candidate.png") as f:
-    candidate = ImageOps.exif_transpose(f).convert("RGB")
+source = Image.open("watermarked.jpg").convert("RGB")
+candidate = Image.open("candidate.png").convert("RGB")
 
 result = predict(model, source, candidate, device)
 mask = result["probability"] >= 0.35
