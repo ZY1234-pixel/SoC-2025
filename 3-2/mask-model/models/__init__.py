@@ -1,45 +1,22 @@
-from .network import WatermarkMaskNet
-from .paired_network import PairedWatermarkMaskNet
-from .residual_guided_network import ResidualGuidedWatermarkMaskNet
-from .aligned_difference_network import AlignedDifferenceMaskNet
-from .difference_prior_network import DifferencePriorMaskNet
-from .aligned_difference_v2_network import AlignedDifferenceV2MaskNet
-from .difference_first_network import DifferenceFirstMaskNet
+"""水印 Mask 检测网络（架构名 ``difference_gate_scale``）。"""
+
 from .difference_gate_network import DifferenceGateMaskNet
 
-__all__ = [
-    "PairedWatermarkMaskNet",
-    "ResidualGuidedWatermarkMaskNet",
-    "AlignedDifferenceMaskNet",
-    "DifferencePriorMaskNet",
-    "AlignedDifferenceV2MaskNet",
-    "DifferenceFirstMaskNet",
-    "DifferenceGateMaskNet",
-    "WatermarkMaskNet",
-    "paired_model_from_checkpoint",
-]
+__all__ = ["DifferenceGateMaskNet"]
 
 
-def paired_model_from_checkpoint(checkpoint: dict):
-    """Instantiate the paired architecture recorded in a training checkpoint."""
-
+def model_from_checkpoint(checkpoint):
+    """按 checkpoint 里记录的架构建模型并载入权重。"""
     arguments = checkpoint.get("args", {}) if isinstance(checkpoint, dict) else {}
-    architecture = arguments.get("architecture", "paired")
-    if architecture == "aligned_difference_v2":
-        model = AlignedDifferenceV2MaskNet(pretrained=False)
-    elif architecture == "difference_first":
-        model = DifferenceFirstMaskNet(pretrained=False)
-    elif architecture == "difference_gate":
-        model = DifferenceGateMaskNet(pretrained=False)
-    elif architecture == "difference_prior":
-        model = DifferencePriorMaskNet(pretrained=False)
-    elif architecture == "aligned_difference":
-        model = AlignedDifferenceMaskNet(pretrained=False)
-    elif architecture == "residual_guided":
-        model = ResidualGuidedWatermarkMaskNet(pretrained=False)
-    elif architecture == "paired":
-        model = PairedWatermarkMaskNet(pretrained=False)
-    else:
-        raise ValueError(f"Unknown paired architecture in checkpoint: {architecture}")
-    model.load_state_dict(checkpoint.get("model", checkpoint), strict=True)
+    state = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    architecture = arguments.get("architecture") or "difference_gate_scale"
+    large_region = architecture == "difference_gate_scale"
+    model = DifferenceGateMaskNet(pretrained=False, large_region=large_region)
+    # strict=False：旧权重没有 source_* 这些新增的外观分支参数
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if unexpected:
+        raise RuntimeError(
+            "checkpoint 与 DifferenceGateMaskNet 不匹配，多余参数："
+            f"{sorted(unexpected)[:5]}"
+        )
     return model, architecture

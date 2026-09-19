@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+# 可再生的可视化产物（candidates/ 必须保留，notebook 依赖它）
+external_notebook/*/*_probability.png
+external_notebook/*/*_overlay.jpg

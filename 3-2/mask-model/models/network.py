@@ -1,3 +1,5 @@
+"""网络基础组件。"""
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -8,6 +10,8 @@ from torchvision.models import (
 
 
 class _Smooth(nn.Sequential):
+    """深度可分离卷积 + 逐点卷积，用于平滑特征、抑制棋盘效应。"""
+
     def __init__(self, channels: int):
         super().__init__(
             nn.Conv2d(channels, channels, 3, padding=1, groups=channels, bias=False),
@@ -20,7 +24,7 @@ class _Smooth(nn.Sequential):
 
 
 class WatermarkMaskNet(nn.Module):
-    """RGB-only mask model with separate semantic and detail paths."""
+    """仅输入原图的单图 mask 模型（早期版本，保留以便加载旧权重）。"""
 
     def __init__(self, width: int = 64, pretrained: bool = True):
         super().__init__()
@@ -56,6 +60,7 @@ class WatermarkMaskNet(nn.Module):
             if index in self.feature_ids:
                 features.append(x)
 
+        # 自顶向下 FPN
         x = self.lateral[-1](features[-1])
         pyramid = []
         for index in range(3, -1, -1):

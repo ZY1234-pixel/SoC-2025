@@ -1,86 +1,101 @@
-# 水印 Mask 检测模型
+# 水印 Mask 检测
 
-当前模型是 `DifferenceGateMaskNet`：输入有水印原图和去水印候选图，输出同分辨率的水印概率图与二值 Mask。
+输入 **有水印原图** + **去水印候选图**，输出与原图同分辨率的**水印 Mask**。
 
-## 目录与权重
+权重：`weights/watermark_mask.pt`（`difference_gate_scale`，epoch 6，val IoU 0.7642）。
+仓库里不含权重文件（37 MB，走 Git LFS 或单独传都不合适），需要单独获取后放到
+`weights/watermark_mask.pt`。
+
+## 目录结构
+
+目录名不影响运行——代码用自身所在目录定位，放在 `3-2/mask-model`、`mask-model`
+或 `handoff` 下都可以。
 
 ```text
-mask-model/
-├── README.md               # 使用说明
-├── infer.py                # 生产推理：滑动窗口
-├── visualize.ipynb         # 可视化
-├── models/                 # 模型结构
+<mask-model>/
+├── infer.py                # 推理入口（只依赖 models/ 和 weights/）
+├── visualize.ipynb         # 可视化：水印图 / 原图 / 水印 mask / overlay
+├── models/                 # 网络结构
+│   ├── __init__.py
+│   ├── network.py
+│   └── difference_gate_network.py
+├── weights/
+│   └── watermark_mask.pt   # 权重，37 MB
 ├── requirements.txt
-└── weights/                # 权重单独部署
+└── data/                   # 数据目录（自己放，见下）
 ```
-
-模型权重请单独放在 `weights/watermark_mask.pt`，权重文件不提交到代码仓库。
 
 ## 安装
 
-建议 Python 3.10，并先安装与目标 CUDA 匹配的 PyTorch/torchvision：
-
 ```bash
-python -m pip install -r mask-model/requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-始终在项目根目录执行命令。
+先按目标 CUDA 装好 PyTorch（https://pytorch.org/get-started/locally/ ），
+实测版本：torch 2.8.0 + CUDA 12.x。
 
-## 单张图推理
+## 运行推理
 
 ```bash
-python 3-2/mask-model/infer.py \
+python infer.py \
   --source /path/to/watermarked.jpg \
   --candidate /path/to/clean_candidate.png \
-  --checkpoint /path/to/weights/watermark_mask.pt \
-  --output /path/to/output \
-  --tile 512 --overlap 64 --threshold 0.5 --device auto
+  --output out/ \
+  --threshold 0.35
 ```
 
-输出文件：
+输出两个文件：
 
 ```text
-output/*_probability.png  # 16 位概率图，像素值 / 65535 = 概率
-output/*_mask.png         # 8 位二值 Mask，水印=255，背景=0
+out/<name>_probability.png   # 16 位概率图，像素值 / 65535 = 概率
+out/<name>_mask.png          # 8 位二值 mask，水印=255，背景=0
 ```
 
-候选图尺寸可以与原图不同，脚本会缩放候选图后推理；输出保持原图分辨率。显存不足时将 `--batch-size` 调为 1。
-
-## Python 调用
+Python 调用：
 
 ```python
-import sys
-from pathlib import Path
-import torch
-from PIL import Image
-sys.path.insert(0, str(Path("3-2/mask-model").resolve()))
-from infer import predict_full_resolution
-from models import paired_model_from_checkpoint
+from infer import load_model, predict
+from PIL import Image, ImageOps
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-checkpoint = torch.load("weights/watermark_mask.pt", map_location="cpu", weights_only=False)
-model, architecture = paired_model_from_checkpoint(checkpoint)
-model = model.to(device).eval()
-with Image.open("watermarked.jpg") as source, Image.open("candidate.png") as candidate:
-    probability = predict_full_resolution(model, source, candidate, device, tile=512, overlap=64)
-mask = probability >= 0.5
+model, device, info = load_model("weights/watermark_mask.pt")
+with Image.open("watermarked.jpg") as f:
+    source = ImageOps.exif_transpose(f).convert("RGB")
+with Image.open("candidate.png") as f:
+    candidate = ImageOps.exif_transpose(f).convert("RGB")
+
+result = predict(model, source, candidate, device)
+mask = result["probability"] >= 0.35
 ```
 
-## 可视化
+参数：
 
-打开 `3-2/mask-model/visualize.ipynb`，选择 Python 内核并按顺序运行。Notebook 自动加载权重，展示：
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--threshold` | 0.35 | 概率阈值。偏召回，适合「mask 外回退到原图」的融合方式 |
+| `--checkpoint` | `weights/watermark_mask.pt` | 权重路径 |
+| `--device` | `auto` | `auto` / `cpu` / `cuda` |
+
+推理内部固定做两件事：
+
+- **门控融合**：以主 mask 头为主，只在大块分支自信处（>0.7）融合大块分支。
+- **尺度匹配**：原图比候选图大 1.5 倍以上时，把原图缩到候选尺度推理，概率图再放回
+  原图分辨率（**输出分辨率始终等于原图**）。不做这一步的话，候选图被硬放大后与
+  原图的差异主要来自模糊，实测相机卡片区检出率会从 77.8% 掉到 13.5%。
+
+## 运行可视化
+
+数据目录：在 `visualize.ipynb` 第一个代码块顶部指定，里面放两个子目录：
 
 ```text
-Watermarked source | Clean candidate | Mask probability | Overlay
+<data-dir>/
+├── source/       # 有水印原图，例如 a.jpg
+└── candidate/    # 去水印候选图，同名主干，例如 a.png
 ```
 
-默认每类测试 3 张；将 `MAX_IMAGES_PER_CATEGORY` 改为 `0` 可运行全部图片。结果保存在 `external_notebook/`。
+然后：
 
-## 模型说明
+```bash
+jupyter notebook visualize.ipynb
+```
 
-- 共享 MobileNetV3-Large 编码器，约 3.17M 参数；
-- 多尺度 source/candidate 差异与语义门控；
-- RGB 和梯度差异细节分支；
-- 训练包含候选图模糊、压缩、局部位移和水印残留增强。
-
-该模型只负责输出水印 Mask，最终修复图由后续去水印模型生成并与原图融合。阈值可在目标数据上校准：漏检多时尝试 `0.35~0.45`，误检多时尝试 `0.6~0.7`。
+四栏展示：水印图 / 原图 / 水印 mask / overlay。

@@ -1,4 +1,14 @@
+# Watermark mask detector — inference and visualization.
+#
+# Install PyTorch/torchvision first, matching the target CUDA:
+#   https://pytorch.org/get-started/locally/
+# The versions below are what this checkpoint was verified against.
+
 torch==2.8.0
 torchvision==0.23.0
 numpy==1.26.4
 Pillow==11.0.0
+
+# Only needed by visualize.ipynb (tables and plotting), not by infer.py.
+pandas>=2.0
+matplotlib>=3.7
