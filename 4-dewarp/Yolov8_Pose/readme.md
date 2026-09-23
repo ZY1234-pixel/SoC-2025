@@ -161,7 +161,7 @@ ultralytics 需要 5 处补丁，`patch_env.py` 会自检并补齐（幂等，�
 
 ## 五、初版说明（2026-05，保留）
 
-### 4.1 服务器端 (Python)
+### 5.1 服务器端 (Python)
 
 1. 确保 `best.torchscript` 与测试图片准备就绪。
 2. 修改 `inference_intranet.py` 底部 `__main__` 中的路径参数。
@@ -169,7 +169,7 @@ ultralytics 需要 5 处补丁，`patch_env.py` 会自检并补齐（幂等，�
 
 > **tips**：Windows 环境下 PyTorch C++ 底层对中文路径支持存在 Bug。本脚本已内置自动映射系统纯英文临时目录的修复逻辑。
 
-### 4.2 端侧 (C++ / NCNN)
+### 5.2 端侧 (C++ / NCNN)
 
 **环境依赖：** CMake 3.12+, NCNN, OpenCV (需包含 Imgproc 模块)
 
