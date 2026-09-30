@@ -9,13 +9,33 @@ Python 调用
 """
 
 import argparse
+import os
 from pathlib import Path
+
+# Select the accelerator before importing PyTorch. Set PIXRESTORE_DEVICE=npu on
+# an Ascend node; CUDA and CPU remain independent of torch_npu.
+_BACKEND = os.environ.get("PIXRESTORE_DEVICE", "cuda").strip().lower()
+if _BACKEND not in {"cuda", "npu", "cpu"}:
+    raise ValueError("PIXRESTORE_DEVICE must be cuda, npu, or cpu")
+if _BACKEND == "npu":
+    try:
+        import torch_npu  # noqa: F401
+        from torch_npu.contrib import transfer_to_npu  # noqa: F401
+    except ImportError as error:
+        if "libhccl.so" in str(error):
+            raise RuntimeError(
+                "Ascend CANN is not loaded. Run `pjenv compute` before starting "
+                "the Jupyter server/kernel, then set PIXRESTORE_DEVICE=npu."
+            ) from error
+        raise
+else:
+    os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
 
 import numpy as np
 import torch
 from PIL import Image
 
-from models import model_from_checkpoint
+from models import paired_model_from_checkpoint
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -89,7 +109,8 @@ def predict(model, source_image, candidate_image, device,
     """
     source_image = source_image.convert("RGB")
     candidate_image = candidate_image.convert("RGB")
-    mismatch = source_image.width / max(1, candidate_image.width)
+    mismatch = max(source_image.width / max(1, candidate_image.width),
+                   source_image.height / max(1, candidate_image.height))
     matched = mismatch >= match_scale_threshold
 
     if matched:
@@ -113,15 +134,16 @@ def predict(model, source_image, candidate_image, device,
 def load_model(checkpoint_path=DEFAULT_CHECKPOINT, device="auto"):
     """加载检测器，返回 ``(model, device, info)``。"""
     if device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if _BACKEND == "npu":
+            device = torch.device("npu:0")
+        else:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         device = torch.device(device)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    model, architecture = model_from_checkpoint(checkpoint)
+    model, architecture = paired_model_from_checkpoint(checkpoint)
     model = model.to(device).eval()
-    info = {"architecture": architecture,
-            "epoch": checkpoint.get("epoch"),
-            "best_iou": checkpoint.get("best_iou")}
+    info = {"architecture": architecture}
     return model, device, info
 
 
@@ -143,8 +165,7 @@ def main() -> None:
     args = parser.parse_args()
 
     model, device, info = load_model(args.checkpoint, args.device)
-    print(f"architecture={info['architecture']} epoch={info['epoch']} "
-          f"best_iou={info['best_iou']} device={device}", flush=True)
+    print(f"architecture={info['architecture']} device={device}", flush=True)
 
     with Image.open(args.source) as handle:
         source_image = handle.convert("RGB")
