@@ -1,32 +1,21 @@
-"""
-Official Code Implementation of:
-"D2Dewarp: Dual Dimensions Geometric Representation Learning Based Document Image Dewarping"
-"""
-
 import argparse
 import sys
 import time
 
-import cv2
 import glob
-import numpy as np
 import os
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-import torch
 import torch.nn.functional as F
 from d2dewarp.networks.d2dewarp_model import *
 
 from PIL import Image
 from vis_utils import *
-from d2dewarp.loader.dataset_doc3d_grid_HV import gradient
 from d2dewarp.predict_utils.draw_grid import *
 from d2dewarp.predict_utils.edge_util import *
 from d2dewarp.predict_utils.dewarp_core import dewarp_document
 #------------------------------------------------------------------------------#
 #   text_seg：文本 h / v 特征分割模型（UNet）
-#   text_seg/predict.py 依赖其自身目录下的 nets / utils 包，因此这里先把 text_seg
-#   加入 sys.path，之后即可直接复用它的 Unet 封装与前后处理工具函数。
 #------------------------------------------------------------------------------#
 TEXT_SEG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'text_seg')
 if TEXT_SEG_DIR not in sys.path:
@@ -37,9 +26,6 @@ from text_seg.utils.utils import cvtColor, resize_image, preprocess_input  # noq
 
 #------------------------------------------------------------------------------#
 #   internimage-l-instance：文档区域实例分割模型（InternImage-L + MaskDINO）
-#   用来在线预测文档区域"实心掩码"，替代原来从磁盘读取的固定边缘掩码。
-#   该模型输出的是实心区域（文档内部像素为 255），下游 predict 再把它处理成
-#   文档边缘掩码（边界一圈 255）后接入原有的形变矫正流程。
 #------------------------------------------------------------------------------#
 INSTANCE_SEG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'internimage-l-instance')
 if INSTANCE_SEG_DIR not in sys.path:
@@ -51,17 +37,32 @@ from internimage_l_instance.instance_seg.preprocessing import DocLetterboxDatase
 from internimage_l_instance.instance_seg import settings as seg_settings                         # noqa: E402
 
 
+#------------------------------------------------------------------------------#
+#   corner_detection：角点检测模型（YOLO pose），用于判断输入图像的种类
+#------------------------------------------------------------------------------#
+CORNER_DETECTION_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'corner_detection')
+if CORNER_DETECTION_DIR not in sys.path:
+    sys.path.insert(0, CORNER_DETECTION_DIR)
+
+from corner_detection.predict import NAMES as CORNER_NAMES                   # noqa: E402
+
+
+#------------------------------------------------------------------------------#
+#   uvdoc_model：UVDoc 矫正模型（UVDocnet）
+#------------------------------------------------------------------------------#
+UVDOC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uvdoc_model')
+if UVDOC_DIR not in sys.path:
+    sys.path.insert(0, UVDOC_DIR)
+
+import uvdoc_model.utils as _uvdoc_utils                                    # noqa: E402
+sys.modules['utils'] = _uvdoc_utils
+
+from uvdoc_model.utils import IMG_SIZE as UVDOC_IMG_SIZE, bilinear_unwarping, load_model as load_uvdoc_model  # noqa: E402
+from uvdoc_model.pred_my import preprocess_document                            # noqa: E402
+
+
+
 class TextSegHVPredictor(TextSegUnet):
-    """在 text_seg 的 Unet 之上增加“直接返回类别图”的接口。
-
-    前向流程与 text_seg/predict.py -> Unet.detect_image 完全一致：
-    转 RGB -> 不失真（letterbox）resize -> /255 -> softmax -> 裁掉灰条
-    -> resize 回原图尺寸 -> argmax。
-    区别仅在于这里不做可视化 / 落盘，而是把每个像素的类别编号返回
-    （0=background, 1=horizon_line, 2=vertical_line），
-    供 D2DewarpModel_my 直接当作 h / v 特征图使用。
-    """
-
     def predict_pr(self, image):
         """返回与原图同尺寸的类别图 (H, W)，取值 0 / 1 / 2。"""
         image       = cvtColor(image)
@@ -102,17 +103,6 @@ class TextSegHVPredictor(TextSegUnet):
 
 
 class DocRegionPredictor:
-    """用 internimage-l-instance 的 InternImage-L + MaskDINO 在线预测文档区域。
-
-    前向流程与 instance_seg/pipeline.py 的 Stage-1 完全一致：
-    转 RGB -> 不失真（letterbox）resize 到 1024 -> 送入模型 -> 取回原图分辨率的
-    逐实例掩码 -> 按置信度排序、合并为整幅文档的实心区域掩码。
-
-    返回的是「实心区域掩码」（文档内部像素为 255，背景为 0），它的内部是填满的；
-    predict 里再调用 solid_region_to_edge 把它处理成文档边缘掩码（边界一圈 255），
-    即可无缝接入原有的 homography 第一次矫正 / 掩码生成 / prune / snap 流程。
-    """
-
     def __init__(self, cuda=True):
         self.cuda = cuda
         self.score_threshold = seg_settings.DEFAULT_SCORE_THRESHOLD
@@ -170,16 +160,6 @@ class DocRegionPredictor:
 
 def solid_region_to_edge(solid_mask, thickness=2):
     """由文档区域实心掩码（内部 255）得到文档边缘掩码（边界一圈 255，其余 0）。
-
-    做法：先保留最大连通域（剔除碎裂的噪声实例），再取该实心区域的最大外轮廓，
-    重画成一条干净的闭合文档边界线。这条轮廓既能让下游 create_document_mask
-    完美回填成实心文档掩码，也能让 fit_document_quad 稳健拟合文档四边形——
-    比「实心区域减腐蚀」更稳，不会因模型边界存在缝隙、或文档几乎铺满画幅贴到
-    图像边缘而退化。
-
-    该边缘掩码与原先磁盘读取的固定边缘掩码语义一致，可直接用于 homography 第一次
-    矫正、create_document_mask、prune / snap 等下游流程。
-
     Args:
         solid_mask: uint8 (H, W)，文档区域内部为 255，背景为 0（或任意 0/255 掩码）。
         thickness: 重画的文档边界线宽度（像素），默认 2。
@@ -261,7 +241,7 @@ def get_args():
                         help='网格化第一级矫正的网格密度（每边的网格数）。把文档边界掩码'
                              '按该密度细分、逐格拟合成矩形来矫正弯曲文档，避免单应性变换'
                              '用四个角点近似而丢失弯曲区域（默认 10）')
-    parser.add_argument('--k', type=int, default=2,
+    parser.add_argument('--k', type=int, default=1,
                         help='迭代预测次数：每轮跑一遍完整预测流程（文档区域预测 -> 网格化'
                              '第一级矫正 -> 形变场网络 -> 后处理），上一轮输出的矫正图裁掉'
                              '黑边后作为下一轮输入，迭代修正以提升最终矫正效果（默认 3）')
@@ -280,6 +260,17 @@ def get_args():
     """ Model """
     parser.add_argument('--d_model', type=int, default=448, help='last layer dim in UNet and all layers in attention')
     parser.add_argument('--in_chans', type=int, default=3, help='input channels (binary mask)')
+
+    """ UVDoc 路线（single_page / 其他类别默认走此路线，参考 uvdoc_model/pred_my.py） """
+    parser.add_argument('--uvdoc_ckpt',
+                        default=('uvdoc_model/model/best_model.pkl'),
+                        help='UVDoc 模型权重路径')
+    parser.add_argument('--uvdoc_k', type=int, default=3,
+                        help='UVDoc 迭代修正次数（k=1 表示不迭代）')
+    parser.add_argument('--uvdoc_margin', type=int, default=100,
+                        help='UVDoc 迭代间在上下左右各加的黑边宽度（像素）；最后一次结果会 resize 回原尺寸')
+    parser.add_argument('--uvdoc_mask_erode', type=int, default=10,
+                        help='UVDoc 背景去除时把文档掩码向内收缩的像素距离（0 表示不收缩）')
     return parser.parse_args()
 
 
@@ -306,6 +297,32 @@ print(f'text seg model loaded from {parser.seg_model_path}')
 
 # ========== 文档区域实例分割模型：用于在线预测文档区域实心掩码 ==========
 doc_region_predictor = DocRegionPredictor(cuda=True)
+
+class CornerCategoryDetector:
+    """用 corner_detection 目录下的角点检测模型（YOLO pose）判断输入图像的种类。
+
+    仅取置信度最高的检测框类别作为图像种类，据此选择 D2Dewarp 或 UVDoc 矫正路线。
+    """
+    def __init__(self, model_path, imgsz=640, conf_thres=0.25):
+        from ultralytics import YOLO
+        self.model = YOLO(model_path)
+        self.imgsz = imgsz
+        self.conf_thres = conf_thres
+        # 类别编号 -> 类别名（按编号升序），与模型输出 cls 对齐
+        self.class_names = [v for _, v in sorted(CORNER_NAMES.items())]
+        print(f'corner detection model loaded from {model_path}')
+
+
+# ========== 角点检测模型：判断输入图像种类（单页 / 双页书 / 其他）==========
+corner_detector = CornerCategoryDetector(
+    model_path=os.path.join(CORNER_DETECTION_DIR, 'checkpoints', 'best.pt'),
+    imgsz=640,
+)
+
+# ========== UVDoc 模型：single_page / 默认类别的畸变矫正路线 ==========
+uvdoc_model = load_uvdoc_model(parser.uvdoc_ckpt).cuda()
+uvdoc_model.eval()
+print(f'UVDoc model loaded from {parser.uvdoc_ckpt}')
 
 # ========== Hook 容器 ==========
 features = {}
@@ -526,10 +543,76 @@ def _predict_core(image_rgb, save_path, base_name, it, is_last):
 
     return img_geo, fill_mask, img_h, img_w, ps_time
 
-def predict(img_path, save_path, filename):
-    """迭代预测入口：加载首轮原图，循环运行 k 轮完整预测流程。
+def detect_document_category(img_bgr, detector):
+    """用 corner_detection 的角点检测模型判断输入图像种类，返回类别名字符串。
 
-    每一轮调用 predict_one 得到矫正图；除最后一轮外，把矫正图按画布边距裁掉黑边，
+    取置信度最高的检测框类别；未检测到任何目标时返回 'unclassified'（默认走 D2Dewarp）。
+    可能的类别：double_page_book / single_page / newspaper_poster / receipt /
+    screen / unclassified / id_card。
+    """
+    results = detector.model.predict(
+        source=img_bgr, imgsz=detector.imgsz, conf=detector.conf_thres, verbose=False)
+    result = results[0]
+    if result.boxes is None or len(result.boxes) == 0:
+        print('[corner] 未检测到任何目标 -> 默认走 D2Dewarp 矫正')
+        return 'unclassified'
+    clses = result.boxes.cls.cpu().numpy().astype(int)
+    confs = result.boxes.conf.cpu().numpy()
+    best = int(np.argmax(confs))
+    label = detector.class_names[clses[best]]
+    print('[corner] 检测到类别: %s (conf=%.2f)' % (label, confs[best]))
+    return label
+
+
+def predict_uvdoc_one(img_bgr, save_path, base_name):
+    """UVDoc 单图畸变矫正（参考 uvdoc_model/pred_my.py 的 infer_uvdoc）。
+
+    流程：文档区域分割 -> 背景去除 -> 单应性摆正（正面视角）-> UVDoc 形变场
+    预测与反变形（可迭代修正），最终结果 resize 回原输入尺寸后保存。
+    """
+    dewarp_path = os.path.join(save_path, 'perspective/')
+    os.makedirs(dewarp_path, exist_ok=True)
+
+    # 1) 文档区域分割 -> 背景去除 -> 单应性摆正（去除透视/旋转）
+    rectified_bgr = preprocess_document(
+        img_bgr, doc_region_predictor,
+        debug_path=os.path.join(save_path, 'debug_uvdoc'),
+        base_name=base_name, mask_erode=parser.uvdoc_mask_erode)
+    rectified_rgb = cv2.cvtColor(rectified_bgr, cv2.COLOR_BGR2RGB)
+    H, W = rectified_bgr.shape[0], rectified_bgr.shape[1]
+
+    cur_img = torch.unsqueeze(
+        torch.from_numpy(rectified_rgb.transpose(2, 0, 1) / 255.0).float(), dim=0).cuda()
+
+    uv_k = max(1, int(parser.uvdoc_k))
+    margin = max(0, int(parser.uvdoc_margin))
+    start = time.time()
+    last_unwarped, last_G = None, None
+    for i in range(1, uv_k + 1):
+        cur_size = (cur_img.shape[3], cur_img.shape[2])
+        model_input = F.interpolate(
+            cur_img, size=(UVDOC_IMG_SIZE[1], UVDOC_IMG_SIZE[0]), mode='bilinear', align_corners=True)
+        with torch.no_grad():
+            point_positions2D, _ = uvdoc_model(model_input)
+        G = torch.unsqueeze(point_positions2D[0], dim=0)
+        unwarped = bilinear_unwarping(cur_img, G, tuple(cur_size))
+        last_unwarped, last_G = unwarped, G
+        if i < uv_k:
+            # 中间迭代：在上下左右各加 margin 宽度的黑边，作为下一次迭代的输入
+            cur_img = F.pad(unwarped, (margin, margin, margin, margin), mode='constant', value=0.0)
+    # 最后一次迭代结果直接 resize 回原始输入尺寸后保存（保证与原图同尺寸）
+    unwarped_resized = F.interpolate(last_unwarped, size=(H, W), mode='bilinear', align_corners=True)
+    unwarped_np = (unwarped_resized[0].detach().cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+    unwarped_bgr = cv2.cvtColor(unwarped_np, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(os.path.join(dewarp_path, base_name + '.png'), unwarped_bgr)
+    return time.time() - start
+
+
+def predict_d2d(img_path, save_path, filename):
+    """D2Dewarp 原有矫正路线（双页书 double_page_book 走此路线）。
+
+    迭代预测入口：加载首轮原图，循环运行 k 轮完整预测流程。
+    每一轮调用 _predict_core 得到矫正图；除最后一轮外，把矫正图按画布边距裁掉黑边，
     作为下一轮的输入（避免逐轮把画布边距滚雪球式放大）。最后一轮的矫正图即最终输出。
     """
     assert os.path.exists(img_path), 'Incorrect Image Path'
@@ -585,21 +668,51 @@ def predict(img_path, save_path, filename):
     return total_ps
 
 
+def predict(img_path, save_path, filename):
+    """总入口：先用角点检测模型判断图像种类，再分派到对应矫正路线。
+
+    - single_page -> UVDoc 路线（predict_uvdoc_one）
+    - 其他（含 double_page_book / newspaper_poster / receipt / screen /
+      unclassified / id_card）-> D2Dewarp 原有路线（predict_d2d）
+    """
+    assert os.path.exists(img_path), 'Incorrect Image Path'
+    os.makedirs(save_path, exist_ok=True)
+    dewarp_path = os.path.join(save_path, 'perspective/')
+    os.makedirs(dewarp_path, exist_ok=True)
+
+    init_img_bgr = cv2.imread(img_path)
+    assert init_img_bgr is not None, 'Cannot read image: %s' % img_path
+
+    # ---- 先判断图像种类 ----
+    category = detect_document_category(init_img_bgr, corner_detector)
+    base_name = filename.rsplit('/', 1)[-1].split('.')[0]
+
+    if category == 'single_page':
+        print('[route] %s -> UVDoc pipeline' % category)
+        return predict_uvdoc_one(init_img_bgr, save_path, base_name)
+
+    else:
+        print('[route] %s -> D2Dewarp original pipeline' % category)
+        return predict_d2d(img_path, save_path, filename)
+
+
 
 if __name__ == '__main__':
     img_path = parser.img_path
     save_path = parser.save_path
     total_time = 0.0
-
-    start = time.time()
     img_num = 0.0
 
     for file in glob.glob(img_path + "/*"):
         print("file: ", file)
         filename = (save_path + "/" + file[file.rindex("/") + 1:file.rindex(".")] + ".png")
 
-        total_time += predict(file, save_path, filename)
+        start = time.time()
+        predict(file, save_path, filename)
+        elapsed = time.time() - start
+        total_time += elapsed
+        print("single image time: %.4f s" % elapsed)
         print("total_time: ", total_time)
         img_num += 1
-    print('FPS: %.1f' % (1.0 / (total_time / img_num)))
+    print('FPS: %.1f' % (img_num / total_time))
 
