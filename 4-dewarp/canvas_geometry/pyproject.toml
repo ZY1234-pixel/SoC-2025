@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dewarp-geometry"
+version = "0.1.0"
+description = "Free-form document aspect-ratio estimation from a predicted 3D grid"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.23"]
+
+[project.optional-dependencies]
+demo = ["opencv-python>=4.7", "torch>=2.0", "torchvision>=0.15"]
+
+[tool.setuptools.packages.find]
+include = ["dewarp_geometry*"]
