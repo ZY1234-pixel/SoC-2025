@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 import math
+import json
+import re
+from functools import lru_cache
+from pathlib import Path
+from statistics import median
 
 from docflow.model.stages import Rect, TextParagraphLayout
+
+
+_TOKEN_RE = re.compile(r"\s+|[A-Za-z0-9]+(?:[._:/%+#-][A-Za-z0-9]+)*|[\u2e80-\u9fff]|.")
+_FONT_METRICS_PATH = Path(__file__).with_name("font_metrics.json")
 
 
 def estimate_text_units(text: str) -> float:
@@ -16,9 +25,12 @@ def fit_font_size_to_lines(
     lines: tuple[str, ...],
     widths_pt: tuple[float, ...],
     occupancy: float,
+    font_family: str | None = None,
+    western_font_family: str | None = None,
+    bold: bool = False,
 ) -> float:
     limits = [
-        width * occupancy / max(estimate_text_units(line), 1.0)
+        width * occupancy / max(_font_width_per_point(line, font_family, western_font_family, bold), 0.1)
         for line, width in zip(lines, widths_pt)
         if line
     ]
@@ -32,11 +44,25 @@ def estimate_wrapped_lines(
     source_line_count: int = 0,
     source_width_pt: float = 0.0,
     fit_scale: float = 1.0,
+    font_family: str | None = None,
+    western_font_family: str | None = None,
+    bold: bool = False,
 ) -> int:
-    content_lines = max(1, math.ceil(estimate_text_units(text) * font_size_pt / max(width_pt, 1.0)))
+    measured_lines = _wrapped_line_count(
+        text,
+        font_size_pt,
+        width_pt,
+        font_family,
+        western_font_family,
+        bold,
+    )
+    content_lines = max(1, measured_lines)
     if not source_line_count or not source_width_pt:
         return content_lines
-    observed_lines = max(1, round(source_line_count * source_width_pt / max(width_pt, 1.0) * fit_scale))
+    observed_lines = max(
+        1,
+        round(source_line_count * min(source_width_pt * fit_scale / max(width_pt, 1.0), 1.0)),
+    )
     return max(content_lines, observed_lines)
 
 
@@ -52,6 +78,144 @@ def infer_occupancy_line_height(
     )
 
 
+def fit_text_width(
+    text: str,
+    font_size_pt: float,
+    target_width_pt: float,
+    font_family: str | None = None,
+    western_font_family: str | None = None,
+    bold: bool = False,
+) -> tuple[int, float]:
+    """Fit a single line without changing its font size."""
+    natural_width = measure_text_width_pt(
+        text,
+        font_size_pt,
+        font_family,
+        western_font_family,
+        bold,
+    )
+    if natural_width <= 0 or target_width_pt <= 0:
+        return 100, 0.0
+    ratio = target_width_pt / natural_width
+    if not 0.90 <= ratio <= 1.10:
+        return 100, 0.0
+    scale_pct = max(90, min(110, round(ratio * 100)))
+    scaled_width = natural_width * scale_pct / 100.0
+    spacing_pt = (target_width_pt - scaled_width) / max(len(text), 1)
+    return scale_pct, max(-2.0, min(2.0, spacing_pt))
+
+
+def measure_text_width_pt(
+    text: str,
+    font_size_pt: float,
+    font_family: str | None = None,
+    western_font_family: str | None = None,
+    bold: bool = False,
+) -> float:
+    """Measure text width from the committed fixed font metrics."""
+    value = str(text or "")
+    if not value:
+        return 0.0
+    return sum(_character_width_em(character, font_family, western_font_family) for character in value) * float(
+        font_size_pt
+    )
+
+
+def _font_width_per_point(
+    text: str,
+    font_family: str | None,
+    western_font_family: str | None,
+    bold: bool,
+) -> float:
+    return measure_text_width_pt(text, 1.0, font_family, western_font_family, bold)
+
+
+def _wrapped_line_count(
+    text: str,
+    font_size_pt: float,
+    width_pt: float,
+    font_family: str | None,
+    western_font_family: str | None,
+    bold: bool,
+) -> int:
+    width = max(float(width_pt), 1.0)
+    count = 0
+    for paragraph in str(text or "").split("\n"):
+        if not paragraph:
+            count += 1
+            continue
+        line_width = 0.0
+        lines = 1
+        for token in _TOKEN_RE.findall(paragraph):
+            token_width = measure_text_width_pt(
+                token,
+                font_size_pt,
+                font_family,
+                western_font_family,
+                bold,
+            )
+            if token.isspace():
+                if line_width > 0:
+                    line_width += token_width
+                continue
+            if line_width > 0 and line_width + token_width > width:
+                lines += 1
+                line_width = 0.0
+            if token_width <= width:
+                line_width += token_width
+                continue
+            for character in token:
+                character_width = measure_text_width_pt(
+                    character,
+                    font_size_pt,
+                    font_family,
+                    western_font_family,
+                    bold,
+                )
+                if line_width > 0 and line_width + character_width > width:
+                    lines += 1
+                    line_width = 0.0
+                line_width += character_width
+        count += lines
+    return max(count, 1)
+
+
+@lru_cache(maxsize=1)
+def _font_metrics_data() -> dict:
+    return json.loads(_FONT_METRICS_PATH.read_text(encoding="utf-8"))
+
+
+def _character_width_em(
+    character: str,
+    font_family: str | None,
+    western_font_family: str | None,
+) -> float:
+    metrics = _font_metrics_data()
+    aliases = metrics.get("aliases") or {}
+    cjk = _is_cjk(character)
+    requested = font_family if cjk else (western_font_family or "Times New Roman")
+    name = aliases.get(str(requested or ""), str(requested or ""))
+    if name not in metrics.get("fonts", {}):
+        name = "宋体" if cjk else "Times New Roman"
+    font = metrics["fonts"][name]
+    return float(
+        (font.get("codepoint_widths") or {}).get(
+            str(ord(character)),
+            font.get("default_em", 1.0),
+        )
+    )
+
+
+def _is_cjk(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        0x2E80 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0xFE30 <= codepoint <= 0xFE4F
+        or 0xFF00 <= codepoint <= 0xFFEF
+    )
+
+
 def resolve_text_layout(element, role, container_width_pt: float, fit_scale: float) -> tuple[TextParagraphLayout, ...]:
     """Resolve all editable text geometry once, before DOCX emission."""
     if role is None or not element.text:
@@ -60,6 +224,19 @@ def resolve_text_layout(element, role, container_width_pt: float, fit_scale: flo
     source_lines = tuple(row.text for row in element.text_rows) or tuple(
         str(line) for line in payload.get("lines") or ()
     )
+    source_bbox = element.content_bbox or Rect.from_sequence(payload.get("source_bbox") or (0, 0, 1, 1))
+    source_scale = float(payload.get("source_scale", 1.0))
+    source_line_widths = tuple(
+        max(float(row.bbox.width) * source_scale, 1.0)
+        for row in element.text_rows
+    )
+    measure_lines = source_lines or (element.text,)
+    measure_widths = (
+        source_line_widths
+        if len(source_line_widths) == len(measure_lines)
+        else (container_width_pt,) * len(measure_lines)
+    )
+    base_font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
     split_rows = (
         tuple(tuple(span.text for span in row.spans) for row in element.text_rows)
         if element.text_structure.tabular_rows
@@ -86,6 +263,34 @@ def resolve_text_layout(element, role, container_width_pt: float, fit_scale: flo
             False,
         )]
 
+    line_specific_layout = bool(split_rows or row_alignments)
+    heading_fit_lines = element.kind == "heading"
+    base_font_size_before_fit = base_font_size
+    allow_line_fit = (
+        element.kind in {"paragraph_group", "heading"}
+        and element.text_structure.orientation != "vertical"
+        and (element.text_structure.preserve_source_lines or line_specific_layout or heading_fit_lines)
+    )
+    if (
+        not split_rows
+        and element.text_structure.orientation != "vertical"
+        and (element.text_structure.preserve_source_lines or line_specific_layout or heading_fit_lines)
+        and not (
+            element.kind == "paragraph_group"
+            and line_specific_layout
+            and not element.text_structure.preserve_source_lines
+        )
+    ):
+        base_font_size = fit_font_size_to_lines(
+            base_font_size,
+            tuple(measure_lines),
+            tuple(measure_widths),
+            0.98,
+            font_family=role.font_family,
+            western_font_family=role.western_font_family,
+            bold=role.bold,
+        )
+
     layouts = []
     for index, (text, alignment, lines, preserve_lines, tabular, reset_indents) in enumerate(specs):
         left_indent = 0.0 if reset_indents else float(payload.get("left_indent_pt", 0.0))
@@ -96,32 +301,33 @@ def resolve_text_layout(element, role, container_width_pt: float, fit_scale: flo
             visual_width = container_width_pt * width_fraction
             right_indent = max(container_width_pt - left_indent - visual_width, 0.0)
         available_width = max(container_width_pt - left_indent - right_indent, 1.0)
-        font_size = max(round(role.font_size_pt * fit_scale * 2) / 2.0, 0.5)
-        font_width_scale = 100
-        fit_source_width = element.kind == "heading" or preserve_lines
-        if element.kind == "heading" and lines and not tabular:
-            line_widths = (max(available_width - first_indent, 1.0),) + (available_width,) * (len(lines) - 1)
-            font_size = fit_font_size_to_lines(font_size, lines, line_widths, 0.98)
-        elif len(lines) > 1 and not tabular and fit_source_width:
-            line_widths = (max(available_width - first_indent, 1.0),) + (available_width,) * (len(lines) - 1)
-            fitted_size = fit_font_size_to_lines(
+        font_size = base_font_size
+        if len(source_line_widths) == len(source_lines):
+            if len(lines) == 1 and index < len(source_line_widths):
+                target_widths = (source_line_widths[index],)
+            elif len(lines) == len(source_line_widths):
+                target_widths = source_line_widths
+            else:
+                target_widths = (median(source_line_widths),) * len(lines)
+        else:
+            target_widths = (available_width,) * len(lines)
+        layout_target_width = (
+            max(median(target_widths), 1.0)
+            if target_widths
+            else available_width
+        )
+        font_width_scale, character_spacing = (
+            fit_text_width(
+                text,
                 font_size,
-                lines,
-                line_widths,
-                0.90 if element.kind == "heading" or preserve_lines else 0.99,
+                layout_target_width,
+                font_family=role.font_family,
+                western_font_family=role.western_font_family,
+                bold=role.bold,
             )
-            font_width_scale = max(round(fitted_size / font_size * 100), 50)
-            if font_width_scale == 50 and fitted_size < font_size * 0.50:
-                font_size = fitted_size * 2.0
-        elif (
-            len(lines) == 1
-            and element.text_structure.orientation != "vertical"
-            and not tabular
-        ):
-            fitted_size = min(font_size, container_width_pt * width_fraction * 0.90 / max(estimate_text_units(text), 1.0))
-            font_width_scale = max(round(fitted_size / font_size * 100), 50)
-            if font_width_scale == 50 and fitted_size < font_size * 0.50:
-                font_size = fitted_size * 2.0
+            if allow_line_fit and font_size >= role.font_size_pt * 0.90
+            else (100, 0.0)
+        )
 
         source_line_count = len(lines) if preserve_lines else int(payload.get("visual_line_count") or len(lines) or 1)
         content_bbox = element.content_bbox or Rect.from_sequence(payload.get("source_bbox") or (0, 0, 1, 1))
@@ -138,30 +344,21 @@ def resolve_text_layout(element, role, container_width_pt: float, fit_scale: flo
                 source_line_count,
                 source_width,
                 fit_scale,
+                font_family=role.font_family,
+                western_font_family=role.western_font_family,
+                bold=role.bold,
             )
         )
-        measured_line_height = float(payload.get("line_height_pt") or font_size * role.line_spacing)
-        line_height = max(measured_line_height * fit_scale, font_size * 1.05)
-        occupancy_fitted = (
-            element.kind == "paragraph_group"
-            and not preserve_lines
-            and not tabular
-            and element.text_structure.orientation == "horizontal"
-            and bool(payload.get("line_height_pt"))
-        )
-        if occupancy_fitted:
-            line_height = infer_occupancy_line_height(
-                font_size,
-                line_height,
-                content_bbox.height * float(payload.get("source_scale", 1.0)) * fit_scale,
-                max(rendered_lines, source_line_count),
-            )
-            rendered_lines = max(rendered_lines, source_line_count)
+        font_fit_ratio = base_font_size / max(base_font_size_before_fit, 0.5)
+        measured_line_height = float(payload.get("line_height_pt") or font_size * role.line_spacing) * font_fit_ratio
+        minimum_line_height = font_size * 1.05
+        line_height = max(measured_line_height * fit_scale, minimum_line_height)
         cjk_count = sum(1 for char in text if ord(char) >= 0x2E80)
-        reserve = 0.0 if occupancy_fitted else min(font_size * 0.15, 2.0)
+        reserve = min(font_size * 0.15, 2.0)
         if not payload.get("line_height_pt"):
             line_height = font_size * role.line_spacing * 1.05
             reserve = font_size if cjk_count else font_size / 4.0
+        space_before = float(payload.get("space_before_pt", 0.0)) * fit_scale if index == 0 else 0.0
         layouts.append(
             TextParagraphLayout(
                 text=text,
@@ -169,13 +366,14 @@ def resolve_text_layout(element, role, container_width_pt: float, fit_scale: flo
                 font_size_pt=font_size,
                 line_height_pt=line_height,
                 rendered_line_count=rendered_lines,
-                space_before_pt=(float(payload.get("space_before_pt", 0.0)) * fit_scale if index == 0 else 0.0),
+                space_before_pt=space_before,
                 first_line_indent_pt=first_indent,
                 left_indent_pt=left_indent,
                 right_indent_pt=right_indent,
                 right_tab_stop_pt=(max(container_width_pt - right_indent, 1.0) if tabular else None),
                 layout_reserve_pt=reserve,
                 font_width_scale_pct=font_width_scale,
+                character_spacing_pt=character_spacing,
             )
         )
     return tuple(layouts)

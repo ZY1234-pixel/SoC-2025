@@ -5,9 +5,11 @@ import io
 
 import pytest
 from docx import Document
-from docx.enum.table import WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
+from docflow.renderer.docx_utils.omml import append_latex_omml
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml.ns import qn
+from docx.shared import RGBColor
 from PIL import Image
 from bs4 import BeautifulSoup
 
@@ -34,7 +36,7 @@ from docflow.planning.text_metrics import (
     infer_occupancy_line_height,
 )
 from docflow.renderer.reflow_docx_renderer import ReflowDocxRenderer
-from docflow.renderer.docx_utils.html_table import get_table_column_weights
+from docflow.renderer.docx_utils.html_table import get_table_cell_placements, get_table_column_weights
 
 
 def _png_base64() -> str:
@@ -76,12 +78,206 @@ def test_document_without_furniture_has_no_empty_header_footer_parts() -> None:
     assert margins.get(qn("w:footer")) == "0"
 
 
+def test_text_footer_prefers_text_over_table_crop_image() -> None:
+    document = Document()
+    footer = document.sections[0].footer
+    element = PlannedElement(
+        "footer",
+        "footer",
+        "body",
+        text="30 通信·天涯咫尺",
+        payload={"image_base64": _png_base64(), "source_bbox": (0, 1700, 1000, 1800)},
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._render_furniture(footer, ("footer",), {"footer": element}, {"body": role}, 1.0, 500)
+
+    paragraph = footer.paragraphs[-1]
+    assert paragraph.text == "30 通信·天涯咫尺"
+    assert not paragraph._p.xpath(".//w:drawing")
+
+
+def test_mixed_header_renders_both_its_image_and_text_items() -> None:
+    document = Document()
+    header = document.sections[0].header
+    image = PlannedElement(
+        "header_image",
+        "header",
+        "body",
+        payload={"image_base64": _png_base64(), "source_bbox": (20, 10, 120, 50)},
+    )
+    text = PlannedElement(
+        "header_text",
+        "header",
+        "body",
+        text="教材全解",
+        payload={"source_bbox": (150, 15, 500, 45)},
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._render_furniture(
+        header,
+        ("header_image", "header_text"),
+        {"header_image": image, "header_text": text},
+        {"body": role},
+        1.0,
+        500,
+    )
+
+    rendered_text = "\n".join(paragraph.text for paragraph in header.paragraphs)
+    rendered_text += "\n" + "\n".join(
+        cell.text for table in header.tables for row in table.rows for cell in row.cells
+    )
+    assert "教材全解" in rendered_text
+    assert header._element.xpath(".//w:drawing")
+
+
+def test_heading_icon_pair_uses_one_borderless_table_row() -> None:
+    document = Document()
+    figure = PlannedElement(
+        "icon",
+        "figure_group",
+        "body",
+        payload={
+            "image_base64": _png_base64(),
+            "source_bbox": (100, 100, 140, 140),
+            "target_width_pt": 20,
+            "target_height_pt": 20,
+        },
+    )
+    heading = PlannedElement(
+        "heading",
+        "heading",
+        "heading",
+        text="小标题",
+        payload={
+            "source_bbox": (150, 100, 260, 140),
+            "background_color": "#EC5383",
+        },
+    )
+    flow = FlowSection(
+        "pair",
+        FlowKind.GRID,
+        ("icon", "heading"),
+        column_widths_pt=(20, 50),
+        gutter_pt=5,
+        grid_cells=(
+            GridCell(0, 0, ("icon",)),
+            GridCell(0, 1, ("heading",)),
+        ),
+    )
+    role = TypographicRole("heading", "宋体", "Times New Roman", 12, 1.0)
+
+    rendered = ReflowDocxRenderer()._render_heading_icon_table(
+        document,
+        flow,
+        {"icon": figure, "heading": heading},
+        {"heading": role},
+        1.0,
+    )
+
+    assert rendered
+    table = document.tables[0]
+    assert len(table.rows) == 1
+    assert len(table.rows[0].cells) == 4
+    figure_cell, heading_cell = table.rows[0].cells[1:3]
+    assert figure_cell._tc.xpath(".//w:drawing")
+    assert heading_cell.text.strip("\u00a0\u2003").endswith("小标题")
+    assert any(
+        run._element.rPr is not None and run._element.rPr.find(qn("w:shd")) is not None
+        for run in heading_cell.paragraphs[0].runs
+    )
+    assert not table._tbl.xpath(".//w:tblBorders/w:top[@w:val!='none']")
+
+
+def test_docx_renders_inline_formula_as_native_omml() -> None:
+    paragraph = Document().add_paragraph()
+    element = PlannedElement(
+        "body",
+        "paragraph_group",
+        "body",
+        "Before {{DOCFLOW_FORMULA_0}} after",
+        payload={"inline_formulas": ({"latex": "x^2"},)},
+    )
+    layout = TextParagraphLayout(
+        text=element.text,
+        alignment="left",
+        font_size_pt=10.5,
+        line_height_pt=12.0,
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_resolved_text(paragraph, element, role, layout)
+
+    assert paragraph._p.xpath(".//m:oMath")
+    assert not paragraph._p.xpath(".//w:drawing")
+    assert "Before " in paragraph.text
+    assert " after" in paragraph.text
+
+
+def test_docx_writes_character_spacing_from_resolved_layout() -> None:
+    paragraph = Document().add_paragraph()
+    layout = TextParagraphLayout(
+        text="spaced",
+        alignment="left",
+        font_size_pt=10.0,
+        line_height_pt=12.0,
+        font_width_scale_pct=104,
+        character_spacing_pt=0.5,
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.0, 1.0)
+
+    ReflowDocxRenderer._write_text_run(paragraph, "spaced", role, layout)
+
+    run = paragraph.runs[0]
+    assert run._element.rPr.find(qn("w:w")).get(qn("w:val")) == "104"
+    assert run._element.rPr.find(qn("w:spacing")).get(qn("w:val")) == "10"
+
+
+def test_omml_radical_and_box_structure_are_libreoffice_compatible() -> None:
+    document = Document()
+    paragraph = document.add_paragraph()
+
+    assert append_latex_omml(paragraph, r"\sqrt{x}")
+
+    assert not paragraph._p.xpath(".//m:box")
+    radical = paragraph._p.xpath(".//m:rad")[0]
+    assert radical.xpath("./m:radPr/m:degHide[@m:val='1']", namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"})
+    assert radical.xpath("./m:deg", namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"})
+
+
+def test_first_formula_in_cell_has_invisible_text_anchor_for_libreoffice() -> None:
+    paragraph = Document().add_paragraph()
+
+    assert append_latex_omml(paragraph, "x^2")
+
+    assert paragraph.runs[0].text == "\u200b"
+
+
 def test_table_column_weights_follow_cell_content() -> None:
     table = BeautifulSoup("<table><tr><td>近12个月最高/最低（元）</td><td>15.06/9.98</td></tr></table>", "html.parser").table
 
     left, right = get_table_column_weights(table)
 
     assert left > right * 2
+
+
+def test_overlapping_html_spans_are_clamped_to_rectangles() -> None:
+    table = BeautifulSoup(
+        """
+        <table>
+          <tr><td rowspan="2" colspan="2">A</td><td>B</td></tr>
+          <tr><td>C</td></tr>
+        </table>
+        """,
+        "html.parser",
+    ).table
+
+    placements = get_table_cell_placements(table)
+
+    assert placements[0][:4] == (0, 0, 2, 2)
+    assert placements[1][:4] == (0, 2, 1, 1)
+    assert placements[2][:4] == (1, 2, 1, 1)
 
 
 def test_table_column_weights_prefer_source_geometry() -> None:
@@ -97,6 +293,10 @@ def test_text_width_units_match_latin_and_cjk_font_metrics() -> None:
 
 def test_source_line_font_limit_rounds_down_to_word_half_points() -> None:
     assert fit_font_size_to_lines(10.0, ("中文" * 10,), (194.0,), 0.99) == 9.5
+
+
+def test_narrow_target_does_not_multiply_source_line_hint() -> None:
+    assert estimate_wrapped_lines("short", 10, 80, 4, 400, 1.0) == 4
 
 
 def test_text_occupancy_uses_rendered_lines_to_fill_tight_content_height() -> None:
@@ -252,20 +452,37 @@ def test_single_line_heading_fits_with_uniform_font_scaling() -> None:
 
     assert run.font.size.pt <= round(role.font_size_pt * plan.pages[0].fit_scale * 2) / 2
     assert run._element.rPr.find(qn("w:w")) is None
-    assert paragraph._p.pPr.find(qn("w:shd")) is not None
+    assert paragraph._p.pPr.find(qn("w:shd")) is None
+    assert run._element.rPr.find(qn("w:shd")) is not None
 
 
 def test_sparse_grid_keeps_valid_empty_cells() -> None:
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
-    elements = (
-        SemanticElement("top-left", "paragraph_group", Rect(0, 0, 400, 200), 1, ("a",), "A", "body"),
-        SemanticElement("bottom-right", "paragraph_group", Rect(600, 300, 1000, 500), 2, ("b",), "B", "body"),
-        SemanticElement("top-right", "paragraph_group", Rect(600, 0, 1000, 200), 3, ("c",), "C", "body"),
-        SemanticElement("bottom-left", "paragraph_group", Rect(0, 600, 400, 800), 4, ("d",), "D", "body"),
+    elements = {
+        identifier: PlannedElement(identifier, "paragraph_group", "body", text=text)
+        for identifier, text in (
+            ("top-left", "A"),
+            ("bottom-right", "B"),
+            ("top-right", "C"),
+            ("bottom-left", "D"),
+        )
+    }
+    flow = FlowSection(
+        "grid",
+        FlowKind.GRID,
+        tuple(elements),
+        (200, 200),
+        grid_cells=(
+            GridCell(0, 0, ("top-left",)),
+            GridCell(0, 1, ("top-right",)),
+            GridCell(1, 0, ("bottom-left",)),
+            GridCell(1, 1, ("bottom-right",)),
+        ),
+        row_heights_pt=(40, 40),
     )
-    plan = ReflowPlanner().plan(DocumentAnalysis((AnalysisPage(0, 1000, 1400, elements),), (role,)))
 
-    document = ReflowDocxRenderer().build(plan)
+    document = Document()
+    ReflowDocxRenderer()._render_grid(document, flow, elements, {"body": role}, 1.0)
     grid = document.tables[0]
 
     assert all(cell.paragraphs or cell.tables for row in grid.rows for cell in row.cells)
@@ -304,8 +521,9 @@ def test_grid_renderer_hides_cell_marks_without_splitting_row_spans() -> None:
     cell_properties = container.tables[0]._tbl.xpath(".//w:tcPr")
     assert cell_properties
     assert all(properties.find(qn("w:hideMark")) is not None for properties in cell_properties)
-    assert all(row.height is None for row in container.tables[0].rows)
-    assert container.tables[0].cell(0, 2).paragraphs[0].runs[0].font.size.pt == 8.5
+    assert [row.height.pt for row in container.tables[0].rows] == pytest.approx([30, 40])
+    assert all(row.height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST for row in container.tables[0].rows)
+    assert container.tables[0].cell(0, 2).paragraphs[0].runs[0].font.size.pt == 10.5
     assert container.tables[0].cell(1, 0)._tc.xpath("./w:tcPr/w:tcMar/w:end/@w:w") == ["100"]
 
 
@@ -383,11 +601,12 @@ def test_mixed_figure_text_cell_uses_normal_merged_flow() -> None:
     table = container.tables[0]
     assert table._tbl.xpath(".//w:vMerge")
     assert not table._tbl.xpath(".//wp:anchor")
-    assert all(row.height is None for row in table.rows)
+    assert [row.height.pt for row in table.rows] == pytest.approx([40, 40])
+    assert all(row.height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST for row in table.rows)
     assert "continued text" in table.cell(0, 0).text
 
 
-def test_header_with_image_payload_renders_as_image() -> None:
+def test_header_with_text_payload_prefers_editable_text_over_image() -> None:
     document = Document()
     header = document.sections[0].header
     element = PlannedElement(
@@ -399,20 +618,18 @@ def test_header_with_image_payload_renders_as_image() -> None:
             "image_base64": _png_base64(),
             "source_bbox": (100, 20, 300, 80),
             "source_scale": 0.5,
+            "text_color": "#90293A",
         },
     )
 
     ReflowDocxRenderer()._render_furniture(header, ("logo",), {"logo": element}, {}, 1.0, 500)
 
-    assert header._element.xpath(".//w:drawing")
-    assert header._element.xpath('.//wp:anchor/wp:positionH[@relativeFrom="page"]')
-    assert header._element.xpath('.//wp:anchor/wp:positionV[@relativeFrom="page"]')
-    assert header._element.xpath("string(.//wp:positionH/wp:posOffset)") == str(50 * 12700)
-    assert header._element.xpath("string(.//wp:positionV/wp:posOffset)") == str(10 * 12700)
-    assert "OCR fallback" not in "\n".join(paragraph.text for paragraph in header.paragraphs)
+    assert not header._element.xpath(".//w:drawing")
+    assert "OCR fallback" in "\n".join(paragraph.text for paragraph in header.paragraphs)
+    assert header.paragraphs[0].runs[0].font.color.rgb == RGBColor.from_string("90293A")
 
 
-def test_multiple_header_images_preserve_independent_page_positions() -> None:
+def test_multiple_header_images_render_inline_instead_of_page_anchors() -> None:
     document = Document()
     header = document.sections[0].header
     elements = {
@@ -432,15 +649,143 @@ def test_multiple_header_images_preserve_independent_page_positions() -> None:
     ReflowDocxRenderer()._render_furniture(header, tuple(elements), elements, {}, 1.0, 500)
 
     anchors = header._element.xpath(".//wp:anchor")
-    assert len(anchors) == 2
-    assert [anchor.xpath("string(./wp:positionH/wp:posOffset)") for anchor in anchors] == [
-        str(10 * 12700),
-        str(100 * 12700),
-    ]
-    assert [anchor.xpath("string(./wp:positionV/wp:posOffset)") for anchor in anchors] == [
-        str(15 * 12700),
-        str(50 * 12700),
-    ]
+    assert not anchors
+    assert len(header._element.xpath(".//w:drawing")) == 2
+    assert all(paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER for paragraph in header.paragraphs if paragraph._p.xpath(".//w:drawing"))
+
+
+def test_multiple_header_texts_prefer_editable_text_over_images() -> None:
+    document = Document()
+    header = document.sections[0].header
+    elements = {
+        "agency": PlannedElement(
+            "agency",
+            "header",
+            "body",
+            text="广东省自然资源厅",
+            payload={"image_base64": _png_base64(), "source_bbox": (10, 10, 300, 40), "source_scale": 0.5},
+        ),
+        "document_number": PlannedElement(
+            "document_number",
+            "header",
+            "body",
+            text="粤自然资规字〔2025〕5号",
+            payload={"image_base64": _png_base64(), "source_bbox": (100, 50, 220, 70), "source_scale": 0.5},
+        ),
+    }
+
+    ReflowDocxRenderer()._render_furniture(header, tuple(elements), elements, {}, 1.0, 500)
+
+    assert not header._element.xpath(".//w:drawing")
+    header_text = "\n".join(
+        [paragraph.text for paragraph in header.paragraphs]
+        + [cell.text for table in header.tables for row in table.rows for cell in row.cells]
+    )
+    assert "广东省自然资源厅" in header_text
+    assert "粤自然资规字〔2025〕5号" in header_text
+
+
+def test_header_span_size_uses_per_character_extent() -> None:
+    cell = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement("header", "header", "body", payload={"source_scale": 1.0})
+    span = TextSpan("文件", Rect(0, 0, 40, 80))
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_header_span(cell, element, span, role, 1.0)
+
+    assert cell.paragraphs[0].runs[0].font.size.pt == pytest.approx(18.0)
+
+
+def test_centered_text_layout_clears_source_indents() -> None:
+    paragraph = Document().add_paragraph()
+    element = PlannedElement("title", "heading", "body")
+    role = TypographicRole("heading", "黑体", "Times New Roman", 20.0, 1.0)
+    layout = TextParagraphLayout(
+        text="title",
+        alignment="center",
+        font_size_pt=20.0,
+        line_height_pt=24.0,
+        first_line_indent_pt=30.0,
+        left_indent_pt=40.0,
+    )
+
+    ReflowDocxRenderer()._write_resolved_text(paragraph, element, role, layout)
+
+    assert paragraph.paragraph_format.first_line_indent.pt == pytest.approx(0.0)
+    assert paragraph.paragraph_format.left_indent.pt == pytest.approx(0.0)
+
+
+def test_footer_spans_are_split_across_source_columns() -> None:
+    document = Document()
+    footer = document.sections[0].footer
+    footer_element = PlannedElement(
+        "footer",
+        "footer",
+        "body",
+        text="left center right",
+        payload={"source_bbox": (0, 0, 1000, 20), "source_scale": 0.5, "page_width_px": 1000},
+        text_rows=(
+            TextRow(
+                "left center right",
+                Rect(0, 0, 1000, 20),
+                spans=(
+                    TextSpan("left", Rect(50, 0, 150, 20)),
+                    TextSpan("center", Rect(400, 0, 600, 20)),
+                    TextSpan("right", Rect(800, 0, 950, 20)),
+                ),
+            ),
+        ),
+    )
+    page_number = PlannedElement(
+        "page",
+        "page_number",
+        "body",
+        text="7",
+        payload={"source_bbox": (960, 0, 990, 20), "source_scale": 0.5, "page_width_px": 1000},
+    )
+
+    ReflowDocxRenderer()._render_furniture(
+        footer,
+        ("footer", "page"),
+        {"footer": footer_element, "page": page_number},
+        {},
+        1.0,
+        500,
+    )
+
+    cells = footer.tables[0].rows[0].cells
+    assert [cell.text for cell in cells] == ["left", "center", "right", "7"]
+    assert cells[0].paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.LEFT
+    assert cells[1].paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert cells[2].paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.RIGHT
+    assert cells[3].paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.RIGHT
+
+
+def test_mixed_header_and_page_number_center_header_text() -> None:
+    document = Document()
+    header = document.sections[0].header
+    elements = {
+        "page": PlannedElement(
+            "page",
+            "page_number",
+            "body",
+            text="158",
+            payload={"source_bbox": (100, 0, 150, 20), "source_scale": 1.0, "page_width_px": 1000},
+        ),
+        "title": PlannedElement(
+            "title",
+            "header",
+            "body",
+            text="乘用车安全性能设计",
+            payload={"source_bbox": (400, 0, 700, 20), "source_scale": 1.0, "page_width_px": 1000},
+        ),
+    }
+
+    ReflowDocxRenderer()._render_furniture(header, ("page", "title"), elements, {}, 1.0, 500)
+
+    cells = header.tables[0].rows[0].cells
+    assert cells[0].paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.LEFT
+    assert cells[1].paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.CENTER
 
 
 def test_wrapped_flow_uses_floating_editable_media_table() -> None:
@@ -491,6 +836,47 @@ def test_grid_image_does_not_exceed_its_source_physical_width() -> None:
     ReflowDocxRenderer()._write_image(container, element, 0.5, 100)
 
     assert container.paragraphs[-1].runs[0]._r.xpath(".//wp:extent")[0].get("cx") == str(int(25 * 12700))
+
+
+def test_grid_image_uses_source_width_without_page_fit_double_scaling() -> None:
+    document = Document()
+    flow = FlowSection(
+        "grid",
+        FlowKind.GRID,
+        ("image",),
+        column_widths_pt=(300,),
+        grid_cells=(GridCell(0, 0, ("image",)),),
+    )
+    element = PlannedElement(
+        "image",
+        "figure_group",
+        "body",
+        payload={
+            "image_base64": _png_base64(),
+            "source_bbox": (0, 0, 400, 100),
+            "source_scale": 0.5,
+            "width_fraction": 1.0,
+        },
+    )
+
+    ReflowDocxRenderer()._render_grid(document, flow, {"image": element}, {}, 0.5)
+
+    extent = document.element.body.xpath(".//wp:extent")[0]
+    assert extent.get("cx") == str(int(200 * 12700))
+
+
+def test_table_without_html_falls_back_to_source_image() -> None:
+    document = Document()
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={"image_base64": _png_base64(), "source_bbox": (0, 0, 100, 50), "source_scale": 1.0},
+    )
+
+    ReflowDocxRenderer()._render_element(document, element, {}, 1.0, 100)
+
+    assert document.element.body.xpath(".//w:drawing")
 
 
 def test_left_wrapped_flow_uses_absolute_position_and_editable_text() -> None:
@@ -559,6 +945,24 @@ def test_native_table_respects_source_left_anchor() -> None:
     assert table._tbl.tblPr.find(qn("w:tblInd")).get(qn("w:w")) == "480"
 
 
+def test_wide_native_table_is_centered() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": "<table><tr><td>A</td></tr></table>",
+            "width_fraction": 0.95,
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
+
+    assert container.tables[0].alignment == WD_TABLE_ALIGNMENT.CENTER
+
+
 def test_native_table_preserves_sparse_source_columns_and_header_span() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     element = PlannedElement(
@@ -599,7 +1003,7 @@ def test_native_table_renders_data_uri_cell_image() -> None:
 
     table = container.tables[0]
     assert table._tbl.xpath(".//a:blip")
-    assert table.rows[0].height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST
+    assert table.rows[0].height_rule == WD_ROW_HEIGHT_RULE.EXACTLY
     assert "型号 A" in table.cell(0, 0).text
 
 
@@ -617,6 +1021,25 @@ def test_native_table_does_not_append_break_after_image_only_cell() -> None:
     ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
 
     assert not container.tables[0].cell(0, 0)._tc.xpath(".//w:br")
+
+
+def test_single_row_native_table_can_grow_with_wrapped_text() -> None:
+    container = Document()
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": "<table><tr><td>first line<br>second line<br>third line</td></tr></table>",
+            "table_content_fit": True,
+            "table_auto_height": True,
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
+
+    assert container.tables[0].rows[0].height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST
 
 
 def test_native_table_applies_resolved_cell_semantics() -> None:
@@ -641,6 +1064,69 @@ def test_native_table_applies_resolved_cell_semantics() -> None:
     assert all(cell.vertical_alignment == 1 for cell in table.rows[0].cells)
 
 
+def test_native_table_renders_annotated_cell_paragraphs() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": (
+                "<table><tr><td>"
+                "<p data-align='left' data-space-before='0'>Dear students,</p>"
+                "<p data-align='left' data-space-before='0'>An English talk will be held.</p>"
+                "<p data-align='right' data-space-before='0.5'>English Club<br>March 3, 2018</p>"
+                "</td></tr></table>"
+            ),
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 200)
+
+    cell = container.tables[0].cell(0, 0)
+    assert [paragraph.text for paragraph in cell.paragraphs] == [
+        "Dear students,",
+        "An English talk will be held.",
+        "English Club\nMarch 3, 2018",
+    ]
+    assert [paragraph.alignment for paragraph in cell.paragraphs] == [
+        WD_ALIGN_PARAGRAPH.LEFT,
+        WD_ALIGN_PARAGRAPH.LEFT,
+        WD_ALIGN_PARAGRAPH.RIGHT,
+    ]
+    assert cell.paragraphs[-1].paragraph_format.space_before.pt == pytest.approx(5.25)
+    assert cell.paragraphs[-1]._p.xpath(".//w:br")
+
+
+def test_table_cell_centers_media_but_keeps_text_alignment() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    data_uri = f"data:image/png;base64,{_png_base64()}"
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": (
+                "<table><tr><td>"
+                f"<div class='cell-imgs'><img src='{data_uri}'></div>"
+                "Cell text"
+                "</td></tr></table>"
+            ),
+            "table_cell_styles": ((0, 0, "left", False),),
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
+
+    cell = container.tables[0].cell(0, 0)
+    assert cell.paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert cell.paragraphs[0]._p.xpath(".//w:drawing")
+    assert cell.paragraphs[-1].alignment == WD_ALIGN_PARAGRAPH.LEFT
+    assert cell.paragraphs[-1].text == "Cell text"
+
+
 def test_native_table_preserves_cell_lines_and_semantic_header_styles() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     element = PlannedElement(
@@ -657,9 +1143,9 @@ def test_native_table_preserves_cell_lines_and_semantic_header_styles() -> None:
 
     table = container.tables[0]
     assert table.cell(0, 1).text == "Line one\nLine two"
-    assert table.cell(0, 0)._tc.xpath('./w:tcPr/w:shd[@w:fill="F2F5F8"]')
-    assert table.cell(0, 1)._tc.xpath('./w:tcPr/w:shd[@w:fill="EEF7FF"]')
-    assert table.cell(0, 1).paragraphs[0].runs[-1].bold is True
+    assert not table.cell(0, 0)._tc.xpath("./w:tcPr/w:shd")
+    assert not table.cell(0, 1)._tc.xpath("./w:tcPr/w:shd")
+    assert table.cell(0, 1).paragraphs[0].runs[-1].bold is False
 
 
 def test_horizontal_table_uses_th_rows_without_thead_as_header() -> None:
@@ -688,7 +1174,7 @@ def test_numbered_equation_clears_word_default_cell_paragraph_spacing() -> None:
         "equation",
         "equation_group",
         "body",
-        payload={"image_base64": _png_base64(), "number": "(1)", "width_fraction": 0.8},
+        payload={"latex": "x^2", "image_base64": _png_base64(), "number": "(1)", "width_fraction": 0.8},
     )
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
 
@@ -697,6 +1183,53 @@ def test_numbered_equation_clears_word_default_cell_paragraph_spacing() -> None:
     for cell in container.tables[0].rows[0].cells:
         assert cell.paragraphs[0].paragraph_format.space_before.pt == 0
         assert cell.paragraphs[0].paragraph_format.space_after.pt == 0
+    assert container.tables[0].cell(0, 0)._tc.xpath(".//m:oMath")
+
+
+def test_numbered_equation_uses_source_number_ratio() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "equation",
+        "equation_group",
+        "body",
+        payload={
+            "latex": "x^2",
+            "number": "(1)",
+            "primary_bbox": (0, 0, 100, 20),
+            "number_bbox": (80, 0, 100, 20),
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_equation(container, element, {"body": role}, 1.0, 100)
+
+    widths = [
+        int(column.get(qn("w:w")))
+        for column in container.tables[0]._tbl.tblGrid.gridCol_lst
+    ]
+    assert widths == pytest.approx([1520, 480], abs=1)
+
+
+def test_invalid_latex_equation_falls_back_to_text_not_image() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "equation",
+        "equation_group",
+        "body",
+        payload={
+            "latex": r"(left(\mathbf{D}_{x}=0\right)",
+            "image_base64": _png_base64(),
+            "number": "(2)",
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_equation(container, element, {"body": role}, 1.0, 100)
+
+    body = container.tables[0].cell(0, 0)
+    assert "(2)" in container.tables[0].cell(0, 1).text
+    assert body._tc.xpath(".//w:t")
+    assert not body._tc.xpath(".//w:drawing")
 
 
 def test_native_table_uses_inferred_table_font() -> None:
@@ -715,6 +1248,25 @@ def test_native_table_uses_inferred_table_font() -> None:
     assert fonts.get(qn("w:eastAsia")) == "仿宋"
 
 
+def test_native_table_renders_formula_marker_as_omml() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": "<table><tr><td><span class='docflow-formula' data-latex='x^2'></span></td></tr></table>"
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
+
+    cell = container.tables[0].cell(0, 0)
+    assert cell._tc.xpath(".//m:oMath")
+    assert not cell._tc.xpath(".//w:drawing")
+
+
 def test_native_table_uses_source_height_as_row_minimum() -> None:
     container = Document().add_table(rows=1, cols=1).cell(0, 0)
     element = PlannedElement(
@@ -729,6 +1281,110 @@ def test_native_table_uses_source_height_as_row_minimum() -> None:
 
     assert all(row.height.pt == pytest.approx(40) for row in container.tables[0].rows)
     assert all(row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY for row in container.tables[0].rows)
+
+
+def test_native_table_target_box_does_not_clip_image_rows() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": (
+                "<table>"
+                f"<tr><td><img src='data:image/png;base64,{_png_base64()}'>caption</td></tr>"
+                "<tr><td>second row</td></tr>"
+                "</table>"
+            ),
+            "table_height_pt": 100,
+            "target_height_pt": 40,
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
+
+    rows = container.tables[0].rows
+    assert all(row.height_rule == WD_ROW_HEIGHT_RULE.EXACTLY for row in rows)
+    assert sum(row.height.pt for row in rows) >= 100.0
+
+
+def test_native_table_with_vertical_merge_allows_rows_to_grow() -> None:
+    container = Document().add_table(rows=2, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": "<table><tr><td rowspan='2'>参数</td></tr><tr></tr></table>",
+            "table_height_pt": 20,
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
+
+    assert all(row.height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST for row in container.tables[0].rows)
+
+
+def test_vertical_merge_padding_uses_single_row_height() -> None:
+    container = Document().add_table(rows=2, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": "<table><tr><td rowspan='2'>参数</td></tr><tr></tr></table>",
+            "table_height_pt": 100,
+            "table_cell_geometry": ((0, 0, "center", 0.25, 0.25, 0.0, 0.0),),
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
+
+    margins = container.tables[0].cell(0, 0)._tc.tcPr.find(qn("w:tcMar"))
+    assert margins.find(qn("w:top")).get(qn("w:w")) == "250"
+    assert margins.find(qn("w:bottom")).get(qn("w:w")) == "250"
+
+
+def test_figure_target_height_caps_picture() -> None:
+    document = Document()
+    element = PlannedElement(
+        "figure",
+        "figure_group",
+        "body",
+        payload={
+            "image_base64": _png_base64(),
+            "source_bbox": (0, 0, 120, 40),
+            "source_scale": 1.0,
+            "target_width_pt": 120,
+            "target_height_pt": 10,
+        },
+    )
+
+    ReflowDocxRenderer()._write_image(document, element, 1.0, 200.0)
+
+    assert document.inline_shapes[0].height.pt <= 10.0
+
+
+def test_figure_group_width_does_not_apply_page_fit_twice() -> None:
+    document = Document()
+    element = PlannedElement(
+        "figure",
+        "figure_group",
+        "body",
+        payload={
+            "image_base64": _png_base64(),
+            "source_bbox": (0, 0, 120, 40),
+            "source_scale": 1.0,
+            "target_width_pt": 120,
+        },
+    )
+
+    ReflowDocxRenderer()._write_image(document, element, 0.5, 200.0)
+
+    assert document.inline_shapes[0].width.pt == pytest.approx(120.0)
 
 
 def test_native_table_uses_fused_row_height_ratios() -> None:
@@ -752,6 +1408,30 @@ def test_native_table_uses_fused_row_height_ratios() -> None:
     assert [row.height.pt for row in container.tables[0].rows] == pytest.approx([75, 25])
     grid = container.tables[0]._tbl.tblGrid.gridCol_lst
     assert [int(column.get(qn("w:w"))) for column in grid] == pytest.approx([1400, 600], abs=1)
+
+
+def test_native_table_uses_source_cell_geometry_ratios() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": "<table><tr><td>A</td></tr></table>",
+            "table_height_pt": 100,
+            "table_cell_geometry": ((0, 0, "top", 0.1, 0.0, 0.2, 0.1),),
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
+
+    cell = container.tables[0].cell(0, 0)
+    margins = cell._tc.tcPr.find(qn("w:tcMar"))
+    assert cell.vertical_alignment == WD_CELL_VERTICAL_ALIGNMENT.TOP
+    assert margins.find(qn("w:top")).get(qn("w:w")) == "200"
+    assert margins.find(qn("w:start")).get(qn("w:w")) == "213"
+    assert margins.find(qn("w:end")).get(qn("w:w")) == "107"
 
 
 def test_native_table_fixed_row_height_accounts_for_wrapped_content() -> None:
@@ -844,8 +1524,9 @@ def test_multiline_heading_font_fits_each_preserved_source_line() -> None:
         payload={
             "lines": ("A deliberately long heading", "Continued"),
             "line_tops_px": (0, 20),
-            "line_heights_px": (18, 18),
-            "alignment": "left",
+                "line_heights_px": (18, 18),
+                "line_height_pt": 40.0,
+                "alignment": "left",
         },
     )
     role = TypographicRole("heading", "宋体", "Times New Roman", 20, 1.0)
@@ -854,7 +1535,8 @@ def test_multiline_heading_font_fits_each_preserved_source_line() -> None:
 
     run = container.paragraphs[-1].runs[0]
     assert run._element.rPr.find(qn("w:w")) is None
-    assert run.font.size.pt <= 100 * 0.98 / estimate_text_units("A deliberately long heading") + 0.1
+    assert run.font.size.pt < 20.0
+    assert container.paragraphs[-1].paragraph_format.line_spacing.pt < 40.0
 
 
 def test_centered_source_rows_fit_without_word_adding_wraps() -> None:
@@ -894,7 +1576,7 @@ def test_continuous_paragraph_keeps_natural_character_width_without_hard_breaks(
 
 
 def test_column_layout_collapses_word_trailing_paragraph() -> None:
-    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    container = Document()
     role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
     elements = {
         "left": PlannedElement("left", "paragraph_group", "body", text="left", payload={"column": 0}),
@@ -904,8 +1586,13 @@ def test_column_layout_collapses_word_trailing_paragraph() -> None:
 
     ReflowDocxRenderer()._render_columns(container, flow, elements, {"body": role}, 1.0)
 
-    spacing = container.paragraphs[-1]._p.pPr.find(qn("w:spacing"))
-    assert spacing.get(qn("w:line")) == "1"
+    assert not container.tables
+    assert len(container.sections) == 3
+    columns = container.sections[1]._sectPr.xpath("./w:cols")[0]
+    assert columns.get(qn("w:num")) == "2"
+    assert columns.get(qn("w:equalWidth")) == "0"
+    assert len(columns.findall(qn("w:col"))) == 2
+    assert container.element.body.xpath('.//w:br[@w:type="column"]')
 
 
 def test_reflow_docx_keeps_text_tables_and_equation_numbers_editable(tmp_path) -> None:

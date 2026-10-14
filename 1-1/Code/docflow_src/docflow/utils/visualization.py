@@ -48,6 +48,14 @@ _COL_PALETTE = [
     (50, 130, 200),   # brown
 ]
 
+# 公式使用固定颜色并最后绘制，避免被表格/正文大框遮住。
+_FORMULA_OVERLAY_TYPES = {"inline_formula", "display_formula", "formula_number", "formula", "equation"}
+_FORMULA_OVERLAY_COLORS = {
+    "inline_formula": (236, 72, 153),
+    "display_formula": (128, 90, 255),
+    "formula_number": (90, 96, 105),
+}
+
 _FLOW_PALETTE_BGR = [
     (40, 85, 235),    # vivid blue
     (38, 178, 68),    # vivid green
@@ -177,14 +185,24 @@ def draw_layout_ocr(
     font = _load_font(font_path, size=14)
     tiny_font = _load_font(font_path, size=12)
 
-    for idx, region in enumerate(regions):
+    indexed_regions = list(enumerate(regions))
+    indexed_regions.sort(
+        key=lambda item: str(item[1].get("raw_type") or item[1].get("type") or "") in _FORMULA_OVERLAY_TYPES
+    )
+
+    for idx, region in indexed_regions:
+        raw_type = str(region.get("raw_type") or region.get("type") or "")
         rtype = str(region.get("type", "?"))
         score = float(region.get("score", 0.0))
-        color = _type_color(rtype)
+        if raw_type in _FORMULA_OVERLAY_COLORS:
+            rtype = raw_type
+            color = _FORMULA_OVERLAY_COLORS[raw_type]
+        else:
+            color = _type_color(rtype)
         x1, y1, x2, y2 = _as_int_bbox(region.get("bbox", []))
 
         # 区块边界框：加粗描边
-        draw.rectangle((x1, y1, x2, y2), outline=color, width=3)
+        draw.rectangle((x1, y1, x2, y2), outline=color, width=4 if raw_type == "inline_formula" else 3)
 
         # 区域标签
         label = f"{idx}:{rtype} {score:.2f}"

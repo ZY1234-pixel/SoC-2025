@@ -17,33 +17,26 @@ model_integration/
 - 模型设备：CPU
 - 同一个 `OpenVINOModelRuntime` 应复用，不要每处理一张图片就重新创建
 
-模型文件应先按 [部署说明](../../doc/DEPLOYMENT.md#放置模型) 放入 `Code/models_openvino/`。
+OpenVINO 模型文件应先按 [部署说明](../../doc/DEPLOYMENT.md#放置模型) 放入 `Code/models_openvino/`；公式识别模型放在 `Code/models/formula/PP-FormulaNet_plus-M/PP-FormulaNet_plus-M_infer/`。
 
 ## 初始化
 
-从仓库外部代码调用时，先将 `Code/` 加入 Python 路径：
+在仓库根目录启动程序时，可以直接导入统一运行接口：
 
 ```python
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path("Code").resolve()))
-
-from model_integration import OpenVINOModelRuntime
+from Code.model_integration import OpenVINOModelRuntime
 
 runtime = OpenVINOModelRuntime()
 ```
 
-初始化时会加载 PP-DocLayoutV3、PP-OCRv6 Small DET 和 REC。表格模型在首次调用 `run_table()`，或整页检测到表格时再加载。
+初始化时会加载 PP-DocLayoutV3、PP-OCRv6 Small DET 和 REC。表格模型在首次调用 `run_table()`，或整页检测到表格时再加载。PP-FormulaNet_plus-M 只在页面存在公式框时懒加载，并通过 ONNXRuntime 读取 `inference.onnx`。
 
 构造参数：
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `layout_model_name` | `pp-doclayout-v3` | 版面模型名称，生产环境保持默认即可 |
-| `table_engine` | `auto` | 自动选择有线或无线表格模型 |
-| `full_page_table_fallback` | `False` | 未检测到表格时是否将整页作为表格识别 |
 | `runtime_dir` | 系统临时目录 | 保存运行时字典和表格调试文件 |
+| `formula_enabled` | `True` | 是否启用行内及行间公式识别 |
 
 ## 1. 版面分析
 
@@ -99,12 +92,7 @@ table_image = cv2.imread("table_crop.png")
 result = runtime.run_table(table_image)
 ```
 
-默认先用 Table CLS 判断有线表格或无线表格，再选择 UNet 或 LORE。也可以在调试时明确指定：
-
-```python
-wired = runtime.run_table(table_image, table_engine="wired_table_v2")
-lineless = runtime.run_table(table_image, table_engine="lineless_table")
-```
+表格结构模型首先由 Table CLS 选择：有线表格调用 `wired_table_v2`，无线表格调用 `slanet_plus`。若输出结构的跨度冲突或空单元格比例异常，再运行另一套结构模型并按实际恢复质量选择，避免一次误分类直接污染结果。
 
 主要返回字段：
 
@@ -137,12 +125,16 @@ timing = result["timing"]
 
 1. PP-DocLayoutV3 检出版面区域。
 2. PP-OCRv6 DET 和 REC 对整页文字进行识别。
-3. 对 `table` 区域执行 RapidAI 表格结构识别。
-4. 将表格 HTML、单元格结构和 OCR 结果写回对应区域。
+3. PP-FormulaNet_plus-M 识别公式区域并输出 LaTeX。
+4. 对 `table` 区域执行 RapidAI 表格结构识别。
+5. 将公式 LaTeX、表格 HTML、单元格结构和 OCR 结果写回对应区域。
+
+DOCX 输出会把有效 LaTeX 转成 Word 原生 OMML 公式；无法转换的异常 LaTeX 保留为文本，不再插入公式图片。
 
 `timing` 保留 `layout`、`det`、`rec`，并增加：
 
 - `rapidai_table`：RapidAI 表格阶段耗时。
+- `formula`：公式区域识别耗时；没有公式时为 `0`。
 - `all_with_table`：从整页输入到最终区域结果的总耗时。
 
 ## 模型与调用关系
@@ -152,7 +144,7 @@ timing = result["timing"]
 | `run_layout()` | PP-DocLayoutV3 |
 | `run_ocr()` | PP-OCRv6 Small DET + REC |
 | `run_table()` | Table CLS + UNet 或 LORE + PP-OCRv6 DET/REC + OCR 方向分类器 |
-| `run_document()` | 上述模型按页面内容组合执行 |
+| `run_document()` | 上述模型按页面内容组合执行；公式模型仅在有公式框时加载 |
 
 ## 集成注意事项
 

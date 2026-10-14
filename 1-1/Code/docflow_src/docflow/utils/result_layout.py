@@ -55,6 +55,8 @@ class SampleResultLayout:
     sample_key: str
     source_path: Path
     sample_dir: Path
+    assets_dir: Path
+    table_dir: Path
     json_path: Path
     recognition_path: Path
     render_plan_path: Path
@@ -64,7 +66,7 @@ class SampleResultLayout:
     debug_dir: Path
 
     def debug_image_path(self, page_index: int, suffix: str) -> Path:
-        return self.debug_dir / f"page_{page_index + 1:04d}.{suffix}.jpg"
+        return self.debug_dir / f"{self.sample_key}_p{page_index + 1:04d}.{suffix}.jpg"
 
 
 @dataclass
@@ -101,19 +103,23 @@ class ResultRunLayout:
         count = self._sample_counts.get(base_key, 0) + 1
         self._sample_counts[base_key] = count
         sample_key = base_key if count == 1 else f"{base_key}__{count}"
-        sample_dir = self.run_dir / sample_key
-        sample_dir.mkdir(parents=True, exist_ok=True)
+        sample_dir = self.run_dir
+        assets_dir = sample_dir / "assets"
+        stages_dir = sample_dir / "stages"
+        debug_dir = sample_dir / "debug"
         return SampleResultLayout(
             sample_key=sample_key,
             source_path=source_path.resolve(),
             sample_dir=sample_dir,
-            json_path=sample_dir / f"{sample_key}.json",
-            recognition_path=sample_dir / f"{sample_key}.recognition.json",
-            render_plan_path=sample_dir / f"{sample_key}.render_plan.json",
+            assets_dir=assets_dir / sample_key,
+            table_dir=assets_dir / "tables" / sample_key,
+            json_path=stages_dir / f"{sample_key}.analysis.json",
+            recognition_path=stages_dir / f"{sample_key}.recognition.json",
+            render_plan_path=stages_dir / f"{sample_key}.render_plan.json",
             docx_path=sample_dir / f"{sample_key}.docx",
             markdown_path=sample_dir / f"{sample_key}.md",
             pdf_path=sample_dir / f"{sample_key}.pdf",
-            debug_dir=sample_dir / "debug",
+            debug_dir=debug_dir,
         )
 
     def write_run_manifest(self, payload: dict) -> None:

@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import math
 
-from docflow.planning.text_metrics import estimate_text_units
+from docflow.planning.text_metrics import estimate_text_units, measure_text_width_pt
 
 
 def get_table_rows(table_soup) -> list:
     rows = []
-    for section in table_soup.find_all(["thead", "tbody", "tfoot"], recursive=False):
-        rows.extend(section.find_all("tr", recursive=False))
-    rows.extend(row for row in table_soup.find_all("tr", recursive=False) if row not in rows)
+    for child in table_soup.find_all(["thead", "tbody", "tfoot", "tr"], recursive=False):
+        if child.name == "tr":
+            rows.append(child)
+        else:
+            rows.extend(child.find_all("tr", recursive=False))
     return rows
 
 
@@ -39,8 +41,22 @@ def get_table_cell_placements(table_soup) -> list[tuple[int, int, int, int, obje
                 column_index += 1
             if column_index >= columns:
                 break
-            row_span = min(int(cell.get("rowspan", 1)), rows - row_index)
-            column_span = min(int(cell.get("colspan", 1)), columns - column_index)
+            requested_row_span = min(int(cell.get("rowspan", 1)), rows - row_index)
+            requested_column_span = min(int(cell.get("colspan", 1)), columns - column_index)
+            row_span = requested_row_span
+            while row_span > 1 and any(
+                occupied[target_row][target_column]
+                for target_row in range(row_index, row_index + row_span)
+                for target_column in range(column_index, column_index + requested_column_span)
+            ):
+                row_span -= 1
+            column_span = requested_column_span
+            while column_span > 1 and any(
+                occupied[target_row][target_column]
+                for target_row in range(row_index, row_index + row_span)
+                for target_column in range(column_index, column_index + column_span)
+            ):
+                column_span -= 1
             placements.append((row_index, column_index, row_span, column_span, cell))
             for target_row in range(row_index, row_index + row_span):
                 for target_column in range(column_index, column_index + column_span):
@@ -53,9 +69,38 @@ def get_table_cell_text_lines(cell_soup) -> tuple[str, ...]:
     return tuple(line.strip() for line in cell_soup.get_text("\n", strip=True).splitlines() if line.strip())
 
 
+def has_table_cell_paragraphs(cell_soup) -> bool:
+    return bool(cell_soup.find("p", recursive=True))
+
+
+def get_table_cell_content_nodes(cell_soup) -> tuple:
+    nodes = []
+    for child in cell_soup.children:
+        name = getattr(child, "name", None)
+        if name == "p" or name == "img" or "docflow-formula" in (child.get("class") or ()):
+            nodes.append(child)
+        elif name in {"div", "span"}:
+            nodes.extend(get_table_cell_content_nodes(child))
+    return tuple(nodes)
+
+
+def table_cell_padding_ratios(start_ratio: float, end_ratio: float, max_total: float = 0.16):
+    start = max(float(start_ratio), 0.0)
+    end = max(float(end_ratio), 0.0)
+    total = min(start + end, max(float(max_total), 0.0))
+    scale = total / max(start + end, 1e-9)
+    return start * scale, end * scale
+
+
+def table_cell_available_width(cell_width: float, start_ratio: float = 0.0, end_ratio: float = 0.0) -> float:
+    start, end = table_cell_padding_ratios(start_ratio, end_ratio)
+    padding_ratio = start + end
+    return max((cell_width * (1.0 - padding_ratio) - 2.0) * 0.96, 1.0)
+
+
 def estimate_table_cell_lines(cell_soup, font_size: float, available_width: float) -> int:
     return sum(
-        max(1, math.ceil(estimate_text_units(line) * font_size / max(available_width, 1.0)))
+        max(1, math.ceil(measure_text_width_pt(line, font_size) / max(available_width, 1.0)))
         for line in get_table_cell_text_lines(cell_soup)
     )
 

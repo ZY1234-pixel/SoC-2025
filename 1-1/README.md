@@ -1,12 +1,14 @@
 # 图片文本解析及矢量化转换
 
-图片文本解析及矢量化转换模块面向扫描图片和 PDF，经过 OCR、版面分析与布局规划，生成可编辑的 DOCX、结构化 Markdown，并可通过 LibreOffice 导出 PDF。
+图片文本解析及矢量化转换模块面向扫描图片和 PDF，经过 OCR、版面分析与布局规划，生成可编辑的 DOCX、结构化 Markdown，并可直接生成保留原始坐标的 PDF。
 
-当前实现采用流式排版，使用 Word 原生段落、分栏和表格组织页面。文字和表格可继续编辑，布局尽量保持原始版面。该方案不按 bbox 绝对定位文本框；由于 Word 与 LibreOffice 的字体度量不同，不同渲染环境可能产生少量换行或分页差异。
+DOCX 采用流式排版，使用 Word 原生段落、分栏和表格组织页面，文字和表格可继续编辑。PDF 使用独立的原始坐标渲染路径，将文本、图片、公式和表格直接写回源页面位置，不经过 DOCX 或办公套件转换。
+
+PDF 公式使用项目中随附的 MathJax headless bundle 和 QuickJS 离线渲染为 SVG 矢量，再嵌入 PDF；运行时不依赖 Node、浏览器或 LaTeX 发行版。
 
 ## 效果示例
 
-以下示例由当前版本生成，第三列为 DOCX 经 LibreOffice 渲染后的页面。
+以下示例由当前版本生成，第三列为页面渲染效果。
 
 ### 学术论文：双栏、公式和复杂表格
 
@@ -35,7 +37,7 @@
 
 ## 快速开始
 
-以下命令均在仓库根目录执行。项目基于 Python 3.9 开发和测试；LibreOffice 仅用于导出 PDF。
+以下命令均在仓库根目录执行。项目基于 Python 3.9 开发和测试。
 
 ### Linux
 
@@ -83,11 +85,19 @@ python Code/test.py --input dataset --output test-result --formats docx,markdown
 |------|------|
 | `--input`, `-i` | 图片、PDF 或目录，默认读取 `dataset/` |
 | `--output`, `-o` | 结果保存目录，默认为 `test-result/` |
-| `--formats`, `-f` | 从 `docx,markdown,pdf` 中选择一种或多种格式 |
-| `--layout-model` | 切换版面模型，默认使用 `pp-doclayout-v3` |
-| `--table-backend` | 表格识别后端，默认使用 `rapidai`；旧版 `slanet` 仅作兼容 |
+| `--formats`, `-f` | 从 `docx,markdown,pdf,pdf_fidelity` 中选择一种或多种格式 |
+| `--no-formula` | 关闭行间和行内公式识别；普通文档可减少启动和推理开销 |
 | `--pdf-dpi` | 输入 PDF 转图片时使用的 DPI，默认 `200` |
-| `--no-debug-vis` | 关闭版面框和阅读顺序图 |
+| `--save-stages` | 额外保存 recognition、analysis 和 render plan JSON |
+| `--save-debug` | 额外保存版面调试图和原始模型结果 |
+
+高保真 PDF 模式：
+
+```bash
+python Code/test.py --input dataset --output test-result --formats pdf_fidelity
+```
+
+该模式保留原始页面视觉，并叠加不可见文本层，文件名为 `<样本名>.fidelity.pdf`。
 
 ## 处理流程
 
@@ -122,34 +132,34 @@ python Code/test.py --input dataset --output test-result --formats docx,markdown
 
 ## 输出结构
 
-每次运行都会创建独立的时间戳目录，各样本结果保存于对应子目录：
+每次运行都会创建独立的时间戳目录，最终文件直接放在运行目录下：
 
 ```text
 test-result/
 └── run_YYYYMMDD_HHMMSS/
     ├── run_manifest.json
     ├── _runtime/
-    └── <样本名>/
-        ├── raw_result.json
-        ├── <样本名>.recognition.json
-        ├── <样本名>.json
-        ├── <样本名>.render_plan.json
-        ├── <样本名>.docx
-        ├── <样本名>.md
-        ├── <样本名>.pdf
-        ├── <样本名>_assets/
-        └── debug/
-            ├── page_0001.layout_ocr.jpg
-            └── page_0001.reading_order_columns.jpg
+    ├── <样本名>.docx
+    ├── <样本名>.md
+    ├── <样本名>.pdf
+    ├── <样本名>.fidelity.pdf
+    ├── assets/<样本名>/       # Markdown 图片资源
+    ├── assets/tables/<样本名>/ # 表格中间图片资源
+    ├── stages/                 # 仅 --save-stages 时生成
+    └── debug/                  # 仅 --save-debug 时生成
 ```
 
-只会生成 `--formats` 中指定的文件。使用 `--no-debug-vis` 后，`raw_result.json` 和 `debug/` 不再输出。
+只会生成 `--formats` 中指定的文件。默认不保存阶段 JSON 和调试图。
 
 ## 模型准备
 
 默认流程依赖以下模型文件：
 
 ```text
+Code/models/formula/
+└── PP-FormulaNet_plus-M/PP-FormulaNet_plus-M_infer/
+    ├── inference.yml
+    └── inference.onnx
 Code/models_openvino/
 ├── PP-DocLayoutV3_openvino/PP-DocLayoutV3.xml + .bin
 ├── PP-OCRv6_small_det_openvino/PP-OCRv6_small_det_openvino_fp32.xml + .bin
@@ -159,14 +169,22 @@ Code/models_openvino/
 │   └── ppocrv6_rapidocr_dict.txt
 ├── RapidAI_TableRec_openvino/
 │   ├── wired_table_v2/unet.xml + .bin
-│   ├── lineless_table/lore_detect.xml + .bin
-│   ├── lineless_table/lore_process.xml + .bin
+│   ├── slanet_plus/slanet-plus.xml + .bin
+│   ├── slanet_plus/character.txt
 │   ├── table_cls/yolo_cls.xml + .bin
 │   └── ocr_cls/ch_ppocr_mobile_v2.0_cls_infer.xml + .bin
 └── font_openvino/mobilenetv3.xml + .bin
 ```
 
 模型文件不随 Git 仓库提交。下载地址由项目负责人补充；下载后按上面的目录结构放置。
+
+PP-FormulaNet_plus-M 的 ONNX 权重可用以下命令下载到默认目录：
+
+```bash
+python Code/scripts/download_formulanet_onnx.py
+```
+
+公式识别只加载 `inference.onnx`；模型下载脚本会校验固定 revision 和 SHA-256。
 
 ## 质量验证
 

@@ -144,6 +144,23 @@ def _infer_pixels_style(image: np.ndarray) -> Optional[CropStylePrediction]:
     background_code = int(np.bincount(codes, minlength=4096).argmax())
     background_mask = codes == background_code
     background = np.median(pixels[background_mask], axis=0)
+
+    height, width = image.shape[:2]
+    border_size = max(1, min(height, width) // 8)
+    border_pixels = np.concatenate(
+        (
+            image[:border_size].reshape(-1, 3),
+            image[-border_size:].reshape(-1, 3),
+            image[:, :border_size].reshape(-1, 3),
+            image[:, -border_size:].reshape(-1, 3),
+        )
+    )
+    border_bins = (border_pixels.astype(np.uint16) // 16).astype(np.uint16)
+    border_codes = border_bins[:, 0] * 256 + border_bins[:, 1] * 16 + border_bins[:, 2]
+    border_background_code = int(np.bincount(border_codes, minlength=4096).argmax())
+    border_background_mask = border_codes == border_background_code
+    border_background = np.median(border_pixels[border_background_mask], axis=0)
+
     distances = np.linalg.norm(pixels.astype(np.float32) - background, axis=1)
     foreground = pixels[distances >= 40.0]
     if len(foreground) < 16:
@@ -152,7 +169,9 @@ def _infer_pixels_style(image: np.ndarray) -> Optional[CropStylePrediction]:
     core = foreground[foreground_distances >= np.percentile(foreground_distances, 80)]
     text_color = _hex_bgr(np.median(core, axis=0))
     background_color = None
-    if float(background_mask.mean()) >= 0.25 and np.linalg.norm(background - 255.0) >= 32.0:
+    if float(border_background_mask.mean()) >= 0.20 and np.linalg.norm(border_background - 255.0) >= 32.0:
+        background_color = _hex_bgr(border_background)
+    elif float(background_mask.mean()) >= 0.25 and np.linalg.norm(background - 255.0) >= 32.0:
         background_color = _hex_bgr(background)
     confidence = min(1.0, float(background_mask.mean()) + len(foreground) / max(len(pixels), 1))
     return CropStylePrediction(text_color, background_color, confidence)

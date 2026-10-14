@@ -89,10 +89,10 @@ class RapidAITableRecognizer:
         class_started = time.perf_counter()
         table_class, class_elapsed = self.table_cls(image)
         class_elapsed = class_elapsed if class_elapsed is not None else time.perf_counter() - class_started
-        table_type = "wired_table_v2" if table_class == "wired" else "lineless_table"
+        table_type = "wired_table_v2" if table_class == "wired" else "slanet_plus"
         if self.table_engine_type != "auto":
             table_type = self.table_engine_type
-        if table_type not in {"wired_table_v2", "lineless_table"}:
+        if table_type not in {"wired_table_v2", "slanet_plus"}:
             raise ValueError(f"unsupported table_engine_type: {self.table_engine_type}")
 
         ocr_started = time.perf_counter()

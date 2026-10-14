@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+import unicodedata
 from typing import Iterable
 
 import numpy as np
@@ -39,6 +40,26 @@ class EvidenceRowCandidate:
     score: float
 
 
+def _is_cjk_or_fullwidth(value: str) -> bool:
+    if not value:
+        return False
+    return unicodedata.east_asian_width(value) in {"F", "W"}
+
+
+def join_inline_text(parts: Iterable[str]) -> str:
+    """Join OCR fragments while preserving meaningful word boundaries."""
+    values = [str(value).strip() for value in parts if str(value).strip()]
+    if not values:
+        return ""
+    result = values[0]
+    for value in values[1:]:
+        if _is_cjk_or_fullwidth(result[-1]) and _is_cjk_or_fullwidth(value[0]):
+            result += value
+        else:
+            result += f" {value}"
+    return result
+
+
 class StructurePostProcessor:
     """Canonicalize table structure using model, layout, OCR, and geometry evidence.
 
@@ -64,11 +85,25 @@ class StructurePostProcessor:
             "ghost_rows_removed": 0,
             "top_rows_added": 0,
             "cell_text_reassigned": 0,
+            "cell_text_reassignment_skipped": 0,
+            "header_rule_rows_merged": 0,
         }
 
         self._remove_ghost_columns(cells, diagnostics)
         self._remove_ghost_rows(cells, diagnostics)
+        diagnostics["header_rule_rows_merged"] = self._merge_header_rows_by_rule_band(
+            cells,
+            layout_objects,
+            ocr_objects,
+            table_meta.get("_horizontal_rule_ys") or (),
+            table_bbox,
+        )
         self._repair_roles(cells)
+        diagnostics["wide_image_header_splits"] = self._split_wide_multi_image_header_cells(
+            cells,
+            layout_objects,
+            table_bbox,
+        )
 
         top_band = self._detect_missing_top_band(cells, layout_objects, ocr_objects, table_bbox)
         if top_band is not None:
@@ -83,14 +118,273 @@ class StructurePostProcessor:
         diagnostics["internal_bands_added"] = len(internal_results)
         diagnostics["internal_band_cells_added"] = sum(result.cells_added for result in internal_results)
 
-        reassigned = self._reassign_text_from_ocr(cells, ocr_objects)
+        reassigned, reassignment_skipped = self._reassign_text_from_ocr(cells, ocr_objects)
         diagnostics["cell_text_reassigned"] = reassigned
+        diagnostics["cell_text_reassignment_skipped"] = reassignment_skipped
         diagnostics["row_header_splits"] = self._split_row_header_value_cells(cells, ocr_objects)
         diagnostics["wide_ocr_row_splits"] = self._split_wide_ocr_into_row_cells(cells, ocr_objects)
+        diagnostics["columns_rebalanced"] = self._rebalance_column_text(cells)
         self._fill_grid_holes(cells)
         self._repair_roles(cells)
         diagnostics["row_count"], diagnostics["col_count"] = self._shape(cells)
         return diagnostics
+
+    @staticmethod
+    def _rebalance_column_text(cells: list[object]) -> int:
+        columns: dict[int, list[object]] = {}
+        for cell in cells:
+            if max(1, int(getattr(cell, "colspan", 1))) == 1:
+                columns.setdefault(int(getattr(cell, "col", 0)), []).append(cell)
+        changed = 0
+        for column_cells in columns.values():
+            ordered = sorted(column_cells, key=lambda cell: (cell.row, cell.bbox.cy))
+            body = ordered[1:]
+            if not body:
+                continue
+            lines = [
+                line.strip()
+                for cell in body
+                for line in str(getattr(cell, "text", "")).splitlines()
+                if line.strip()
+            ]
+            needs_rebalance = any(not str(getattr(cell, "text", "")).strip() for cell in body) or any(
+                len(str(getattr(cell, "text", "")).splitlines()) > 1 for cell in body
+            )
+            if not needs_rebalance or len(lines) != len(body):
+                continue
+            for cell, line in zip(body, lines):
+                if cell.text != line:
+                    cell.text = line
+                    cell.ocr_objects = []
+                    changed += 1
+        return changed
+
+    def _merge_header_rows_by_rule_band(
+        self,
+        cells: list[object],
+        layout_objects: list[object],
+        ocr_objects: list[object],
+        rule_ys: Iterable[float],
+        table_bbox: Rect,
+    ) -> int:
+        """Collapse model rows that live inside one physical header band.
+
+        Three-line tables often have no rule between the label and unit lines
+        of a header cell. Table models may still emit those lines as separate
+        logical rows. The body grid and OCR positions are used to rebuild one
+        header row, so no field name or sample-specific rule is involved.
+        """
+        rules = sorted(float(value) for value in rule_ys or ())
+        if len(rules) < 2 or not cells:
+            return 0
+        band = Rect(table_bbox.x0, rules[0] + 1, table_bbox.x1, rules[1] - 1)
+        if band.h <= 4:
+            return 0
+
+        rows = sorted({int(getattr(cell, "row")) for cell in cells})
+        rows_in_band: list[int] = []
+        for row in rows:
+            rects = [
+                getattr(cell, "bbox")
+                for cell in cells
+                if int(getattr(cell, "row")) == row and getattr(cell, "bbox").area > 0
+            ]
+            if not rects:
+                continue
+            row_rect = self._union(rects)
+            if band.overlap_area(row_rect) / max(1.0, row_rect.area) < 0.50:
+                continue
+            rows_in_band.append(row)
+        if len(rows_in_band) < 2:
+            return 0
+
+        body_cells = [cell for cell in cells if int(getattr(cell, "row")) not in rows_in_band]
+        col_bands = self._col_bands(body_cells)
+        if len(col_bands) < 2:
+            return 0
+
+        band_objects = [
+            obj
+            for obj in [*layout_objects, *ocr_objects]
+            if self._is_table_content_object(obj)
+            and band.overlap_area(getattr(obj, "bbox")) / max(1.0, getattr(obj, "bbox").area) >= 0.50
+        ]
+        header_row = min(rows_in_band)
+        removed_rows = set(rows_in_band)
+        cells[:] = [cell for cell in cells if int(getattr(cell, "row")) not in removed_rows]
+        row_shift = len(removed_rows) - 1
+        for cell in cells:
+            if int(getattr(cell, "row")) > max(removed_rows):
+                cell.row -= row_shift
+
+        visual_labels = {"image", "inline_formula", "display_formula", "equation", "formula"}
+        for col, col_rect in sorted(col_bands.items()):
+            objects = [
+                obj
+                for obj in band_objects
+                if self._x_overlap_ratio(col_rect, getattr(obj, "bbox")) > 0.20
+                or col_rect.contains_point(getattr(obj, "bbox").cx, getattr(obj, "bbox").cy, tol=8)
+            ]
+            text_objects = [obj for obj in objects if str(getattr(obj, "text", "")).strip()]
+            visual_objects = [
+                obj
+                for obj in objects
+                if str(getattr(obj, "label", "")) in visual_labels
+                and not str(getattr(obj, "text", "")).strip()
+            ]
+            cells.append(
+                self._new_cell(
+                    row=header_row,
+                    col=col,
+                    bbox=Rect(col_rect.x0, band.y0, col_rect.x1, band.y1),
+                    text=self._join_text(text_objects),
+                    role="corner" if col == min(col_bands) else "column_header",
+                    confidence=0.60,
+                    layout_objects=visual_objects,
+                )
+            )
+        return len(removed_rows)
+
+    def _split_wide_multi_image_header_cells(
+        self,
+        cells: list[object],
+        layout_objects: list[object],
+        table_bbox: Rect,
+    ) -> int:
+        """按正文列边界拆开被模型合并的多图片表头。"""
+        if not cells:
+            return 0
+        row_count, col_count = self._shape(cells)
+        if row_count < 2 or col_count < 3:
+            return 0
+
+        min_row = min(getattr(cell, "row") for cell in cells)
+        split_count = 0
+        for candidate in list(cells):
+            images = [
+                obj
+                for obj in getattr(candidate, "layout_objects", [])
+                if getattr(obj, "label", "") == "image"
+            ]
+            if (
+                getattr(candidate, "row") > min_row + 1
+                or len(images) < 2
+                or getattr(candidate, "bbox").w < table_bbox.w * 0.70
+            ):
+                continue
+
+            start_row = int(getattr(candidate, "row"))
+            row_span = max(1, int(getattr(candidate, "rowspan", 1)))
+            end_row = min(start_row + row_span, row_count)
+            col_bands = self._stable_column_bands(cells, end_row, col_count, table_bbox)
+            if len(col_bands) < 3:
+                continue
+            image_columns = {
+                min(col_bands, key=lambda col: abs(col_bands[col].cx - getattr(image, "bbox").cx))
+                for image in images
+            }
+            if len(image_columns) < 2:
+                continue
+
+            row_ranges = self._replacement_row_ranges(cells, candidate, start_row, end_row)
+            if len(row_ranges) != end_row - start_row:
+                continue
+
+            cells[:] = [
+                cell
+                for cell in cells
+                if not (start_row <= int(getattr(cell, "row")) < end_row)
+            ]
+            replacements: list[object] = []
+            for row, (y0, y1) in zip(range(start_row, end_row), row_ranges):
+                for col, col_rect in sorted(col_bands.items()):
+                    replacements.append(
+                        self._new_cell(
+                            row=row,
+                            col=col,
+                            bbox=Rect(col_rect.x0, y0, col_rect.x1, y1),
+                            text="",
+                            role=(
+                                "corner"
+                                if row == min_row and col == min(col_bands)
+                                else "column_header"
+                                if row == min_row
+                                else "row_header"
+                                if col == min(col_bands)
+                                else "body"
+                            ),
+                            confidence=min(0.75, float(getattr(candidate, "confidence", 1.0))),
+                        )
+                    )
+
+            for obj in layout_objects:
+                bbox = getattr(obj, "bbox")
+                if getattr(obj, "label", "") != "image" or not getattr(candidate, "bbox").contains_point(
+                    bbox.cx, bbox.cy, tol=4
+                ):
+                    continue
+                owner = min(
+                    replacements,
+                    key=lambda cell: abs(getattr(cell, "bbox").cx - bbox.cx)
+                    + abs(getattr(cell, "bbox").cy - bbox.cy),
+                )
+                owner.layout_objects.append(obj)
+
+            cells.extend(replacements)
+            split_count += 1
+        return split_count
+
+    def _stable_column_bands(
+        self,
+        cells: list[object],
+        first_body_row: int,
+        col_count: int,
+        table_bbox: Rect,
+    ) -> dict[int, Rect]:
+        bands: dict[int, Rect] = {}
+        for col in range(col_count):
+            boxes = [
+                getattr(cell, "bbox")
+                for cell in cells
+                if int(getattr(cell, "row")) >= first_body_row
+                and int(getattr(cell, "col")) == col
+                and max(1, int(getattr(cell, "colspan", 1))) == 1
+                and 1 < getattr(cell, "bbox").w < table_bbox.w * 0.60
+            ]
+            if not boxes:
+                continue
+            bands[col] = Rect(
+                float(np.median([box.x0 for box in boxes])),
+                table_bbox.y0,
+                float(np.median([box.x1 for box in boxes])),
+                table_bbox.y1,
+            )
+        return bands
+
+    def _replacement_row_ranges(
+        self,
+        cells: list[object],
+        candidate: object,
+        start_row: int,
+        end_row: int,
+    ) -> list[tuple[float, float]]:
+        bbox = getattr(candidate, "bbox")
+        boundaries = [bbox.y0]
+        for row in range(start_row + 1, end_row):
+            starts = [
+                getattr(cell, "bbox").y0
+                for cell in cells
+                if int(getattr(cell, "row")) == row
+                and cell is not candidate
+                and getattr(cell, "bbox").area > 0
+            ]
+            if not starts:
+                return []
+            boundaries.append(float(np.median(starts)))
+        boundaries.append(bbox.y1)
+        if any(right <= left for left, right in zip(boundaries, boundaries[1:])):
+            return []
+        return list(zip(boundaries, boundaries[1:]))
 
     def _insert_internal_missing_bands(
         self,
@@ -382,7 +676,7 @@ class StructurePostProcessor:
 
     def _remove_ghost_columns(self, cells: list[object], diagnostics: dict) -> None:
         col_bands = self._col_bands(cells)
-        if len(col_bands) <= 2:
+        if len(col_bands) <= 1:
             return
         widths = [rect.w for rect in col_bands.values() if rect.w > 1]
         median_w = self._median(widths, default=0.0)
@@ -398,12 +692,17 @@ class StructurePostProcessor:
             coverage = len(direct) / max(1, row_count)
             is_thin = rect.w < median_w * 0.32 or direct_med_w < median_w * 0.32
             is_empty = text_count <= max(1, int(len(direct) * 0.18))
+            is_empty_edge = (
+                bool(direct)
+                and text_count == 0
+                and (col == min(col_bands) or col == max(col_bands))
+            )
             is_orphan_edge = (
                 text_count == 0
                 and len(direct) <= max(1, int(row_count * 0.20))
                 and (col == min(col_bands) or col == max(col_bands))
             )
-            if (is_thin and is_empty and coverage >= 0.25) or is_orphan_edge:
+            if (is_thin and is_empty and coverage >= 0.25) or is_empty_edge or is_orphan_edge:
                 ghost_cols.append(col)
         if not ghost_cols:
             return
@@ -476,9 +775,9 @@ class StructurePostProcessor:
             dst.text = text
         dst.layout_objects.extend(getattr(src, "layout_objects", []))
 
-    def _reassign_text_from_ocr(self, cells: list[object], ocr_objects: list[object]) -> int:
+    def _reassign_text_from_ocr(self, cells: list[object], ocr_objects: list[object]) -> tuple[int, int]:
         if not cells or not ocr_objects:
-            return 0
+            return 0, 0
         buckets: dict[int, list[object]] = {idx: [] for idx, _ in enumerate(cells)}
         for obj in ocr_objects:
             best_idx = -1
@@ -499,14 +798,24 @@ class StructurePostProcessor:
                 buckets[best_idx].append(obj)
 
         changed = 0
+        skipped = 0
         for idx, objs in buckets.items():
             if not objs:
                 continue
             text = self._join_text(objs)
-            if text and text != str(getattr(cells[idx], "text", "")):
+            previous = str(getattr(cells[idx], "text", ""))
+            previous_units = len(re.sub(r"\s+", "", previous))
+            text_units = len(re.sub(r"\s+", "", text))
+            if not text:
+                continue
+            if previous_units > text_units:
+                skipped += 1
+                continue
+            if text != previous:
                 cells[idx].text = text
+                cells[idx].ocr_objects = list(objs)
                 changed += 1
-        return changed
+        return changed, skipped
 
     def _split_row_header_value_cells(self, cells: list[object], ocr_objects: list[object]) -> int:
         if not cells or not ocr_objects:
@@ -762,7 +1071,10 @@ class StructurePostProcessor:
             return ""
         lines = self._cluster_objects_by_y(text_objects)
         return "\n".join(
-            " ".join(str(getattr(obj, "text", "")).strip() for obj in sorted(line, key=lambda item: getattr(item, "bbox").x0))
+            join_inline_text(
+                str(getattr(obj, "text", "")).strip()
+                for obj in sorted(line, key=lambda item: getattr(item, "bbox").x0)
+            )
             for line in lines
         )
 
@@ -799,11 +1111,20 @@ class StructurePostProcessor:
         text = str(getattr(obj, "text", "")).strip()
         if not text or cb.w <= 1:
             return False
+        overlap_ratio = cb.overlap_area(bbox) / max(1.0, bbox.area)
+        center_inside = cb.contains_point(bbox.cx, bbox.cy, tol=3)
+        if center_inside and overlap_ratio >= 0.70:
+            return False
         if StructurePostProcessor._looks_like_compact_structured_value(text) and bbox.w <= cb.w * 1.08:
             return False
         if bbox.w > cb.w * 1.18:
             return True
-        return bbox.w > cb.w * 0.72 and len(text) > 18 and max(1, getattr(cell, "colspan")) == 1
+        return (
+            bbox.w > cb.w * 0.72
+            and len(text) > 18
+            and max(1, getattr(cell, "colspan")) == 1
+            and overlap_ratio < 0.55
+        )
 
     @staticmethod
     def _x_overlap_ratio(a: Rect, b: Rect) -> float:
