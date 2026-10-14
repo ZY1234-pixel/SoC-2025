@@ -1,6 +1,6 @@
 """Dump raw PaddleOCR result to check text_region format."""
 from __future__ import annotations
-import sys, os, json, cv2, numpy as np
+import sys, os, cv2, tempfile
 from pathlib import Path
 
 CODE_ROOT = Path(__file__).resolve().parent
@@ -22,7 +22,8 @@ from Code.model_integration.runtime import make_engine
 
 paths = RuntimePaths.discover()
 ensure_runtime_paths(paths)
-engine = make_engine(paths, None)
+runtime_dir = Path(tempfile.mkdtemp(prefix="docflow_debug_ocr_"))
+engine = make_engine(paths, runtime_dir)
 
 from Code.dataset import collect_samples
 

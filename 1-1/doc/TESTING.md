@@ -1,8 +1,8 @@
 # 测试说明
 
-自动测试用于检查来源完整性、原生表格数量和输出页数。视觉还原质量需要将 DOCX 渲染为 PDF 或图片后，与原图进行人工对照。
+自动测试用于检查来源完整性、原生表格数量和输出页数。视觉还原质量需要将 DOCX 或 PDF 与原图进行人工对照。
 
-以下命令都从仓库根目录执行。先按 [DEPLOYMENT.md](DEPLOYMENT.md) 配好 Python 和模型；测试 PDF 输出时还要安装 LibreOffice。
+以下命令都从仓库根目录执行。先按 [DEPLOYMENT.md](DEPLOYMENT.md) 配好 Python 和模型。
 
 ## 单元测试
 
@@ -24,10 +24,11 @@ python Code/test.py --input <输入路径> --output <输出目录> --formats <�
 |------|------|
 | `--input`, `-i` | 输入文件或目录，默认读取 `dataset/` |
 | `--output`, `-o` | 结果保存目录，默认为 `test-result/` |
-| `--formats`, `-f` | `docx`、`markdown`、`pdf`，用逗号连接 |
-| `--layout-model` | 版面模型，默认 `pp-doclayout-v3` |
+| `--formats`, `-f` | `docx`、`markdown`、`pdf`、`pdf_fidelity`，用逗号连接 |
+| `--no-formula` | 关闭公式识别，跳过 PP-FormulaNet |
 | `--pdf-dpi` | 输入 PDF 转图片时使用的 DPI，默认 `200` |
-| `--no-debug-vis` | 不保存版面框和阅读顺序图 |
+| `--save-stages` | 额外保存 recognition、analysis 和 render plan JSON |
+| `--save-debug` | 额外保存版面调试图和原始模型结果 |
 
 首次验证环境时使用单个样本：
 
@@ -41,19 +42,29 @@ python Code/test.py --input dataset/exam_paper_02.png --output test-result --for
 python Code/test.py --input dataset --output test-result --formats docx,markdown,pdf
 ```
 
-PDF 输出会调用 LibreOffice。程序随后检查 PDF 页数；某个样本超过源页数时，本次运行会记为失败。
+PDF 输出由 PyMuPDF 直接按检测框坐标生成，源页面与输出页面一一对应。
+
+高保真 PDF：
+
+```bash
+python Code/test.py --input dataset --output test-result --formats pdf_fidelity
+```
+
+`pdf_fidelity` 保留原始页面图像作为视觉底图，并叠加不可见文本层，输出 `<样本名>.fidelity.pdf`。
 
 ## 运行摘要与阶段数据
 
 `run_manifest.json` 汇总样本数量、页数、失败列表、原生表格数量和布局类型。批量运行后应先检查该文件；`failures` 非空表示存在执行失败的样本。
 
-每个样本有三份阶段数据：
+默认只输出最终文件和 `run_manifest.json`。需要排查问题时，使用 `--save-stages` 保存三份阶段数据：
 
-- `<样本名>.recognition.json`：`pages[].items` 是 OCR 和版面模型留下的原始证据。
-- `<样本名>.json`：`pages[].elements` 是合并后的段落、标题、表格和媒体块。
-- `<样本名>.render_plan.json`：`pages[].sections` 记录分栏或网格结构，`pages[].fit_scale` 是页面缩放结果。
+- `stages/<样本名>.recognition.json`：OCR 和版面模型留下的原始证据。
+- `stages/<样本名>.analysis.json`：合并后的段落、标题、表格和媒体块。
+- `stages/<样本名>.render_plan.json`：分栏或网格结构及页面缩放结果。
 
-启用 debug 图后，`debug/page_0001.layout_ocr.jpg` 显示检测框，`debug/page_0001.reading_order_columns.jpg` 显示模型顺序。这两张图用于排查识别遗漏、栏位判断和跨栏范围错误。
+使用 `--save-debug` 后，`debug/` 中会生成版面框、阅读顺序和原始模型结果，用于排查识别遗漏、栏位判断和跨栏范围错误。
+
+DOCX 中的有效公式应显示为可编辑的 Word 公式对象；检查 `document.xml` 时对应 `m:oMath`。畸形 LaTeX 会保留为文本，公式区域不应再输出为图片。
 
 ## 视觉验收
 

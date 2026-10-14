@@ -22,3 +22,6 @@ venv/
 /Code/models_openvino/
 /Code/models_openvino.zip*
 /Code/wheels/
+
+# Local font binaries are used only to regenerate fixed character metrics
+/fonts/

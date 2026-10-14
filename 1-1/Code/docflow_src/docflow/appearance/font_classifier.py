@@ -91,7 +91,7 @@ class FontClassifier:
 
     def __init__(
         self,
-        checkpoint_path: str,
+        model_path: str | Path | None = None,
         device: str = "auto",
         height: int = 48,
         width: int = 768,
@@ -104,7 +104,7 @@ class FontClassifier:
         contrast: float = 1.0,
         invert: bool = False,
     ) -> None:
-        self.checkpoint_path = self._resolve_checkpoint(checkpoint_path)
+        self.model_path = self._resolve_model(model_path)
         self.device_name = device
         self.temperature = max(float(temperature), 1e-6)
         self.reject_threshold = float(reject_threshold)
@@ -116,24 +116,18 @@ class FontClassifier:
         self._model = None
 
     @staticmethod
-    def _resolve_checkpoint(checkpoint_path: str) -> Path:
-        checkpoint_text = str(checkpoint_path or "").strip()
-        candidates = []
-        if checkpoint_text:
-            raw = Path(checkpoint_text).expanduser()
-            candidates.append(raw if raw.is_absolute() else Path.cwd() / raw)
-        candidates.append(Path(__file__).resolve().parents[3] / "models_openvino" / "font_openvino" / "mobilenetv3.xml")
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate.resolve()
-        raise FileNotFoundError(f"font checkpoint not found: {checkpoint_path}")
+    def _resolve_model(model_path: str | Path | None) -> Path:
+        path = Path(model_path or Path(__file__).resolve().parents[3] / "models_openvino" / "font_openvino" / "mobilenetv3.xml")
+        if not path.is_file():
+            raise FileNotFoundError(f"OpenVINO font model not found: {path}")
+        return path.resolve()
 
     def _ensure_model(self):
         if self._model is not None:
             return self._model
         from docflow.inference import OpenVINOInferSession
 
-        self._model = OpenVINOInferSession(self.checkpoint_path)
+        self._model = OpenVINOInferSession(self.model_path)
         return self._model
 
     def predict_image(self, image: Image.Image) -> FontPrediction:

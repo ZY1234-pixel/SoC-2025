@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import replace
 from statistics import median
@@ -34,6 +35,7 @@ from docflow.model.stages import (
     TextSpan,
     TextStructure,
     TypographicRole,
+    inline_formula_marker,
 )
 
 
@@ -59,11 +61,78 @@ _TEXT_CATEGORIES = {
 }
 _FURNITURE = {"header", "footer", "page_number"}
 _LIST_MARKER_RE = re.compile(
-    r"^\s*(?:[\u2022\u25cf\u25aa\u25e6]|[\u2460-\u2473]|(?:\(?\d{1,3}\)?|[A-Za-z])[.)\u3001\uff0e])"
+    r"^\s*(?:[\u2022\u25cf\u25aa\u25e6]|[\u2460-\u2473]|(?:\(?\d{1,3}\)?|[A-Za-z])[.)\u3001\uff0e](?!\d))"
 )
 _INLINE_LIST_MARKER_RE = re.compile(
-    r"[;\uff1b]\s*(?:[\u2460-\u2473]|(?:\(?\d{1,3}\)?|[A-Za-z])[.)\u3001\uff0e])"
+    r"[;\uff1b]\s*(?:[\u2460-\u2473]|(?:\(?\d{1,3}\)?|[A-Za-z])[.)\u3001\uff0e](?!\d))"
 )
+_PARAGRAPH_CONTINUATION_WORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "be",
+    "because",
+    "before",
+    "between",
+    "but",
+    "by",
+    "can",
+    "could",
+    "during",
+    "for",
+    "from",
+    "if",
+    "in",
+    "into",
+    "is",
+    "may",
+    "might",
+    "must",
+    "not",
+    "of",
+    "on",
+    "or",
+    "over",
+    "should",
+    "than",
+    "that",
+    "the",
+    "to",
+    "under",
+    "was",
+    "were",
+    "while",
+    "who",
+    "whose",
+    "will",
+    "with",
+    "within",
+    "without",
+    "would",
+}
+_LATEX_GREEK_SYMBOLS = {
+    "alpha": "α",
+    "beta": "β",
+    "gamma": "γ",
+    "delta": "δ",
+    "epsilon": "ε",
+    "lambda": "λ",
+    "mu": "μ",
+    "pi": "π",
+    "rho": "ρ",
+    "sigma": "σ",
+    "tau": "τ",
+    "phi": "φ",
+    "psi": "ψ",
+    "omega": "ω",
+    "Delta": "Δ",
+    "Sigma": "Σ",
+    "Phi": "Φ",
+    "Psi": "Ψ",
+    "Omega": "Ω",
+}
 
 
 def _join_text_segments(left: str, right: str) -> str:
@@ -77,6 +146,21 @@ def _join_text_segments(left: str, right: str) -> str:
         or previous in ",.;:!?)%]”’" and current.isalnum()
     ) else ""
     return left + separator + right
+
+
+def _text_width_units(text: str) -> float:
+    value = str(text or "")
+    if not value:
+        return 0.0
+    total = 0.0
+    for char in value:
+        if char.isspace():
+            total += 0.35
+        elif ord(char) >= 0x2E80 or unicodedata.east_asian_width(char) in {"F", "W"}:
+            total += 1.0
+        else:
+            total += 0.50
+    return total
 
 
 class DocumentAnalyzer:
@@ -214,6 +298,8 @@ class DocumentAnalyzer:
                 [by_id[source_id] for source_id in captions[item.evidence_id]],
                 formula_numbers.get(item.evidence_id),
                 page.page_index,
+                page.width_px,
+                page.height_px,
                 page_image,
             )
             elements.append(element)
@@ -228,7 +314,152 @@ class DocumentAnalyzer:
                 )
 
         elements.sort(key=lambda item: item.model_order)
+        elements = list(self._merge_continuation_paragraphs(elements))
+        elements = list(self._split_body_text_paragraphs(elements))
         return AnalysisPage(page.page_index, page.width_px, page.height_px, tuple(elements), tuple(diagnostics))
+
+    @classmethod
+    def _split_body_text_paragraphs(cls, elements: list[SemanticElement]) -> tuple[SemanticElement, ...]:
+        split: list[SemanticElement] = []
+        for element in elements:
+            if (
+                element.kind != "paragraph_group"
+                or len(element.text_rows) < 2
+                or element.text_structure.preserve_source_lines
+                or element.text_structure.is_list
+                or element.text_structure.tabular_rows
+                or element.text_structure.orientation != "horizontal"
+            ):
+                split.append(element)
+                continue
+            lines = [
+                {
+                    "row": row,
+                    "text": row.text.strip(),
+                    "left": row.bbox.x1,
+                    "top": row.bbox.y1,
+                    "right": row.bbox.x2,
+                    "bottom": row.bbox.y2,
+                    "center_y": (row.bbox.y1 + row.bbox.y2) / 2.0,
+                    "height": row.bbox.height,
+                    "bbox": (row.bbox.x1, row.bbox.y1, row.bbox.x2, row.bbox.y2),
+                    "is_list": bool(_LIST_MARKER_RE.match(row.text.strip())),
+                }
+                for row in element.text_rows
+                if row.text.strip() and row.bbox.width > 0 and row.bbox.height > 0
+            ]
+            groups = cls._group_logical_lines(lines, max(element.bbox.width, 1.0), element.bbox)
+            if len(groups) < 2:
+                split.append(element)
+                continue
+            for index, group in enumerate(groups):
+                bbox = Rect(
+                    min(line["left"] for line in group),
+                    min(line["top"] for line in group),
+                    max(line["right"] for line in group),
+                    max(line["bottom"] for line in group),
+                )
+                text = ""
+                for line in group:
+                    text = _join_text_segments(text, line["text"])
+                payload = dict(element.payload)
+                payload["paragraph_break_before"] = index > 0
+                payload["typographic_group"] = element.element_id
+                payload["primary_bbox"] = (bbox.x1, bbox.y1, bbox.x2, bbox.y2)
+                split.append(
+                    replace(
+                        element,
+                        element_id=f"{element.element_id}_p{index + 1}",
+                        bbox=bbox,
+                        model_order=element.model_order + index * 0.001,
+                        text=text,
+                        payload=payload,
+                        text_structure=replace(
+                            element.text_structure,
+                            preserve_source_lines=False,
+                            hanging_indent_px=0.0,
+                        ),
+                        content_bbox=bbox,
+                        text_rows=tuple(line["row"] for line in group),
+                    )
+                )
+        return tuple(split)
+
+    @classmethod
+    def _merge_continuation_paragraphs(cls, elements: list[SemanticElement]) -> tuple[SemanticElement, ...]:
+        merged: list[SemanticElement] = []
+        for element in elements:
+            if merged and cls._continues_paragraph(merged[-1], element):
+                merged[-1] = cls._merge_paragraph_elements(merged[-1], element)
+            else:
+                merged.append(element)
+        return tuple(merged)
+
+    @staticmethod
+    def _continues_paragraph(previous: SemanticElement, current: SemanticElement) -> bool:
+        if previous.kind != "paragraph_group" or current.kind != "paragraph_group":
+            return False
+        if current.payload.get("paragraph_break_before"):
+            return False
+        if previous.text_structure.is_list or current.text_structure.is_list:
+            return False
+        if previous.text_structure.orientation != current.text_structure.orientation:
+            return False
+        left_text = previous.text.strip()
+        right_text = current.text.strip()
+        if not left_text or not right_text or _LIST_MARKER_RE.match(right_text):
+            return False
+        if re.search(r"[.!?。！？][\"'”’」』）)]*$", left_text):
+            return False
+
+        overlap = max(0.0, min(previous.bbox.x2, current.bbox.x2) - max(previous.bbox.x1, current.bbox.x1))
+        if overlap / max(min(previous.bbox.width, current.bbox.width), 1.0) < 0.60:
+            return False
+
+        row_heights = [row.bbox.height for row in previous.text_rows if row.bbox.height > 0]
+        row_tops = [row.bbox.y1 for row in previous.text_rows]
+        line_height = median(row_heights) if row_heights else max(previous.bbox.height, 1.0)
+        line_pitch = median(right - left for left, right in zip(row_tops, row_tops[1:])) if len(row_tops) >= 2 else line_height * 1.2
+        gap = current.bbox.y1 - previous.bbox.y2
+        if gap < -line_height * 0.25 or gap > max(line_height * 1.5, line_pitch * 1.15):
+            return False
+
+        if re.search(r"[,;:，；：、(\[{]$", left_text):
+            return True
+        last_word = re.search(r"([A-Za-z]+)\s*$", left_text)
+        if last_word and last_word.group(1).lower() in _PARAGRAPH_CONTINUATION_WORDS:
+            return True
+        return right_text[0].islower() and left_text[-1].isalnum()
+
+    @classmethod
+    def _merge_paragraph_elements(cls, previous: SemanticElement, current: SemanticElement) -> SemanticElement:
+        bbox = cls._union((previous.bbox, current.bbox))
+        content_boxes = tuple(
+            value for value in (previous.content_bbox, current.content_bbox) if value is not None
+        )
+        payload = dict(previous.payload)
+        payload["confidence"] = min(previous.payload.get("confidence", 1.0), current.payload.get("confidence", 1.0))
+        payload["primary_bbox"] = (bbox.x1, bbox.y1, bbox.x2, bbox.y2)
+        payload["embedded_source_ids"] = tuple(
+            dict.fromkeys(
+                tuple(previous.payload.get("embedded_source_ids") or ())
+                + tuple(current.payload.get("embedded_source_ids") or ())
+            )
+        )
+        payload["inline_formulas"] = tuple(previous.payload.get("inline_formulas") or ()) + tuple(
+            current.payload.get("inline_formulas") or ()
+        )
+        return replace(
+            previous,
+            bbox=bbox,
+            source_ids=tuple(dict.fromkeys((*previous.source_ids, *current.source_ids))),
+            text=_join_text_segments(previous.text, current.text),
+            child_ids=tuple(dict.fromkeys((*previous.child_ids, *current.child_ids, current.element_id))),
+            payload=payload,
+            text_structure=replace(previous.text_structure, preserve_source_lines=False, hanging_indent_px=0.0),
+            content_bbox=cls._union(content_boxes) if content_boxes else None,
+            text_rows=previous.text_rows + current.text_rows,
+        )
 
     def _make_element(
         self,
@@ -237,15 +468,45 @@ class DocumentAnalyzer:
         captions: list[RecognitionItem],
         formula_number: Optional[str],
         page_index: int,
+        page_width_px: int,
+        page_height_px: int,
         page_image: Optional[Image.Image] = None,
     ) -> SemanticElement:
         kind = self._kind(primary)
+        footer_table = kind == "table_group" and self._is_page_furniture_table(
+            primary,
+            page_width_px,
+            page_height_px,
+        )
+        if footer_table:
+            kind = "footer"
         visible_lines = self._visible_lines(primary)
+        if kind == "header" and self._is_substantive_header(primary, visible_lines, page_height_px):
+            kind = "paragraph_group"
         line_boxes = tuple(bbox for _line, _value, bbox in visible_lines if bbox is not None)
         visual_rows = self._visual_row_boxes(line_boxes)
         text_rows = self._text_rows(visible_lines, visual_rows)
-        text = "" if kind in {"figure_group", "table_group", "equation_group"} else self._text(primary)
-        if text and len(text_rows) == 1:
+        inline_formulas = tuple(
+            sorted(
+                (
+                    item
+                    for item in related[1:]
+                    if item.raw_type == "inline_formula" and item.latex
+                ),
+                key=lambda item: (item.bbox.y1, item.bbox.x1),
+            )
+        )
+        if inline_formulas:
+            text_rows = self._merge_inline_formulas(text_rows, inline_formulas)
+        if footer_table:
+            text = self._table_text(primary.html)
+        else:
+            text = "" if kind in {"figure_group", "table_group", "equation_group"} else self._text(primary)
+        if inline_formulas and text_rows:
+            text = ""
+            for row in text_rows:
+                text = _join_text_segments(text, row.text)
+        elif text and len(text_rows) == 1:
             text = text_rows[0].text
         if kind == "heading":
             text = self._normalize_heading(text)
@@ -259,7 +520,7 @@ class DocumentAnalyzer:
         payload = {
             "confidence": primary.confidence,
             "image_base64": primary.image_base64,
-            "html": primary.html,
+            "html": primary.html if kind == "table_group" else None,
             "latex": primary.latex,
             "caption": self._merge_caption_text(captions),
             "caption_line_heights_px": tuple(
@@ -275,6 +536,14 @@ class DocumentAnalyzer:
                 item.evidence_id
                 for item in related[1:]
                 if item not in captions and not self._is_formula_number(item)
+            ),
+            "inline_formulas": tuple(
+                {
+                    "latex": item.latex,
+                    "image_base64": item.image_base64,
+                    "bbox": (item.bbox.x1, item.bbox.y1, item.bbox.x2, item.bbox.y2),
+                }
+                for item in inline_formulas
             ),
         }
         payload.update(self._infer_visual_style(primary))
@@ -301,9 +570,9 @@ class DocumentAnalyzer:
                 else None
             )
         payload["primary_bbox"] = (primary.bbox.x1, primary.bbox.y1, primary.bbox.x2, primary.bbox.y2)
-        if primary.category == "table" and not primary.html and not primary.attributes.get("table_cells"):
+        if kind == "table_group" and not primary.html and not primary.attributes.get("table_cells"):
             payload["structure_missing"] = True
-        if primary.category == "table" and primary.html:
+        if kind == "table_group" and primary.html:
             soup = BeautifulSoup(primary.html, "html.parser")
             rows = soup.find_all("tr")
             row_count = len(rows)
@@ -317,6 +586,8 @@ class DocumentAnalyzer:
             source_attributes = primary.attributes.get("source_attributes") or {}
             if source_attributes.get("table_content_fit"):
                 payload["table_content_fit"] = True
+            if source_attributes.get("table_auto_height"):
+                payload["table_auto_height"] = True
             cells = primary.attributes.get("table_cells") or ()
             row_ratios = self._table_axis_ratios(cells, row_count, "row", "rowspan", 1, 3)
             column_edges = self._table_column_edges(cells, column_count)
@@ -332,6 +603,17 @@ class DocumentAnalyzer:
             cell_styles = self._table_cell_styles(cells, column_edges, table_image)
             if cell_styles:
                 payload["table_cell_styles"] = cell_styles
+            paragraph_html = self._table_html_with_paragraphs(
+                primary.html,
+                cells,
+                column_edges,
+                cell_styles,
+            )
+            if paragraph_html:
+                payload["html"] = paragraph_html
+            cell_geometry = self._table_cell_geometry(cells)
+            if cell_geometry:
+                payload["table_cell_geometry"] = cell_geometry
             payload["table_row_styles"] = infer_table_row_fills(primary.image_base64, row_count, row_ratios)
             payload["table_rule_style"] = infer_table_rule_style(primary.image_base64)
         return SemanticElement(
@@ -346,6 +628,34 @@ class DocumentAnalyzer:
             content_bbox=content_bbox,
             text_rows=text_rows,
         )
+
+    @staticmethod
+    def _table_text(html_text: str | None) -> str:
+        soup = BeautifulSoup(str(html_text or ""), "html.parser")
+        table = soup.find("table")
+        if table is None:
+            return ""
+        return " ".join(
+            text
+            for text in (cell.get_text(" ", strip=True) for cell in table.find_all(["td", "th"]))
+            if text
+        )
+
+    @classmethod
+    def _is_page_furniture_table(cls, item: RecognitionItem, page_width: int, page_height: int) -> bool:
+        if not item.html or page_width <= 0 or page_height <= 0:
+            return False
+        bbox = item.bbox
+        if bbox.y1 < page_height * 0.84 or bbox.height > page_height * 0.20:
+            return False
+        soup = BeautifulSoup(str(item.html), "html.parser")
+        table = soup.find("table")
+        if table is None:
+            return False
+        cells = table.find_all(["td", "th"])
+        texts = [cell.get_text(" ", strip=True) for cell in cells]
+        texts = [text for text in texts if text]
+        return 0 < len(texts) <= 4 and len(cells) <= 8
 
     @staticmethod
     def _load_page_image(path: Optional[str], page_index: int) -> Optional[Image.Image]:
@@ -588,7 +898,7 @@ class DocumentAnalyzer:
                 (
                     kept
                     for kept in canonical
-                    if kept.category == item.category
+                    if self._duplicate_categories(kept, item)
                     and self._coverage(kept.bbox, item.bbox) >= 0.85
                     and self._same_content(kept, item)
                 ),
@@ -616,6 +926,23 @@ class DocumentAnalyzer:
             )
         canonical.sort(key=lambda item: item.model_order)
         return canonical, duplicate_children, diagnostics
+
+    @staticmethod
+    def _duplicate_categories(left: RecognitionItem, right: RecognitionItem) -> bool:
+        if left.category == right.category:
+            return True
+        return {left.category, right.category} == {"header", "text"}
+
+    @staticmethod
+    def _is_substantive_header(primary: RecognitionItem, visible_lines, page_height_px: int) -> bool:
+        if primary.raw_type == "header_image":
+            return False
+        texts = [str(text).strip() for _line, text, _bbox in visible_lines if str(text).strip()]
+        return (
+            len(texts) >= 3
+            and sum(len(text) for text in texts) >= 80
+            and primary.bbox.height >= page_height_px * 0.04
+        )
 
     @staticmethod
     def _same_content(left: RecognitionItem, right: RecognitionItem) -> bool:
@@ -745,7 +1072,14 @@ class DocumentAnalyzer:
         for page in pages:
             scale = 841.89 / max(page.width_px, page.height_px)
             for element in page.elements:
-                if element.kind in {"figure_group", "table_group", "equation_group"}:
+                if element.kind in {
+                    "figure_group",
+                    "table_group",
+                    "equation_group",
+                    "header",
+                    "footer",
+                    "page_number",
+                }:
                     continue
                 content_bbox = element.content_bbox or element.bbox
                 line_count = max(len(element.text_rows) or len(element.payload.get("lines") or ()), 1)
@@ -797,11 +1131,35 @@ class DocumentAnalyzer:
                     if line_heights:
                         source_height = min(source_height, median(line_heights) * 1.2)
                     raw_size = source_height * scale / 1.05
+                if element.text_structure.orientation != "vertical":
+                    width_size = self._line_width_font_size(element, scale)
+                    if width_size is not None:
+                        raw_size = min(raw_size, width_size)
                 raw_size = round(max(raw_size, 1.0) * 2.0) / 2.0
                 base = "heading" if element.kind == "heading" else "caption" if element.kind == "caption" else "body"
                 font = element.payload.get("font_family") or ("黑体" if base == "heading" else "宋体")
                 color = element.payload.get("text_color") or "#000000"
                 samples.append((element, raw_size, base, font, color, element.payload.get("stroke_ratio")))
+
+        typographic_sizes: dict[str, list[float]] = {}
+        for element, size, _base, _font, _color, _stroke in samples:
+            group = element.payload.get("typographic_group")
+            if group:
+                typographic_sizes.setdefault(str(group), []).append(size)
+        if typographic_sizes:
+            samples = [
+                (
+                    element,
+                    median(typographic_sizes[str(element.payload["typographic_group"])])
+                    if element.payload.get("typographic_group") in typographic_sizes
+                    else size,
+                    base,
+                    font,
+                    color,
+                    stroke,
+                )
+                for element, size, base, font, color, stroke in samples
+            ]
 
         body_strokes = [
             float(stroke_ratio)
@@ -933,6 +1291,16 @@ class DocumentAnalyzer:
         return tuple(roles), assignments
 
     @staticmethod
+    def _line_width_font_size(element: SemanticElement, source_scale: float) -> float | None:
+        sizes = []
+        for row in element.text_rows:
+            units = _text_width_units(row.text)
+            if units < 1.5 or row.bbox.width <= 0:
+                continue
+            sizes.append(row.bbox.width * source_scale / units)
+        return median(sizes) if sizes else None
+
+    @staticmethod
     def _area(rect: Rect) -> float:
         return max(rect.x2 - rect.x1, 0.0) * max(rect.y2 - rect.y1, 0.0)
 
@@ -968,6 +1336,19 @@ class DocumentAnalyzer:
                 x1, y1, x2, y2 = map(float, cell["bbox"][:4])
             except (KeyError, TypeError, ValueError, IndexError):
                 continue
+            text_boxes = []
+            for obj in cell.get("ocr_objects") or ():
+                try:
+                    tx1, ty1, tx2, ty2 = map(float, obj["bbox"][:4])
+                except (KeyError, TypeError, ValueError, IndexError):
+                    continue
+                if tx2 > tx1 and ty2 > ty1 and str(obj.get("text") or "").strip():
+                    text_boxes.append((tx1, tx2))
+            if text_boxes:
+                text_left = min(box[0] for box in text_boxes)
+                text_right = max(box[1] for box in text_boxes)
+                if (text_right - text_left) >= (x2 - x1) * 0.60:
+                    x1, x2 = text_left, text_right
             if 0 <= column < count and x2 > x1 and y2 > y1:
                 columns[column].append((x1, x2))
         if not columns or not all(columns):
@@ -990,6 +1371,9 @@ class DocumentAnalyzer:
         if not column_edges:
             return ()
         styles = []
+        column_samples = {}
+        column_votes = {}
+        formula_columns = set()
         for cell in cells:
             try:
                 row = int(cell.get("row", 0))
@@ -1002,14 +1386,14 @@ class DocumentAnalyzer:
             for obj in cell.get("ocr_objects") or ():
                 try:
                     if str(obj.get("text") or "").strip():
-                        x1, _y1, x2, _y2 = map(float, obj["bbox"][:4])
-                        if x2 > x1:
-                            text_boxes.append((x1, x2))
+                        x1, y1, x2, y2 = map(float, obj["bbox"][:4])
+                        if x2 > x1 and y2 > y1:
+                            text_boxes.append((x1, y1, x2, y2))
                 except (KeyError, TypeError, ValueError, IndexError):
                     continue
             if text_boxes:
                 text_left = min(box[0] for box in text_boxes)
-                text_right = max(box[1] for box in text_boxes)
+                text_right = max(box[2] for box in text_boxes)
             else:
                 try:
                     text_left, text_right = float(cell["bbox"][0]), float(cell["bbox"][2])
@@ -1017,17 +1401,23 @@ class DocumentAnalyzer:
                     continue
             left_gap, right_gap = max(text_left - left, 0.0), max(right - text_right, 0.0)
             width = max(right - left, 1.0)
-            if abs(left_gap - right_gap) <= width * 0.12:
-                alignment = "center"
-            elif right_gap <= width * 0.06 and left_gap >= width * 0.12:
-                alignment = "right"
-            else:
-                alignment = "left"
-            if any(
+            column_samples.setdefault(column, []).extend(
+                (box, left, right, width)
+                for box in text_boxes
+            )
+            alignment = DocumentAnalyzer._table_text_alignment(
+                text_boxes,
+                (left, right),
+                width,
+            )
+            has_formula = any(
                 str(obj.get("label") or "") in {"display_formula", "equation", "formula", "inline_formula"}
                 for obj in cell.get("layout_objects") or ()
-            ):
+            )
+            if has_formula:
                 alignment = "center"
+                formula_columns.add(column)
+            column_votes.setdefault(column, Counter())[alignment] += 1
             role = str(cell.get("role") or "body")
             stroke_ratio = None
             if table_image is not None:
@@ -1039,6 +1429,23 @@ class DocumentAnalyzer:
                 except (KeyError, TypeError, ValueError):
                     pass
             styles.append((row, column, alignment, role, stroke_ratio))
+        column_consensus = {}
+        for column, samples in column_samples.items():
+            alignment = DocumentAnalyzer._table_column_alignment(samples)
+            if alignment:
+                column_consensus[column] = alignment
+            elif column in column_votes:
+                votes = column_votes[column]
+                alignment, count = votes.most_common(1)[0]
+                if count / sum(votes.values()) >= 0.60:
+                    column_consensus[column] = alignment
+        for column in formula_columns:
+            column_consensus[column] = "center"
+        if column_consensus:
+            styles = [
+                (row, column, column_consensus.get(column, alignment), role, stroke)
+                for row, column, alignment, role, stroke in styles
+            ]
         body_strokes = [stroke for _row, _column, _alignment, role, stroke in styles if role not in {"corner", "column_header"} and stroke is not None]
         regular = median(body_strokes) if len(body_strokes) >= 3 else None
         bold_candidates = {
@@ -1069,6 +1476,577 @@ class DocumentAnalyzer:
             )
             for row, column, alignment, role, stroke in styles
         )
+
+    @staticmethod
+    def _table_cell_geometry(cells):
+        """Store scale-independent vertical alignment and padding ratios."""
+        geometry = []
+        for cell in cells:
+            try:
+                row = int(cell.get("row", 0))
+                column = int(cell.get("col", 0))
+                x1, y1, x2, y2 = map(float, cell["bbox"][:4])
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
+            if x2 <= x1 or y2 <= y1:
+                continue
+            boxes = []
+            for obj in [*(cell.get("ocr_objects") or ()), *(cell.get("layout_objects") or ())]:
+                if str(obj.get("label") or "") == "table":
+                    continue
+                try:
+                    ox1, oy1, ox2, oy2 = map(float, obj["bbox"][:4])
+                except (KeyError, TypeError, ValueError, IndexError):
+                    continue
+                if ox2 > ox1 and oy2 > oy1:
+                    boxes.append((ox1, oy1, ox2, oy2))
+            if not boxes:
+                continue
+            content_y1 = min(box[1] for box in boxes)
+            content_y2 = max(box[3] for box in boxes)
+            content_x1 = min(box[0] for box in boxes)
+            content_x2 = max(box[2] for box in boxes)
+            height = y2 - y1
+            width = x2 - x1
+            top = max(content_y1 - y1, 0.0) / height
+            bottom = max(y2 - content_y2, 0.0) / height
+            start = max(content_x1 - x1, 0.0) / width
+            end = max(x2 - content_x2, 0.0) / width
+            if top <= 0.05:
+                vertical = "top"
+            elif bottom <= 0.05:
+                vertical = "bottom"
+            elif abs(top - bottom) <= 0.12:
+                vertical = "center"
+            elif top <= 0.15:
+                vertical = "top"
+            elif bottom <= 0.15:
+                vertical = "bottom"
+            else:
+                vertical = "center"
+            geometry.append(
+                (
+                    row,
+                    column,
+                    vertical,
+                    round(min(top, 0.25), 4),
+                    round(min(bottom, 0.25), 4),
+                    round(min(start, 0.25), 4),
+                    round(min(end, 0.25), 4),
+                )
+            )
+        return tuple(geometry)
+
+    @staticmethod
+    def _table_text_alignment(text_boxes, column_span, width: float) -> str:
+        if len(text_boxes) >= 2:
+            ordered = sorted(text_boxes, key=lambda box: (box[1] + box[3]) / 2.0)
+            heights = [box[3] - box[1] for box in ordered]
+            tolerance = max(8.0, median(heights) * 0.65)
+            lines = []
+            for box in ordered:
+                center_y = (box[1] + box[3]) / 2.0
+                if not lines or abs(center_y - median((item[1] + item[3]) / 2.0 for item in lines[-1])) > tolerance:
+                    lines.append([box])
+                else:
+                    lines[-1].append(box)
+            if len(lines) >= 2:
+                lefts = [min(box[0] for box in line) for line in lines]
+                rights = [max(box[2] for box in line) for line in lines]
+                centers = [(left + right) / 2.0 for left, right in zip(lefts, rights)]
+                deviations = {
+                    "left": median(abs(value - median(lefts)) for value in lefts),
+                    "right": median(abs(value - median(rights)) for value in rights),
+                    "center": median(abs(value - median(centers)) for value in centers),
+                }
+                competing = min(deviations["right"], deviations["center"])
+                if deviations["left"] <= max(3.0, competing * 1.5):
+                    return "left"
+                ordered_deviations = sorted(deviations.items(), key=lambda item: item[1])
+                best, best_value = ordered_deviations[0]
+                second_value = ordered_deviations[1][1]
+                if best_value <= max(second_value * 0.8, 1.0):
+                    return best
+
+        left, right = column_span
+        text_left = min(box[0] for box in text_boxes) if text_boxes else left
+        text_right = max(box[2] for box in text_boxes) if text_boxes else right
+        left_gap, right_gap = max(text_left - left, 0.0), max(right - text_right, 0.0)
+        if abs(left_gap - right_gap) <= width * 0.12:
+            return "center"
+        if right_gap <= width * 0.06 and left_gap >= width * 0.12:
+            return "right"
+        return "left"
+
+    @staticmethod
+    def _table_column_alignment(samples) -> Optional[str]:
+        if len(samples) < 2:
+            return None
+        left_offsets = []
+        right_offsets = []
+        center_offsets = []
+        for box, cell_left, cell_right, cell_width in samples:
+            x1, _y1, x2, _y2 = box
+            left_offsets.append(max(x1 - cell_left, 0.0) / cell_width)
+            right_offsets.append(max(cell_right - x2, 0.0) / cell_width)
+            center_offsets.append(((x1 + x2) / 2.0 - (cell_left + cell_right) / 2.0) / cell_width)
+
+        def deviation(values):
+            center = median(values)
+            return median(abs(value - center) for value in values)
+
+        candidates = {
+            "left": deviation(left_offsets) + max(median(left_offsets) - 0.25, 0.0) * 0.5,
+            "center": deviation(center_offsets) + abs(median(center_offsets)) * 0.5,
+            "right": deviation(right_offsets) + max(median(right_offsets) - 0.25, 0.0) * 0.5,
+        }
+        ordered = sorted(candidates.items(), key=lambda item: item[1])
+        best, best_score = ordered[0]
+        second_score = ordered[1][1]
+        if best_score <= max(second_score * 0.75, 0.02):
+            return best
+        return None
+
+    @classmethod
+    def _table_html_with_paragraphs(cls, html_text, cells, column_edges, cell_styles):
+        if not html_text or not cells or not column_edges:
+            return None
+        soup = BeautifulSoup(str(html_text), "html.parser")
+        table = soup.find("table")
+        if table is None:
+            return None
+        by_position = {
+            (int(cell.get("row", 0)), int(cell.get("col", 0))): cell
+            for cell in cells
+        }
+        styles = {
+            (int(row), int(column)): (str(alignment), bool(bold))
+            for row, column, alignment, bold in cell_styles
+        }
+        changed = False
+        for cell_node, row, column, row_span, column_span in cls._table_nodes_with_positions(table):
+            cell = by_position.get((row, column))
+            if not cell:
+                continue
+            try:
+                span = (column_edges[column], column_edges[column + column_span])
+            except IndexError:
+                continue
+            style = styles.get((row, column), ("center" if cell_node.name == "th" else "left", cell_node.name == "th"))
+            paragraphs = cls._table_cell_paragraphs(cell, span, style)
+            if not paragraphs:
+                continue
+            visual_nodes = []
+            for visual in cell_node.find_all(["img", "span"], recursive=True):
+                classes = visual.get("class") or ()
+                if visual.name != "img" and "docflow-formula" not in classes:
+                    continue
+                bbox = cls._table_node_bbox(visual)
+                visual.extract()
+                visual_nodes.append((bbox, visual))
+            blocks = [
+                (paragraph.get("bbox") or (float("inf"),) * 4, "paragraph", paragraph)
+                for paragraph in paragraphs
+            ]
+            blocks.extend(
+                (bbox or (float("inf"),) * 4, "visual", node)
+                for bbox, node in visual_nodes
+            )
+            blocks.sort(key=lambda item: (float(item[0][1]), float(item[0][0])))
+            cell_node.clear()
+            for _bbox, kind, value in blocks:
+                if kind == "visual":
+                    cell_node.append(value)
+                    continue
+                paragraph = soup.new_tag("p")
+                paragraph["data-align"] = str(value["alignment"])
+                paragraph["data-space-before"] = str(value["space_before"])
+                if value["bold"]:
+                    paragraph["data-bold"] = "true"
+                if value.get("bbox"):
+                    paragraph["data-bbox"] = ",".join(str(round(float(number), 3)) for number in value["bbox"])
+                lines = tuple(value.get("lines") or (value["text"],))
+                if len(lines) == 1:
+                    paragraph.string = str(lines[0])
+                else:
+                    for index, line in enumerate(lines):
+                        if index:
+                            paragraph.append(soup.new_tag("br"))
+                        paragraph.append(str(line))
+                cell_node.append(paragraph)
+            changed = True
+        return str(soup) if changed else None
+
+    @staticmethod
+    def _table_nodes_with_positions(table):
+        occupied = set()
+        nodes = []
+        for row_index, row in enumerate(table.find_all("tr")):
+            column_index = 0
+            for node in row.find_all(["td", "th"], recursive=False):
+                while (row_index, column_index) in occupied:
+                    column_index += 1
+                try:
+                    row_span = max(int(node.get("rowspan", 1)), 1)
+                    column_span = max(int(node.get("colspan", 1)), 1)
+                except (TypeError, ValueError):
+                    row_span = column_span = 1
+                nodes.append((node, row_index, column_index, row_span, column_span))
+                for occupied_row in range(row_index, row_index + row_span):
+                    for occupied_column in range(column_index, column_index + column_span):
+                        if (occupied_row, occupied_column) != (row_index, column_index):
+                            occupied.add((occupied_row, occupied_column))
+                column_index += column_span
+        return nodes
+
+    @staticmethod
+    def _table_node_bbox(node):
+        value = node.get("data-bbox") or node.get("data-page-bbox") or ""
+        try:
+            bbox = tuple(float(number) for number in value.split(","))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return bbox if len(bbox) == 4 else None
+
+    @classmethod
+    def _table_cell_paragraphs(cls, cell, column_span, style):
+        fallback_alignment, bold = style
+        lines = cls._table_cell_lines(cell)
+        if not lines:
+            text_lines = tuple(line.strip() for line in str(cell.get("text") or "").splitlines() if line.strip())
+            if not text_lines:
+                return ()
+            return tuple(
+                {
+                    "text": text,
+                    "lines": (text,),
+                    "alignment": fallback_alignment,
+                    "bold": bold,
+                    "space_before": 0.0,
+                    "bbox": tuple(cell.get("bbox") or ()),
+                }
+                for text in text_lines
+            )
+
+        cell_bbox = tuple(cell.get("bbox") or (0, 0, 0, column_span[1]))
+        cell_width = max(column_span[1] - column_span[0], 1.0)
+        groups = cls._group_logical_lines(lines, cell_width, cell_bbox)
+        line_height = median(line["height"] for line in lines)
+        pitches = [right["center_y"] - left["center_y"] for left, right in zip(lines, lines[1:])]
+        pitch = median(pitches) if pitches else line_height * 1.2
+        normal_gap = max(pitch - line_height, 0.0)
+        has_formula = any(
+            str(obj.get("label") or "") in {"display_formula", "equation", "formula", "inline_formula"}
+            for obj in cell.get("layout_objects") or ()
+        )
+
+        paragraphs = []
+        previous_bottom = None
+        cell_top = float(cell_bbox[1])
+        cell_bottom = float(cell_bbox[3])
+        base_left = median(line["left"] for line in lines)
+        for group in groups:
+            text = ""
+            for line in group:
+                text = _join_text_segments(text, line["text"])
+            line_texts = tuple(line["text"] for line in group)
+            bbox = (
+                min(line["left"] for line in group),
+                min(line["top"] for line in group),
+                max(line["right"] for line in group),
+                max(line["bottom"] for line in group),
+            )
+            if has_formula:
+                alignment = "center"
+            elif len(groups) == 1:
+                alignment = fallback_alignment
+            else:
+                alignment = cls._table_text_alignment(
+                    [line["bbox"] for line in group],
+                    column_span,
+                    cell_width,
+                )
+            short_lines = all(line["right"] - line["left"] <= cell_width * 0.65 for line in group)
+            line_alignments = [
+                cls._table_line_alignment(line["bbox"], column_span)
+                for line in group
+            ]
+            group_center = (bbox[0] + bbox[2]) / 2.0
+            cell_center = (cell_bbox[0] + cell_bbox[2]) / 2.0
+            cell_box_width = max(cell_bbox[2] - cell_bbox[0], 1.0)
+            if (
+                len(group) == 1
+                and bbox[2] - bbox[0] <= cell_box_width * 0.40
+                and abs(group_center - cell_center) <= cell_box_width * 0.15
+            ):
+                alignment = "center"
+            elif (
+                short_lines
+                and bbox[1] >= cell_top + (cell_bottom - cell_top) * 0.65
+                and (
+                    bbox[0] >= base_left + cell_width * 0.12
+                    or all(value == "right" for value in line_alignments)
+                )
+            ):
+                alignment = "right"
+            elif len(group) == 1 and short_lines and fallback_alignment == "center":
+                alignment = "center"
+            space_before = 0.0
+            if previous_bottom is not None:
+                extra_gap = max(bbox[1] - previous_bottom - normal_gap, 0.0)
+                space_before = round(min(extra_gap / max(line_height, 1.0), 1.25), 3)
+            paragraphs.append(
+                {
+                    "text": text,
+                    "lines": (
+                        line_texts
+                        if (
+                            alignment in {"center", "right"}
+                            and len(line_texts) > 1
+                            and all(
+                                line["right"] - line["left"] <= (column_span[1] - column_span[0]) * 0.65
+                                for line in group
+                            )
+                        )
+                        else (text,)
+                    ),
+                    "alignment": alignment,
+                    "bold": bold,
+                    "space_before": space_before,
+                    "bbox": bbox,
+                }
+            )
+            previous_bottom = bbox[3]
+        return tuple(paragraphs)
+
+    @staticmethod
+    def _table_cell_lines(cell):
+        formula_boxes = []
+        for obj in cell.get("layout_objects") or ():
+            if str(obj.get("label") or "") not in {"display_formula", "equation", "formula", "inline_formula"}:
+                continue
+            try:
+                formula_boxes.append(tuple(float(value) for value in obj["bbox"][:4]))
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
+        boxes = []
+        for obj in cell.get("ocr_objects") or ():
+            text = str(obj.get("text") or "").strip()
+            if not text:
+                continue
+            try:
+                x1, y1, x2, y2 = map(float, obj["bbox"][:4])
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
+            if x2 <= x1 or y2 <= y1:
+                continue
+            if any(DocumentAnalyzer._formula_bbox_overlaps_text(box, (x1, y1, x2, y2)) for box in formula_boxes):
+                continue
+            boxes.append(
+                {
+                    "text": text,
+                    "left": x1,
+                    "top": y1,
+                    "right": x2,
+                    "bottom": y2,
+                    "center_y": (y1 + y2) / 2.0,
+                    "height": y2 - y1,
+                }
+            )
+        if not boxes:
+            return []
+        boxes.sort(key=lambda item: (item["center_y"], item["left"]))
+        tolerance = max(8.0, median(box["height"] for box in boxes) * 0.65)
+        lines = []
+        for box in boxes:
+            if not lines or abs(box["center_y"] - lines[-1]["center_y"]) > tolerance:
+                lines.append({"items": [box], "center_y": box["center_y"]})
+            else:
+                lines[-1]["items"].append(box)
+        for line in lines:
+            items = line.pop("items")
+            text = ""
+            for item in sorted(items, key=lambda value: value["left"]):
+                text = _join_text_segments(text, item["text"])
+            line.update(
+                {
+                    "text": text,
+                    "left": min(item["left"] for item in items),
+                    "top": min(item["top"] for item in items),
+                    "right": max(item["right"] for item in items),
+                    "bottom": max(item["bottom"] for item in items),
+                    "center_y": median(item["center_y"] for item in items),
+                    "height": median(item["height"] for item in items),
+                }
+            )
+            line["bbox"] = (line["left"], line["top"], line["right"], line["bottom"])
+            line["is_list"] = bool(_LIST_MARKER_RE.match(text))
+        return lines
+
+    @staticmethod
+    def _formula_bbox_overlaps_text(formula_bbox, text_bbox) -> bool:
+        ix1 = max(formula_bbox[0], text_bbox[0])
+        iy1 = max(formula_bbox[1], text_bbox[1])
+        ix2 = min(formula_bbox[2], text_bbox[2])
+        iy2 = min(formula_bbox[3], text_bbox[3])
+        overlap = max(ix2 - ix1, 0.0) * max(iy2 - iy1, 0.0)
+        area = max((text_bbox[2] - text_bbox[0]) * (text_bbox[3] - text_bbox[1]), 1.0)
+        if overlap / area >= 0.35:
+            return True
+        center_x = (text_bbox[0] + text_bbox[2]) / 2.0
+        center_y = (text_bbox[1] + text_bbox[3]) / 2.0
+        return formula_bbox[0] <= center_x <= formula_bbox[2] and formula_bbox[1] <= center_y <= formula_bbox[3]
+
+    @classmethod
+    def _group_logical_lines(cls, lines, frame_width: float, frame_bbox):
+        if not lines:
+            return ()
+        frame = (
+            (float(frame_bbox.x1), float(frame_bbox.x2))
+            if hasattr(frame_bbox, "x1")
+            else (float(frame_bbox[0]), float(frame_bbox[2]))
+        )
+        line_height = median(line["height"] for line in lines)
+        pitches = [right["center_y"] - left["center_y"] for left, right in zip(lines, lines[1:])]
+        pitch = median(pitches) if pitches else line_height * 1.2
+        start_tolerance = max(6.0, line_height * 0.45)
+        for line in lines:
+            line["alignment"] = cls._table_line_alignment(line["bbox"], frame)
+
+        groups = [[lines[0]]]
+        for line in lines[1:]:
+            previous = groups[-1][-1]
+            gap = line["top"] - previous["bottom"]
+            alignment = line.get("alignment", "left")
+            previous_alignment = previous.get("alignment", "left")
+            starts_new_group = (
+                (line.get("is_list") and cls._table_line_ends_sentence(previous["text"]))
+                or (
+                    re.match(r"^\s*[a-z]\s+\S", line["text"])
+                    and not cls._line_continues_text(previous["text"])
+                )
+                or line["center_y"] - previous["center_y"] > pitch * 1.35
+                or gap > max(line_height * 1.45, pitch * 1.15)
+                or (
+                    alignment not in {"center", "right"}
+                    and previous_alignment not in {"center", "right"}
+                    and (
+                        (
+                            not cls._line_continues_text(previous["text"])
+                            and re.match(r"^[A-Z][A-Za-z ]{0,24}:", line["text"])
+                        )
+                        or previous["text"].rstrip().endswith(":")
+                        or (
+                            re.match(r"^[A-Z][A-Za-z ]{0,24}:", previous["text"])
+                            and re.match(r"^[A-Z0-9]", line["text"])
+                        )
+                        or (
+                            re.match(r"^[A-Z0-9]", line["text"])
+                            and not cls._line_continues_text(previous["text"])
+                            and len(previous["text"].strip()) <= 60
+                            and previous["right"] - previous["left"] <= frame_width * 0.75
+                            and line["right"] - line["left"] <= frame_width * 0.75
+                        )
+                    )
+                )
+            )
+            if starts_new_group:
+                groups.append([line])
+            else:
+                groups[-1].append(line)
+
+        split_groups = []
+        for group in groups:
+            if (
+                len(group) > 1
+                and group[0]["right"] - group[0]["left"] <= frame_width * 0.75
+                and (
+                    group[1]["left"] - group[0]["left"] > start_tolerance
+                    or (
+                        group[0]["right"] - group[0]["left"] <= frame_width * 0.50
+                        and group[1]["right"] - group[1]["left"]
+                        >= (group[0]["right"] - group[0]["left"]) * 1.50
+                    )
+                )
+            ):
+                split_groups.append([group[0]])
+                split_groups.append(group[1:])
+            else:
+                split_groups.append(group)
+
+        suffix_split_groups = []
+        for group in split_groups:
+            split_at = None
+            for index in range(1, len(group) - 1):
+                head_left = median(line["left"] for line in group[:index])
+                tail_left = median(line["left"] for line in group[index:])
+                if (
+                    tail_left > head_left + start_tolerance * 1.5
+                    and all(
+                        abs(line["left"] - tail_left) <= start_tolerance
+                        for line in group[index:]
+                    )
+                ):
+                    split_at = index
+                    break
+            if split_at is None:
+                suffix_split_groups.append(group)
+            else:
+                suffix_split_groups.append(group[:split_at])
+                suffix_split_groups.append(group[split_at:])
+
+        groups = []
+        rail_tolerance = max(start_tolerance * 2.0, frame_width * 0.08)
+        for group in suffix_split_groups:
+            base_left = median(line["left"] for line in group)
+            run_start = None
+            split_at = None
+            for index in range(len(group) + 1):
+                shifted = index < len(group) and abs(group[index]["left"] - base_left) > rail_tolerance
+                if shifted and run_start is None:
+                    run_start = index
+                if not shifted and run_start is not None:
+                    if index - run_start >= 2:
+                        split_at = (run_start, index)
+                        break
+                    run_start = None
+            if split_at is None:
+                groups.append(group)
+                continue
+            run_start, run_end = split_at
+            if run_start:
+                groups.append(group[:run_start])
+            groups.append(group[run_start:run_end])
+            if run_end < len(group):
+                groups.append(group[run_end:])
+        return tuple(tuple(group) for group in groups)
+
+    @staticmethod
+    def _table_line_alignment(bbox, column_span) -> str:
+        left, right = column_span
+        width = max(right - left, 1.0)
+        text_left, text_right = bbox[0], bbox[2]
+        left_gap = max(text_left - left, 0.0)
+        right_gap = max(right - text_right, 0.0)
+        edge_tolerance = max(4.0, width * 0.04)
+        if left_gap <= edge_tolerance and right_gap <= edge_tolerance:
+            return "left"
+        center_tolerance = max(8.0, width * 0.06)
+        if abs(left_gap - right_gap) <= center_tolerance:
+            return "center"
+        return "right" if right_gap < left_gap else "left"
+
+    @staticmethod
+    def _table_line_ends_sentence(text: str) -> bool:
+        return bool(re.search(r"[.!?。！？][\"'”’」』）)]*$", str(text).strip()))
+
+    @staticmethod
+    def _line_continues_text(text: str) -> bool:
+        value = str(text).strip()
+        if re.search(r"[,;:，；：、(\[{]$", value):
+            return True
+        last_word = re.search(r"([A-Za-z]+)\s*$", value)
+        return bool(last_word and last_word.group(1).lower() in _PARAGRAPH_CONTINUATION_WORDS)
 
     @classmethod
     def _coverage(cls, outer: Rect, inner: Rect) -> float:
@@ -1149,6 +2127,68 @@ class DocumentAnalyzer:
                 )
             )
         return tuple(output)
+
+    @classmethod
+    def _merge_inline_formulas(
+        cls,
+        rows: tuple[TextRow, ...],
+        formulas: tuple[RecognitionItem, ...],
+    ) -> tuple[TextRow, ...]:
+        """按行列坐标将行内公式替换为正文中的唯一占位符。"""
+        assignments: dict[int, list[tuple[int, RecognitionItem]]] = {index: [] for index in range(len(rows))}
+        for formula_index, formula in enumerate(formulas):
+            candidates = []
+            for row_index, row in enumerate(rows):
+                overlap = max(0.0, min(row.bbox.y2, formula.bbox.y2) - max(row.bbox.y1, formula.bbox.y1))
+                if overlap > 0:
+                    candidates.append((overlap, row_index))
+            if not candidates:
+                continue
+            _overlap, row_index = max(candidates)
+            assignments[row_index].append((formula_index, formula))
+
+        merged = []
+        for row_index, row in enumerate(rows):
+            entries = sorted(assignments[row_index], key=lambda item: item[1].bbox.x1)
+            if not entries or row.bbox.width <= 0:
+                merged.append(row)
+                continue
+            segments = []
+            cursor = 0
+            for formula_index, formula in entries:
+                start = round(len(row.text) * (formula.bbox.x1 - row.bbox.x1) / row.bbox.width)
+                end = round(len(row.text) * (formula.bbox.x2 - row.bbox.x1) / row.bbox.width)
+                start = min(max(start, cursor), len(row.text))
+                end = min(max(end, start + 1), len(row.text))
+                latex = str(formula.latex or "")
+                if start > cursor and cls._formula_adjacent_char(row.text[start - 1], latex, leading=True):
+                    start -= 1
+                if end < len(row.text) and cls._formula_adjacent_char(row.text[end], latex, leading=False):
+                    end += 1
+                segments.append(row.text[cursor:start])
+                segments.append(inline_formula_marker(formula_index))
+                cursor = end
+            segments.append(row.text[cursor:])
+            merged.append(replace(row, text="".join(segments)))
+        return tuple(merged)
+
+    @staticmethod
+    def _formula_adjacent_char(char: str, latex: str, leading: bool) -> bool:
+        """判断公式框外的相邻字符是否仍是同一公式符号。"""
+        if char.isspace() or not char:
+            return False
+        if char == "∞" and r"\infty" in latex:
+            return True
+        for command, symbol in _LATEX_GREEK_SYMBOLS.items():
+            if char == symbol and re.search(rf"\\{command}(?![A-Za-z])", latex):
+                return True
+        if not leading or not char.isalpha():
+            return False
+        prefix = latex.lstrip()
+        return bool(
+            re.match(rf"{re.escape(char)}(?![A-Za-z])", prefix)
+            or re.search(rf"\\(?:mathrm|mathbf|mathcal)\{{\s*{re.escape(char)}\s*\}}", prefix)
+        )
 
     @staticmethod
     def _has_tabular_rows(primary: RecognitionItem, rows: tuple[TextRow, ...]) -> bool:

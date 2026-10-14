@@ -47,9 +47,9 @@ def test_analyzer_disables_a_failed_optional_classifier() -> None:
 
 
 def test_font_classifier_defaults_are_the_trained_acceptance_contract() -> None:
-    classifier = FontClassifier("")
+    classifier = FontClassifier()
 
     assert classifier.reject_threshold == 0.6
     assert classifier.margin_threshold == 0.25
     assert classifier.transform.grayscale is True
-    assert classifier.checkpoint_path.name == "mobilenetv3.xml"
+    assert classifier.model_path.name == "mobilenetv3.xml"

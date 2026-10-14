@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Mapping, Optional, Sequence, Tuple
+
+
+INLINE_FORMULA_MARKER_PATTERN = re.compile(r"\{\{DOCFLOW_FORMULA_(\d+)\}\}")
+
+
+def inline_formula_marker(index: int) -> str:
+    return f"{{{{DOCFLOW_FORMULA_{index}}}}}"
 
 
 def _freeze(value: Any) -> Any:
@@ -196,6 +204,7 @@ class TextParagraphLayout:
     right_tab_stop_pt: Optional[float] = None
     layout_reserve_pt: float = 0.0
     font_width_scale_pct: int = 100
+    character_spacing_pt: float = 0.0
 
     def __post_init__(self) -> None:
         if self.alignment not in {"left", "center", "right", "justify"}:
@@ -211,6 +220,8 @@ class TextParagraphLayout:
             self.layout_reserve_pt,
         ) < 0:
             raise ValueError("resolved text spacing must not be negative")
+        if not -2.0 <= self.character_spacing_pt <= 2.0:
+            raise ValueError("invalid character spacing")
 
     @property
     def measured_height_pt(self) -> float:

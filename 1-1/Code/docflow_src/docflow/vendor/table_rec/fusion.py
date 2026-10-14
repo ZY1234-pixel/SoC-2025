@@ -14,7 +14,7 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 
 from docflow.vendor.table_rec.mixed_rules import Rect, rect_from_any
-from docflow.vendor.table_rec.structure_postprocess import StructurePostProcessor
+from docflow.vendor.table_rec.structure_postprocess import StructurePostProcessor, join_inline_text
 
 
 LAYOUT_CONTENT_LABELS = {
@@ -46,6 +46,7 @@ class LayoutObject:
     role: str = "content"
     image_path: str | None = None
     text: str = ""
+    latex: str = ""
 
 
 @dataclass
@@ -98,6 +99,8 @@ def normalize_layout(layout: dict | None) -> list[LayoutObject]:
         score = float(item.get("score") or item.get("confidence") or 1.0)
         class_id = int(item.get("class_id") or item.get("cls_id") or -1)
         role = layout_role(label)
+        result = item.get("res")
+        latex = item.get("latex") or (result.get("latex") if isinstance(result, dict) else "")
         objects.append(
             LayoutObject(
                 label=label,
@@ -105,6 +108,7 @@ def normalize_layout(layout: dict | None) -> list[LayoutObject]:
                 score=score,
                 class_id=class_id,
                 role=role,
+                latex=str(latex or ""),
             )
         )
     return objects
@@ -136,6 +140,8 @@ def normalize_table_result(table_result: dict | None) -> tuple[list[TableCell], 
     html_text = str(table_result.get("html") or table_result.get("pred_html") or "")
     html_cells = parse_html_cells(html_text)
     cells: list[TableCell] = []
+    content_bbox = table_result.get("_content_bbox")
+    content_rect = rect_from_any(content_bbox) if content_bbox else None
 
     if boxes and len(logic_points) == len(boxes):
         for idx, (bbox, logic) in enumerate(zip(boxes, logic_points)):
@@ -146,18 +152,22 @@ def normalize_table_result(table_result: dict | None) -> tuple[list[TableCell], 
             col = min(col0, col1)
             rowspan = abs(row1 - row0) + 1
             colspan = abs(col1 - col0) + 1
-            cells.append(
-                TableCell(
-                    row=row,
-                    col=col,
-                    bbox=bbox,
-                    rowspan=max(1, rowspan),
-                    colspan=max(1, colspan),
-                    source_rowspan=max(1, rowspan),
-                    source_colspan=max(1, colspan),
-                    role="column_header" if row == 0 else "body",
-                )
+            cell = TableCell(
+                row=row,
+                col=col,
+                bbox=bbox,
+                rowspan=max(1, rowspan),
+                colspan=max(1, colspan),
+                source_rowspan=max(1, rowspan),
+                source_colspan=max(1, colspan),
+                role="column_header" if row == 0 else "body",
             )
+            cells.append(cell)
+        if content_rect is not None:
+            for cell in cells:
+                clipped = cell.bbox.intersect(content_rect)
+                if clipped.area > 0:
+                    cell.bbox = clipped
         assign_ocr_text_to_cells(cells, ocr_objects)
     elif html_cells:
         for idx, hcell in enumerate(html_cells):
@@ -193,6 +203,8 @@ def normalize_table_result(table_result: dict | None) -> tuple[list[TableCell], 
         "_ocr_objects": ocr_objects,
         "row_count": row_count,
         "col_count": col_count,
+        "_content_bbox": content_bbox,
+        "_horizontal_rule_ys": table_result.get("_horizontal_rule_ys") or [],
     }
 
 
@@ -223,6 +235,7 @@ def assign_ocr_text_to_cells(cells: list[TableCell], ocr_objects: list[LayoutObj
     if not cells or not ocr_objects:
         return
     cell_tokens: dict[int, list[LayoutObject]] = {idx: [] for idx, _ in enumerate(cells)}
+    assigned: set[int] = set()
     for obj in ocr_objects:
         best_idx = -1
         best_score = 0.0
@@ -238,6 +251,8 @@ def assign_ocr_text_to_cells(cells: list[TableCell], ocr_objects: list[LayoutObj
                 best_score = score
         if best_idx >= 0 and best_score >= 0.20:
             cell_tokens[best_idx].append(obj)
+            assigned.add(id(obj))
+
     for idx, tokens in cell_tokens.items():
         if not tokens:
             continue
@@ -256,7 +271,10 @@ def join_ocr_lines(tokens: list[LayoutObject]) -> str:
             lines.append([obj])
         else:
             lines[-1].append(obj)
-    return "\n".join(" ".join(x.text for x in sorted(line, key=lambda obj: obj.bbox.x0)) for line in lines)
+    return "\n".join(
+        join_inline_text(x.text for x in sorted(line, key=lambda obj: obj.bbox.x0))
+        for line in lines
+    )
 
 
 def parse_html_cells(html_text: str) -> list[dict]:
@@ -506,6 +524,15 @@ class LayoutTableFusion:
         if removed_title_rows:
             structure_diag["title_rows_removed"] = removed_title_rows
         self._fill_empty_cells(table_cells)
+        removed_empty_rows = self._remove_empty_edge_rows(table_cells)
+        if removed_empty_rows:
+            structure_diag["empty_edge_rows_removed"] = removed_empty_rows
+        merged_header_fragments = self._merge_short_header_fragments(table_cells)
+        if merged_header_fragments:
+            structure_diag["header_fragments_merged"] = merged_header_fragments
+        merged_row_headers = self._merge_empty_row_header_runs(table_cells)
+        if merged_row_headers:
+            structure_diag["row_header_runs_merged"] = merged_row_headers
         CellContentResolver().resolve_cells(table_cells)
 
         row_count, col_count = table_shape(table_cells)
@@ -535,6 +562,7 @@ class LayoutTableFusion:
             diagnostics=diagnostics,
         )
 
+
     @staticmethod
     def _drop_removed_title_rows(cells: list[TableCell]) -> int:
         rows = sorted({cell.row for cell in cells})
@@ -552,6 +580,94 @@ class LayoutTableFusion:
             cell.row -= sum(row < original_row for row in removed)
             cell.rowspan = max(1, cell.rowspan - sum(original_row < row < original_row + cell.rowspan for row in removed))
         return len(removed)
+
+    @staticmethod
+    def _remove_empty_edge_rows(cells: list[TableCell]) -> int:
+        removed = 0
+        while cells:
+            top = min(cell.row for cell in cells)
+            row_cells = [cell for cell in cells if cell.row == top]
+            if not row_cells or not all(cell.rowspan == 1 and not cell.text and not cell.layout_objects for cell in row_cells):
+                break
+            cells[:] = [cell for cell in cells if cell.row != top]
+            for cell in cells:
+                if cell.row > top:
+                    cell.row -= 1
+            removed += 1
+        while cells:
+            bottom = max(cell.row + cell.rowspan - 1 for cell in cells)
+            row_cells = [cell for cell in cells if cell.row == bottom]
+            if not row_cells or not all(cell.rowspan == 1 and not cell.text and not cell.layout_objects for cell in row_cells):
+                break
+            cells[:] = [cell for cell in cells if cell.row != bottom]
+            removed += 1
+        return removed
+
+    @staticmethod
+    def _merge_empty_row_header_runs(cells: list[TableCell]) -> int:
+        merged = 0
+        by_column: dict[int, list[TableCell]] = {}
+        for cell in cells:
+            if cell.colspan == 1:
+                by_column.setdefault(cell.col, []).append(cell)
+        for column_cells in by_column.values():
+            column_cells.sort(key=lambda cell: cell.row)
+            index = 0
+            while index < len(column_cells):
+                cell = column_cells[index]
+                if cell.role != "row_header" or not cell.text:
+                    index += 1
+                    continue
+                next_row = cell.row + cell.rowspan
+                next_index = index + 1
+                while next_index < len(column_cells):
+                    follower = column_cells[next_index]
+                    if (
+                        follower.role != "row_header"
+                        or follower.text
+                        or follower.layout_objects
+                        or follower.row != next_row
+                    ):
+                        break
+                    cell.rowspan += follower.rowspan
+                    next_row += follower.rowspan
+                    cells.remove(follower)
+                    column_cells.pop(next_index)
+                    merged += 1
+                index += 1
+        return merged
+
+    @staticmethod
+    def _merge_short_header_fragments(cells: list[TableCell]) -> int:
+        if not cells:
+            return 0
+        top_row = min(cell.row for cell in cells)
+        merged = 0
+        for row in (top_row, top_row + 1):
+            row_cells = sorted((cell for cell in cells if cell.row == row), key=lambda cell: cell.col)
+            index = 0
+            while index + 1 < len(row_cells):
+                left = row_cells[index]
+                right = row_cells[index + 1]
+                if (
+                    left.colspan == right.colspan == 1
+                    and left.rowspan == right.rowspan
+                    and left.rowspan >= 2
+                    and right.col == left.col + 1
+                    and not left.layout_objects
+                    and not right.layout_objects
+                    and len(left.text.strip()) == len(right.text.strip()) == 1
+                    and left.role in {"corner", "row_header", "column_header"}
+                ):
+                    left.text = f"{left.text.strip()}{right.text.strip()}"
+                    left.colspan += right.colspan
+                    left.bbox = union_rect([left.bbox, right.bbox])
+                    cells.remove(right)
+                    row_cells.pop(index + 1)
+                    merged += 1
+                    continue
+                index += 1
+        return merged
 
     def _fused_table_bbox(
         self,
@@ -941,6 +1057,7 @@ def layout_object_to_dict(obj: LayoutObject) -> dict:
         "role": obj.role,
         "image_path": obj.image_path,
         "text": obj.text,
+        "latex": obj.latex,
     }
 
 
@@ -1130,7 +1247,8 @@ def fused_to_html(result: dict, image_path: str | Path | None = None) -> str:
         ".source{max-width:420px;height:auto;border:1px solid #ddd;margin-bottom:16px}",
         "table{border-collapse:collapse;width:100%;table-layout:fixed;margin-top:16px}",
         "td,th{border:1px solid #aeb7c2;padding:6px 8px;vertical-align:middle;white-space:pre-wrap;font-size:13px}",
-        "th{background:#f2f5f8;font-weight:700}.row-header{background:#eef7ff;font-weight:700}",
+        "td p,th p{margin:0}",
+        "th{font-weight:700}",
         ".diag{display:none}",
         ".cell-imgs{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-bottom:4px}",
         ".cell-imgs img{max-width:68px;max-height:58px;object-fit:contain}",
@@ -1168,6 +1286,13 @@ def fused_to_html(result: dict, image_path: str | Path | None = None) -> str:
                 attrs.append(f"rowspan='{rowspan}'")
             if colspan > 1:
                 attrs.append(f"colspan='{colspan}'")
+            page_bbox = cell.get("page_bbox")
+            if isinstance(page_bbox, (list, tuple)) and len(page_bbox) >= 4:
+                attrs.append(
+                    "data-page-bbox='"
+                    + ",".join(str(round(float(value), 3)) for value in page_bbox[:4])
+                    + "'"
+                )
             text = html.escape(cell.get("text") or "")
             objs = cell.get("layout_objects") or []
             img_html = render_cell_images(objs, cell)
@@ -1179,19 +1304,39 @@ def fused_to_html(result: dict, image_path: str | Path | None = None) -> str:
 
 def render_cell_images(objs: list[dict], cell: dict | None = None) -> str:
     resolver = CellContentResolver()
-    images = [
-        obj.get("image_path")
-        for obj in objs
-        if obj.get("image_path")
-        and obj.get("visual_kind") != "text_snapshot"
-        and (obj.get("visual_kind") == "semantic_visual" or resolver.decide_dict(obj, cell).render)
-    ]
-    if not images:
-        return ""
     tags = []
-    for path in images[:4]:
+    image_count = 0
+    for obj in objs:
+        latex = str(obj.get("latex") or "").strip()
+        if latex:
+            escaped = html.escape(latex, quote=True)
+            bbox = obj.get("page_bbox") or obj.get("bbox")
+            bbox_attr = ""
+            if bbox:
+                bbox_attr = " data-page-bbox='" + ",".join(str(round(float(value), 3)) for value in bbox[:4]) + "'"
+            local_bbox = obj.get("bbox")
+            local_attr = ""
+            if local_bbox:
+                local_attr = " data-bbox='" + ",".join(str(round(float(value), 3)) for value in local_bbox[:4]) + "'"
+            tags.append(f"<span class='docflow-formula' data-latex='{escaped}'{bbox_attr}{local_attr}></span>")
+            continue
+        path = obj.get("image_path")
+        if (
+            not path
+            or image_count >= 4
+            or obj.get("visual_kind") == "text_snapshot"
+            or not (obj.get("visual_kind") == "semantic_visual" or resolver.decide_dict(obj, cell).render)
+        ):
+            continue
         src = html.escape(str(path), quote=True)
-        tags.append(f"<img src='{src}'>")
+        bbox = obj.get("bbox")
+        bbox_attr = ""
+        if bbox:
+            bbox_attr = " data-bbox='" + ",".join(str(round(float(value), 3)) for value in bbox[:4]) + "'"
+        tags.append(f"<img src='{src}'{bbox_attr}>")
+        image_count += 1
+    if not tags:
+        return ""
     return "<div class='cell-imgs'>" + "".join(tags) + "</div>"
 
 
@@ -1387,26 +1532,3 @@ def ocr_palette(idx: int) -> tuple[int, int, int]:
         (43, 169, 166),
     ]
     return colors[(idx - 1) % len(colors)]
-
-
-def load_table_results(path: str | Path, method: str | None = None) -> dict[str, dict]:
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        return {}
-    if method:
-        return raw.get(method, {}) if isinstance(raw.get(method), dict) else {}
-    if all(isinstance(v, dict) and ("html" in v or "bbox" in v or "status" in v) for v in raw.values()):
-        return raw
-    preferred = [
-        "PaddleOCR TableRecognitionPipelineV2",
-        "RapidAI TableStructureRec v2",
-        "SLANet_plus",
-        "Docling TableFormer fast",
-    ]
-    for name in preferred:
-        if isinstance(raw.get(name), dict):
-            return raw[name]
-    for value in raw.values():
-        if isinstance(value, dict):
-            return value
-    return {}

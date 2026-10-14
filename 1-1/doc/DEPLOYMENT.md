@@ -8,9 +8,10 @@
 - Linux 或 Windows x86-64
 - CPU 推理
 - OpenVINO 2025.3
-- 导出 PDF 时额外安装 LibreOffice
 
 REC 在 CPU 支持 BF16 时使用 BF16/FP32 混合执行；不支持时自动回退 FP32。
+
+PDF 公式渲染依赖 `Code/assets/mathjax-tex-svg-lite.js` 和 Python 包 `quickjs`，两者都随项目离线运行，不需要安装 Node 或 LaTeX。
 
 ## 安装依赖
 
@@ -43,6 +44,10 @@ python -m pip install -r Code\requirement.txt
 下载后保持以下目录结构：
 
 ```text
+Code/models/formula/
+└── PP-FormulaNet_plus-M/PP-FormulaNet_plus-M_infer/
+    ├── inference.yml
+    └── inference.onnx
 Code/models_openvino/
 ├── PP-DocLayoutV3_openvino/
 │   ├── PP-DocLayoutV3.xml
@@ -57,8 +62,8 @@ Code/models_openvino/
 │   └── ppocrv6_rapidocr_dict.txt
 ├── RapidAI_TableRec_openvino/
 │   ├── wired_table_v2/unet.xml + unet.bin
-│   ├── lineless_table/lore_detect.xml + lore_detect.bin
-│   ├── lineless_table/lore_process.xml + lore_process.bin
+│   ├── slanet_plus/slanet-plus.xml + slanet-plus.bin
+│   ├── slanet_plus/character.txt
 │   ├── table_cls/yolo_cls.xml + yolo_cls.bin
 │   └── ocr_cls/ch_ppocr_mobile_v2.0_cls_infer.xml + .bin
 └── font_openvino/
@@ -67,6 +72,21 @@ Code/models_openvino/
 ```
 
 RapidAI 表格桥接和融合代码已经包含在仓库内，不需要另外下载 `TableRec` 工程。
+如需重新下载并转换 SLANet Plus，可执行：
+
+```bash
+python Code/scripts/convert_slanet_plus_openvino.py
+```
+
+如需下载 PP-FormulaNet_plus-M 的 ONNX 权重，可执行：
+
+```bash
+python Code/scripts/download_formulanet_onnx.py
+```
+
+公式识别只使用 `inference.onnx`；文件缺失时启动检查会直接报错。
+
+公式模型按页面内容懒加载；页面没有公式框时不会加载。若交付环境不需要公式能力，可在命令中增加 `--no-formula`。
 
 ## 最小验收
 
@@ -91,7 +111,7 @@ python Code/test.py \
   --formats docx,markdown,pdf
 ```
 
-PDF 输出依赖 `libreoffice` 或 `soffice` 命令。
+PDF 由 PyMuPDF 直接按检测框坐标生成，不依赖 LibreOffice。
 
 ## 集成入口
 

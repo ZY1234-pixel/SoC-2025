@@ -52,6 +52,117 @@ def test_analyzer_groups_figure_content_and_caption_without_reordering() -> None
     assert [element.model_order for element in elements] == [1, 2, 5]
 
 
+def test_analyzer_reinserts_inline_formula_into_parent_text_row() -> None:
+    parent = _item("body", "text", (0, 0, 100, 20), 1, "ab")
+    formula = RecognitionItem(
+        "formula",
+        "formula",
+        Rect(30, 0, 50, 20),
+        2,
+        latex="x^2",
+        image_base64="formula-image",
+        raw_type="inline_formula",
+    )
+    evidence = RecognitionEvidence((RecognitionPage(0, 100, 100, (parent, formula)),))
+
+    element = DocumentAnalyzer().analyze(evidence).pages[0].elements[0]
+
+    assert element.kind == "paragraph_group"
+    assert element.text == "a{{DOCFLOW_FORMULA_0}}"
+    assert element.source_ids == ("body", "formula")
+    assert element.payload["inline_formulas"][0]["latex"] == "x^2"
+    assert element.payload["inline_formulas"][0]["image_base64"] == "formula-image"
+
+
+def test_analyzer_joins_split_continuation_paragraphs() -> None:
+    evidence = RecognitionEvidence(
+        (
+            RecognitionPage(
+                0,
+                1600,
+                2300,
+                (
+                    _item(
+                        "paragraph-start",
+                        "text",
+                        (140, 200, 1480, 370),
+                        1,
+                        "This year, Russian students will have textbooks. For students in the 9th grade, a",
+                    ),
+                    _item(
+                        "paragraph-end",
+                        "text",
+                        (140, 400, 780, 440),
+                        2,
+                        "Chinese language test will be in their exams in 2018.",
+                    ),
+                    _item("question", "text", (140, 500, 1000, 540), 3, "21. Learning languages is useful."),
+                ),
+            ),
+        )
+    )
+
+    elements = DocumentAnalyzer().analyze(evidence).pages[0].elements
+
+    assert len(elements) == 2
+    assert elements[0].source_ids == ("paragraph-start", "paragraph-end")
+    assert elements[0].text.endswith("grade, a Chinese language test will be in their exams in 2018.")
+    assert elements[1].text.startswith("21.")
+
+
+def test_logical_line_split_respects_connector_ending_before_capital_line() -> None:
+    lines = [
+        {
+            "text": "For students in the 9th grade, a",
+            "left": 100.0,
+            "top": 100.0,
+            "right": 700.0,
+            "bottom": 120.0,
+            "center_y": 110.0,
+            "height": 20.0,
+            "bbox": (100.0, 100.0, 700.0, 120.0),
+            "is_list": False,
+        },
+        {
+            "text": "Chinese language test will be in their exams",
+            "left": 100.0,
+            "top": 130.0,
+            "right": 520.0,
+            "bottom": 150.0,
+            "center_y": 140.0,
+            "height": 20.0,
+            "bbox": (100.0, 130.0, 520.0, 150.0),
+            "is_list": False,
+        },
+    ]
+
+    groups = DocumentAnalyzer._group_logical_lines(lines, 1000.0, Rect(100, 90, 900, 160))
+
+    assert len(groups) == 1
+    assert groups[0][0]["text"].endswith(", a")
+
+
+def test_analyzer_does_not_join_complete_sentences_or_list_items() -> None:
+    evidence = RecognitionEvidence(
+        (
+            RecognitionPage(
+                0,
+                1000,
+                1400,
+                (
+                    _item("first", "text", (100, 100, 900, 140), 1, "First sentence."),
+                    _item("second", "text", (100, 160, 900, 200), 2, "Second sentence."),
+                    _item("item", "text", (100, 260, 900, 300), 3, "21. A list item."),
+                ),
+            ),
+        )
+    )
+
+    elements = DocumentAnalyzer().analyze(evidence).pages[0].elements
+
+    assert [element.text for element in elements] == ["First sentence.", "Second sentence.", "21. A list item."]
+
+
 def test_analyzer_preserves_caption_of_figure_embedded_in_table() -> None:
     evidence = RecognitionEvidence(
         (
@@ -100,6 +211,62 @@ def test_analyzer_preserves_fused_table_row_proportions() -> None:
     assert payload["table_row_height_ratios"] == (0.75, 0.25)
     assert payload["table_column_width_ratios"] == (0.7, 0.3)
     assert payload["table_row_styles"] == ()
+
+
+def test_analyzer_reclassifies_bottom_page_number_table_as_footer() -> None:
+    table = _item(
+        "footer-table",
+        "table",
+        (0, 1700, 1000, 1800),
+        1,
+        html="<table><tr><td>30</td><td>通信·天涯咫尺</td></tr></table>",
+    )
+
+    element = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1859, (table,)),))
+    ).pages[0].elements[0]
+
+    assert element.kind == "footer"
+    assert element.text == "30 通信·天涯咫尺"
+    assert element.payload["html"] is None
+
+
+def test_analyzer_reclassifies_sparse_bottom_table_as_footer() -> None:
+    table = _item(
+        "sparse-footer-table",
+        "table",
+        (0, 1620, 1000, 1850),
+        1,
+        html=(
+            "<table><tr><td></td><td></td></tr><tr><td>30</td><td></td></tr>"
+            "<tr><td>通信·天涯咫尺</td><td></td></tr><tr><td></td><td></td></tr></table>"
+        ),
+    )
+
+    element = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1859, (table,)),))
+    ).pages[0].elements[0]
+
+    assert element.kind == "footer"
+    assert element.text == "30 通信·天涯咫尺"
+
+
+def test_footer_text_does_not_drive_body_font_role_size() -> None:
+    body = _item("body", "text", (100, 100, 900, 140), 1, "正文内容")
+    footer = _item(
+        "footer-table",
+        "table",
+        (0, 1700, 1000, 1800),
+        2,
+        html="<table><tr><td>30</td><td>通信·天涯咫尺</td></tr></table>",
+    )
+
+    analysis = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1859, (body, footer)),))
+    )
+
+    assert analysis.roles
+    assert max(role.font_size_pt for role in analysis.roles) < 30
 
 
 def test_analyzer_recovers_lineless_columns_from_inter_column_gaps() -> None:
@@ -163,6 +330,231 @@ def test_formula_table_cell_is_centered_from_visual_semantics() -> None:
     styles = DocumentAnalyzer._table_cell_styles(cells, (0, 100))
 
     assert styles == ((0, 0, "center", False),)
+
+
+def test_formula_table_cell_drops_ocr_text_covered_by_formula_object() -> None:
+    cell = {
+        "row": 0,
+        "col": 0,
+        "bbox": [0, 0, 100, 40],
+        "layout_objects": [{"label": "inline_formula", "bbox": [10, 5, 90, 35], "latex": "x^2"}],
+        "ocr_objects": [{"text": "x2", "bbox": [20, 8, 80, 30]}],
+    }
+
+    assert DocumentAnalyzer._table_cell_lines(cell) == []
+
+
+def test_table_cell_geometry_uses_relative_alignment_and_padding() -> None:
+    cells = [
+        {
+            "row": 0,
+            "col": 0,
+            "bbox": [0, 0, 100, 50],
+            "ocr_objects": [{"text": "A", "bbox": [20, 5, 80, 20]}],
+        }
+    ]
+
+    geometry = DocumentAnalyzer._table_cell_geometry(cells)
+
+    assert geometry == ((0, 0, "top", 0.1, 0.25, 0.2, 0.2),)
+
+
+def test_table_cell_alignment_uses_repeated_line_edges() -> None:
+    left_cell = {
+        "row": 0,
+        "col": 0,
+        "bbox": [0, 0, 100, 100],
+        "ocr_objects": [
+            {"text": "first", "bbox": [10, 10, 55, 20]},
+            {"text": "second", "bbox": [10, 30, 75, 40]},
+            {"text": "third", "bbox": [10, 50, 65, 60]},
+        ],
+    }
+    centered_cell = {
+        "row": 1,
+        "col": 1,
+        "bbox": [100, 100, 200, 200],
+        "ocr_objects": [
+            {"text": "first", "bbox": [125, 110, 175, 120]},
+            {"text": "second", "bbox": [115, 130, 185, 140]},
+            {"text": "third", "bbox": [120, 150, 180, 160]},
+        ],
+    }
+
+    styles = DocumentAnalyzer._table_cell_styles([left_cell, centered_cell], (0, 100, 200))
+
+    assert styles[0][2] == "left"
+    assert styles[1][2] == "center"
+
+
+def test_table_column_alignment_uses_body_consensus() -> None:
+    cells = [
+        {
+            "row": 0,
+            "col": 0,
+            "role": "corner",
+            "bbox": [0, 0, 100, 20],
+            "ocr_objects": [{"text": "Paradigm", "bbox": [35, 2, 65, 18]}],
+        },
+        *[
+            {
+                "row": row,
+                "col": 0,
+                "role": "row_header",
+                "bbox": [0, row * 20, 100, (row + 1) * 20],
+                "ocr_objects": [{"text": "Direct", "bbox": [5, row * 20 + 2, 60, row * 20 + 18]}],
+            }
+            for row in range(1, 4)
+        ],
+    ]
+
+    styles = DocumentAnalyzer._table_cell_styles(cells, (0, 100))
+
+    assert [style[2] for style in styles] == ["left", "left", "left", "left"]
+
+
+def test_table_cell_paragraphs_split_greeting_body_and_right_signoff() -> None:
+    cell = {
+        "row": 0,
+        "col": 0,
+        "bbox": [0, 0, 400, 400],
+        "role": "body",
+        "ocr_objects": [
+            {"text": "Dear students,", "bbox": [0, 10, 110, 40]},
+            {"text": "An English talk", "bbox": [20, 65, 300, 95]},
+            {"text": "will be held.", "bbox": [20, 105, 200, 135]},
+            {"text": "English Club", "bbox": [280, 260, 390, 290]},
+            {"text": "March 3, 2018", "bbox": [280, 305, 390, 335]},
+        ],
+    }
+
+    paragraphs = DocumentAnalyzer._table_cell_paragraphs(cell, (0, 400), ("left", False))
+
+    assert [paragraph["text"] for paragraph in paragraphs] == [
+        "Dear students,",
+        "An English talk will be held.",
+        "English Club March 3, 2018",
+    ]
+    assert [paragraph["alignment"] for paragraph in paragraphs] == ["left", "left", "right"]
+    assert paragraphs[-1]["lines"] == ("English Club", "March 3, 2018")
+
+
+def test_table_html_marks_paragraph_alignment_and_preserves_signoff_breaks() -> None:
+    cell = {
+        "row": 0,
+        "col": 0,
+        "bbox": [0, 0, 400, 400],
+        "role": "body",
+        "ocr_objects": [
+            {"text": "English Club", "bbox": [280, 260, 390, 290]},
+            {"text": "March 3, 2018", "bbox": [280, 305, 390, 335]},
+        ],
+    }
+
+    html = DocumentAnalyzer._table_html_with_paragraphs(
+        "<table><tr><td>English Club\nMarch 3, 2018</td></tr></table>",
+        [cell],
+        (0, 400),
+        ((0, 0, "left", False),),
+    )
+
+    assert html is not None
+    assert 'data-align="right"' in html
+    assert "English Club<br/>March 3, 2018" in html
+
+
+def test_table_cell_mixed_body_and_signoff_keep_paragraph_alignments() -> None:
+    cell = {
+        "row": 0,
+        "col": 0,
+        "bbox": [0, 0, 400, 500],
+        "role": "body",
+        "ocr_objects": [
+            {"text": "Body line one", "bbox": [10, 10, 300, 40]},
+            {"text": "Body line two", "bbox": [10, 50, 320, 80]},
+            {"text": "Body line three", "bbox": [10, 90, 310, 120]},
+            {"text": "English Club", "bbox": [230, 400, 380, 430]},
+            {"text": "March 3, 2018", "bbox": [230, 440, 380, 470]},
+        ],
+    }
+
+    paragraphs = DocumentAnalyzer._table_cell_paragraphs(cell, (0, 400), ("left", False))
+
+    assert [paragraph["alignment"] for paragraph in paragraphs] == ["left", "right"]
+    assert paragraphs[-1]["lines"] == ("English Club", "March 3, 2018")
+
+
+def test_table_cell_isolated_short_title_is_centered() -> None:
+    cell = {
+        "row": 0,
+        "col": 0,
+        "bbox": [0, 0, 300, 400],
+        "role": "body",
+        "ocr_objects": [
+            {"text": "Found", "bbox": [120, 10, 220, 40]},
+            {"text": "Body line one", "bbox": [10, 80, 280, 110]},
+            {"text": "Body line two", "bbox": [10, 120, 290, 150]},
+        ],
+    }
+
+    paragraphs = DocumentAnalyzer._table_cell_paragraphs(cell, (0, 300), ("left", False))
+
+    assert [paragraph["alignment"] for paragraph in paragraphs] == ["center", "left"]
+
+
+def test_substantive_header_text_stays_in_body_flow() -> None:
+    texts = (
+        "This article was downloaded by: [130.132.123.28]",
+        "On: 27 December 2014, At: 18:34",
+        "Publisher: Routledge",
+        "Informa Ltd Registered in England and Wales Registered Number: 1072954 Registered office: Mortimer House,",
+        "37-41 Mortimer Street, London W1T 3JH, UK",
+    )
+    item = RecognitionItem(
+        "header",
+        "header",
+        Rect(0, 0, 500, 100),
+        1,
+        text_lines=tuple(
+            TextEvidence(text, polygon=((0, index * 20), (500, index * 20), (500, (index + 1) * 20), (0, (index + 1) * 20)))
+            for index, text in enumerate(texts)
+        ),
+        raw_type="text",
+    )
+    duplicate = _item(
+        "duplicate",
+        "text",
+        (0, 40, 500, 60),
+        2,
+        "Informa Ltd Registered in England and Wales Registered Number: 1072954 Registered office: Mortimer House,",
+    )
+
+    elements = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 600, 1000, (item, duplicate)),))
+    ).pages[0].elements
+
+    assert all(element.kind == "paragraph_group" for element in elements)
+    assert [element.text for element in elements] == [
+        *texts[:3],
+        f"{texts[3]} {texts[4]}",
+    ]
+
+
+def test_body_text_splits_author_affiliations_and_online_metadata() -> None:
+    lines = (
+        TextEvidence("Shunichi Araki a , Katsuyuki Murata a , Koichi Ushiob & Ryoji Sakai", polygon=((0, 0), (400, 0), (400, 20), (0, 20))),
+        TextEvidence("a Department of Public Health and Hygiene, Medical College of Oita, Oita, Japan", polygon=((0, 30), (450, 30), (450, 55), (0, 55))),
+        TextEvidence("b Tokyo Rosai Hospital, Tokyo, Japan", polygon=((0, 65), (350, 65), (350, 85), (0, 85))),
+        TextEvidence("Ryukyu University, Okinawa, Japan", polygon=((0, 100), (300, 100), (300, 120), (0, 120))),
+        TextEvidence("Published online: 10 Dec 2012.", polygon=((0, 130), (300, 130), (300, 150), (0, 150))),
+    )
+    item = RecognitionItem("body", "text", Rect(0, 0, 500, 150), 1, text_lines=lines)
+
+    elements = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 600, 800, (item,)),))
+    ).pages[0].elements
+
+    assert [element.text for element in elements] == [line.text for line in lines]
 
 
 def test_analyzer_merges_split_misclassified_table_captions_without_moving_the_table() -> None:
@@ -526,6 +918,27 @@ def test_font_size_uses_source_pitch_capped_by_ink_height() -> None:
     role = DocumentAnalyzer().analyze(RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))).roles[0]
 
     assert role.font_size_pt == 14.0
+
+
+def test_font_size_is_also_capped_by_source_character_width() -> None:
+    item = RecognitionItem(
+        "body",
+        "text",
+        Rect(100, 100, 700, 140),
+        1,
+        text_lines=(
+            TextEvidence(
+                "正文" * 10,
+                polygon=((100, 100), (700, 100), (700, 140), (100, 140)),
+            ),
+        ),
+    )
+
+    role = DocumentAnalyzer().analyze(
+        RecognitionEvidence((RecognitionPage(0, 1000, 1400, (item,)),))
+    ).roles[0]
+
+    assert role.font_size_pt == 18.0
 
 
 def test_analyzer_keeps_layout_and_tight_text_geometry_separate() -> None:

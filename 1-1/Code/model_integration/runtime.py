@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 import time
@@ -15,71 +16,12 @@ DOCFLOW_SRC_ROOT = CODE_ROOT / "docflow_src"
 if str(DOCFLOW_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(DOCFLOW_SRC_ROOT))
 
-from ..model import LayoutModelSpec, RuntimePaths
+from ..model import RuntimePaths
 from ..utils import ensure_runtime_paths
 from docflow.adapters.rapidai_table_adapter import RapidAITableAdapter
 
-DOCLAYOUT_YOLO_LABELS = [
-    "title",
-    "plain text",
-    "abandon",
-    "figure",
-    "figure_caption",
-    "table",
-    "table_caption",
-    "table_footnote",
-    "isolate_formula",
-    "formula_caption",
-]
-
-DEFAULT_LAYOUT_SCORE_THRESHOLD = 0.50
-DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD = 0.40
-DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD = 0.18
+DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD = 0.25
 RAW_RESULT_PREVIEW_MAX_TEXT = 300
-PICODET_LAYOUT_17CLS_LABELS = [
-    "text",
-    "title",
-    "list",
-    "table",
-    "figure",
-    "header",
-    "footer",
-    "reference",
-    "equation",
-    "abstract",
-    "content",
-    "figure_caption",
-    "table_caption",
-    "table_footnote",
-    "formula_caption",
-    "algorithm",
-    "seal",
-]
-PP_DOCLAYOUT_M_LABELS = [
-    "paragraph_title",
-    "image",
-    "text",
-    "number",
-    "abstract",
-    "content",
-    "figure_title",
-    "formula",
-    "table",
-    "table_title",
-    "reference",
-    "doc_title",
-    "footnote",
-    "header",
-    "algorithm",
-    "footer",
-    "seal",
-    "chart_title",
-    "chart",
-    "formula_number",
-    "header_image",
-    "footer_image",
-    "aside_text",
-]
 PP_DOCLAYOUT_V3_LABELS = [
     "abstract",
     "algorithm",
@@ -108,6 +50,37 @@ PP_DOCLAYOUT_V3_LABELS = [
     "vision_footnote",
 ]
 
+FORMULA_RAW_TYPES = {"display_formula", "equation", "formula", "inline_formula"}
+
+
+def sanitize_formula_latex(latex: str) -> str:
+    """修复公式模型常见的空格和重复命令，不做语义猜测。"""
+    value = str(latex or "").strip()
+    value = re.sub(
+        r"\\mathrm\{([A-Za-z ]+)\}",
+        lambda match: "\\mathrm{" + match.group(1).replace(" ", "") + "}",
+        value,
+    )
+    value = value.replace("\\bar{", "\\overline{")
+    value = value.replace("\\boldsymbol{", "\\mathbf{")
+    value = value.replace("\\mathfrak{", "\\mathrm{")
+    value = value.replace("\\fracfrac", "\\frac")
+    value = re.sub(
+        r"\\begin\{array\}\{[^{}]*\}(.*?)\\end\{array\}",
+        _unwrap_single_row_array,
+        value,
+        flags=re.S,
+    )
+    return value
+
+
+def _unwrap_single_row_array(match: re.Match) -> str:
+    body = match.group(1)
+    if len(re.split(r"\\\\", body)) != 1:
+        return match.group(0)
+    body = body.replace("&{{}=}&", "=").replace("&=", "=").replace("&", "")
+    return body.replace("\\\\", " ")
+
 
 def bootstrap_import_paths(paths: RuntimePaths) -> None:
     """将打包内的 Paddle 运行时与 DocFlow 源码加入导入路径。"""
@@ -117,105 +90,37 @@ def bootstrap_import_paths(paths: RuntimePaths) -> None:
             sys.path.insert(0, path_str)
 
 
-def resolve_layout_score_threshold(layout_spec: LayoutModelSpec) -> str:
-    """按模型类型选择版面置信度阈值，并允许通过环境变量覆盖。"""
+def resolve_layout_score_threshold() -> str:
+    """返回 PP-DocLayoutV3 置信度阈值，允许通过环境变量覆盖。"""
     raw_override = os.environ.get("DOCFLOW_LAYOUT_SCORE_THRESHOLD", "").strip()
     if raw_override:
         try:
             value = float(raw_override)
         except ValueError:
-            value = DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD
+            value = DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD
         else:
             value = min(1.0, max(0.01, value))
         return f"{value:.2f}"
-
-    spec_name = layout_spec.name.lower()
-    if "pp-doclayout-v3" in spec_name:
-        return f"{DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD:.2f}"
-    if "doclayout_yolo" in spec_name:
-        return f"{DEFAULT_DOCLAYOUT_YOLO_SCORE_THRESHOLD:.2f}"
-    return f"{DEFAULT_LAYOUT_SCORE_THRESHOLD:.2f}"
+    return f"{DEFAULT_PP_DOCLAYOUT_V3_SCORE_THRESHOLD:.2f}"
 
 
-def build_layout_dict_from_inference(layout_spec: LayoutModelSpec, fallback_dict_path: Path, out_dir: Path) -> Path:
-    """按模型 inference.yml 自动生成 layout 字典文件。"""
-    layout_model_dir = layout_spec.model_path if layout_spec.model_path.is_dir() else layout_spec.model_path.parent
-    inference_yml = layout_model_dir / "inference.yml"
-    if not inference_yml.is_file():
-        explicit_labels = {
-            "picodet-l_layout_17cls": PICODET_LAYOUT_17CLS_LABELS,
-            "pp-doclayout-m": PP_DOCLAYOUT_M_LABELS,
-            "pp-doclayout-v3": PP_DOCLAYOUT_V3_LABELS,
-        }.get(layout_spec.name)
-        if explicit_labels:
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out_name = layout_spec.dict_name or f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
-            out_path = out_dir / out_name
-            out_path.write_text("\n".join(explicit_labels) + "\n", encoding="utf-8")
-            return out_path
-        metadata_yml = layout_model_dir / "metadata.yaml"
-        if metadata_yml.is_file():
-            try:
-                import yaml
-
-                metadata = yaml.safe_load(metadata_yml.read_text(encoding="utf-8")) or {}
-                names = metadata.get("names")
-                if isinstance(names, dict):
-                    ordered = [names[idx] for idx in sorted(names)]
-                    if ordered:
-                        out_dir.mkdir(parents=True, exist_ok=True)
-                        out_name = layout_spec.dict_name or f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
-                        out_path = out_dir / out_name
-                        out_path.write_text("\n".join(ordered) + "\n", encoding="utf-8")
-                        return out_path
-            except Exception:
-                pass
-        if "doclayout_yolo" in layout_spec.name.lower():
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out_name = layout_spec.dict_name or f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
-            out_path = out_dir / out_name
-            out_path.write_text("\n".join(DOCLAYOUT_YOLO_LABELS) + "\n", encoding="utf-8")
-            return out_path
-        return fallback_dict_path
-
-    labels = []
-    in_label_list = False
-    with open(inference_yml, "r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            stripped = raw_line.strip()
-            if not in_label_list:
-                if stripped == "label_list:":
-                    in_label_list = True
-                continue
-            if stripped.startswith("- "):
-                label = stripped[2:].strip()
-                if label:
-                    labels.append(label)
-                continue
-            if stripped and not stripped.startswith("-"):
-                break
-
-    if not labels:
-        return fallback_dict_path
-
+def build_layout_dict(out_dir: Path) -> Path:
+    """生成 PP-DocLayoutV3 运行时需要的类别文件。"""
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_name = layout_spec.dict_name or f"layout_{layout_model_dir.name.replace('-', '_')}_dict.txt"
-    out_path = out_dir / out_name
-    out_path.write_text("\n".join(labels) + "\n", encoding="utf-8")
+    out_path = out_dir / "layout_pp_doclayout_v3_dict.txt"
+    out_path.write_text("\n".join(PP_DOCLAYOUT_V3_LABELS) + "\n", encoding="utf-8")
     return out_path
 
 
-def make_engine(paths: RuntimePaths, layout_dict_dir: Path, table_backend: str = "rapidai"):
+def make_engine(paths: RuntimePaths, layout_dict_dir: Path):
     """初始化 PaddleOCR 的 StructureSystem 引擎。"""
     from ppstructure.utility import parse_args
     from ppstructure.predict_system import StructureSystem
 
     ppstructure_dir = paths.paddle_root / "ppstructure"
-    fallback_layout_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "layout_dict" / "layout_cdla_dict.txt"
     rec_char_dict = paths.rec_char_dict
-    table_char_dict = paths.paddle_root / "ppocr" / "utils" / "dict" / "table_structure_dict_ch.txt"
-    layout_dict = build_layout_dict_from_inference(paths.layout_model_spec, fallback_layout_dict, layout_dict_dir)
-    layout_score_threshold = resolve_layout_score_threshold(paths.layout_model_spec)
+    layout_dict = build_layout_dict(layout_dict_dir)
+    layout_score_threshold = resolve_layout_score_threshold()
 
     argv = [
         "--recovery",
@@ -227,7 +132,7 @@ def make_engine(paths: RuntimePaths, layout_dict_dir: Path, table_backend: str =
         "--show_log",
         "False",
         "--table",
-        "False" if table_backend == "rapidai" else "True",
+        "False",
         "--layout_model_dir",
         str(paths.layout_model),
         "--layout_score_threshold",
@@ -240,10 +145,6 @@ def make_engine(paths: RuntimePaths, layout_dict_dir: Path, table_backend: str =
         str(paths.rec_model),
         "--rec_char_dict_path",
         str(rec_char_dict),
-        "--table_model_dir",
-        str(paths.table_model),
-        "--table_char_dict_path",
-        str(table_char_dict),
     ]
 
     old_argv = sys.argv[:]
@@ -259,25 +160,125 @@ def make_engine(paths: RuntimePaths, layout_dict_dir: Path, table_backend: str =
     return engine
 
 
+class FormulaRecognitionRunner:
+    """懒加载 PP-FormulaNet ONNX；缺少 ONNX 权重时直接报错。"""
+
+    def __init__(self, model_dir: Path) -> None:
+        self.model_dir = Path(model_dir)
+        self._session = None
+        self._preprocess = None
+        self._postprocess = None
+        self._input_name = None
+
+    def _onnx_path(self) -> Path | None:
+        for name in ("inference.onnx", "model.onnx"):
+            path = self.model_dir / name
+            if path.is_file():
+                return path
+        return None
+
+    def _load(self):
+        if self._session is not None:
+            return
+        onnx_path = self._onnx_path()
+        if onnx_path is None:
+            raise FileNotFoundError(
+                f"缺少公式 ONNX 权重：{self.model_dir / 'inference.onnx'}"
+            )
+        os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+        import onnxruntime as ort
+        import yaml
+        from paddlex.inference.models.formula_recognition.processors import (
+            LatexImageFormat,
+            UniMERNetDecode,
+            UniMERNetImgDecode,
+            UniMERNetTestTransform,
+        )
+
+        config_path = self.model_dir / "inference.yml"
+        if not config_path.is_file():
+            raise FileNotFoundError(f"缺少公式配置：{config_path}")
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        self._session = ort.InferenceSession(
+            str(onnx_path),
+            providers=["CPUExecutionProvider"],
+        )
+        self._preprocess = (
+            UniMERNetImgDecode((384, 384)),
+            UniMERNetTestTransform(),
+            LatexImageFormat(),
+        )
+        self._postprocess = UniMERNetDecode(config["PostProcess"]["character_dict"])
+        self._input_name = self._session.get_inputs()[0].name
+
+    def _predict_onnx(self, images: list[np.ndarray]) -> list[str]:
+        img_decode, test_transform, image_format = self._preprocess
+        decoded = img_decode(images)
+        transformed = test_transform(decoded)
+        formatted = image_format(transformed)
+        batch = np.concatenate(formatted)
+        output = self._session.run(None, {self._input_name: batch})[0]
+        preds = [np.asarray(output[index]).reshape(-1) for index in range(len(images))]
+        return [sanitize_formula_latex(str(value)) for value in self._postprocess(preds)]
+
+    def predict(self, images: list[np.ndarray]) -> list[str]:
+        if not images:
+            return []
+        self._load()
+        return self._predict_onnx(images)
+
+
+def recognize_formula_regions(image: np.ndarray, regions: list, recognizer) -> float:
+    """识别公式区域并将 LaTeX 写回原始 region。"""
+    if recognizer is None:
+        return 0.0
+    targets = []
+    crops = []
+    height, width = image.shape[:2]
+    for region in regions or ():
+        if not isinstance(region, dict):
+            continue
+        raw_type = str(region.get("raw_type") or region.get("type") or "").lower()
+        if raw_type not in FORMULA_RAW_TYPES:
+            continue
+        roi = region.get("img")
+        if not isinstance(roi, np.ndarray) or roi.size == 0:
+            try:
+                x1, y1, x2, y2 = (round(float(value)) for value in region["bbox"][:4])
+            except (KeyError, TypeError, ValueError):
+                continue
+            roi = image[max(0, y1):min(height, y2), max(0, x1):min(width, x2)]
+        if not isinstance(roi, np.ndarray) or roi.size == 0:
+            continue
+        targets.append(region)
+        crops.append(roi)
+
+    if not targets:
+        return 0.0
+    started = time.perf_counter()
+    latexes = recognizer.predict(crops)
+    for region, latex in zip(targets, latexes):
+        if latex:
+            region["res"] = {"latex": latex}
+    return time.perf_counter() - started
+
+
 class OpenVINOModelRuntime:
     """复用已加载模型，分别提供版面、OCR、表格和整页调用。"""
 
     def __init__(
         self,
-        layout_model_name: str = "pp-doclayout-v3",
-        table_engine: str = "auto",
-        full_page_table_fallback: bool = False,
         runtime_dir: str | Path | None = None,
+        formula_enabled: bool = True,
     ) -> None:
-        self.paths = RuntimePaths.discover(layout_model_name)
-        ensure_runtime_paths(self.paths)
+        self.paths = RuntimePaths.discover()
+        ensure_runtime_paths(self.paths, formula_enabled=formula_enabled)
         bootstrap_import_paths(self.paths)
         self.runtime_dir = Path(runtime_dir or Path(tempfile.gettempdir()) / "docflow_model_runtime")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.engine = make_engine(self.paths, self.runtime_dir)
-        self.table_engine = table_engine
-        self.full_page_table_fallback = full_page_table_fallback
         self._table_adapter = None
+        self._formula_recognizer = FormulaRecognitionRunner(self.paths.formula_model) if formula_enabled else None
 
     @staticmethod
     def _validate_image(image: np.ndarray) -> None:
@@ -288,8 +289,6 @@ class OpenVINOModelRuntime:
         if self._table_adapter is None:
             self._table_adapter = RapidAITableAdapter(
                 self.paths.models_openvino_root,
-                table_engine=self.table_engine,
-                full_page_fallback=self.full_page_table_fallback,
             )
         return self._table_adapter
 
@@ -316,17 +315,11 @@ class OpenVINOModelRuntime:
             )
         return {"lines": lines, "timing": dict(timing or {})}
 
-    def run_table(self, image: np.ndarray, table_engine: str | None = None) -> dict:
+    def run_table(self, image: np.ndarray) -> dict:
         """识别一张已经裁剪好的表格图片。"""
         self._validate_image(image)
         adapter = self._get_table_adapter()
-        previous = adapter.recognizer.table_engine_type
-        try:
-            if table_engine is not None:
-                adapter.recognizer.table_engine_type = table_engine
-            return adapter.recognizer.predict(image)
-        finally:
-            adapter.recognizer.table_engine_type = previous
+        return adapter.recognizer.predict(image)
 
     def run_document(
         self,
@@ -338,9 +331,10 @@ class OpenVINOModelRuntime:
         self._validate_image(image)
         started = time.perf_counter()
         regions, timing = self.engine(image, img_idx=page_index)
+        formula_elapsed = recognize_formula_regions(image, regions, getattr(self, "_formula_recognizer", None))
         table_started = time.perf_counter()
         has_table = any(str(region.get("type") or "").lower() == "table" for region in regions)
-        if has_table or self.full_page_table_fallback:
+        if has_table:
             regions = self._get_table_adapter().enrich(
                 image,
                 regions,
@@ -348,6 +342,7 @@ class OpenVINOModelRuntime:
                 Path(table_output_dir or self.runtime_dir / "tables"),
             )
         result_timing = dict(timing or {})
+        result_timing["formula"] = formula_elapsed
         result_timing["rapidai_table"] = time.perf_counter() - table_started
         result_timing["all_with_table"] = time.perf_counter() - started
         return {"regions": regions, "timing": result_timing}

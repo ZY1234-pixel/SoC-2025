@@ -1,7 +1,11 @@
 import pytest
 from docx import Document
 
-from test import _native_docx_table_count, _validate_content_integrity
+from test import (
+    _native_docx_table_count,
+    _validate_content_integrity,
+    summarize_raw_result,
+)
 from docflow.model.stages import (
     AnalysisPage,
     DocumentAnalysis,
@@ -34,3 +38,11 @@ def test_native_table_validation_counts_tables_nested_in_layout_cells(tmp_path) 
     document.save(output)
 
     assert _native_docx_table_count(output) == 1
+
+
+def test_raw_result_summary_keeps_formula_latex() -> None:
+    summary = summarize_raw_result(
+        [{"type": "equation", "raw_type": "inline_formula", "bbox": [0, 0, 10, 10], "res": {"latex": "x^2"}}]
+    )
+
+    assert summary["regions"][0]["res"] == {"latex": "x^2"}

@@ -2,19 +2,24 @@
 numpy>=1.23
 opencv-python-headless>=4.8
 pymupdf>=1.23
+quickjs==1.19.4
 python-docx>=0.8.11
+latex2mathml==3.78.1
+mathml2omml==0.0.2
 beautifulsoup4>=4.9
 lxml>=4.9
 Pillow>=9.0
+fontTools>=4.0
 pyyaml>=6.0
 tqdm>=4.66
 requests>=2.31
 openvino>=2025.3,<2026
 onnx>=1.16.1,<=1.17.0
+onnxruntime>=1.18
 rapidocr-onnxruntime==1.4.4
 wired-table-rec==1.2.0
-lineless-table-rec==0.1.0
 table-cls==1.2.0
+rapid-table==3.0.2
 torch>=2.0
 torchvision>=0.15
 

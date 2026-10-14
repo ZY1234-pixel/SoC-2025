@@ -26,17 +26,32 @@ from docflow.renderer.docx_utils.html_table import (
     get_table_cell_placements,
     get_table_cell_text_lines,
     get_table_column_weights,
+    table_cell_available_width,
 )
 from docflow.planning.text_metrics import (
-    estimate_text_units,
+    measure_text_width_pt,
     resolve_text_layout,
 )
 
 
+class LayoutFitError(RuntimeError):
+    """Raised when a page cannot satisfy the readable layout contract."""
+
+
 class ReflowPlanner:
     GRID_WORD_SAFETY_FACTOR = 0.94
+    FORMULA_WORD_SAFETY_FACTOR = 0.98
+    MIN_GAP_SCALE = 0.30
+    MIN_GAP_PT = 2.0
+    MIN_PAGE_SCALE = 0.75
+    MIN_BODY_FONT_PT = 7.5
+    MIN_HEADING_FONT_PT = 9.0
+    MIN_CAPTION_FONT_PT = 7.0
+    PAGE_HEIGHT_TOLERANCE_PT = 2.0
+    WRAPPED_SECTION_OVERHEAD_PT = 18.0
+    TABLE_PAGE_SAFETY_FACTOR = 0.82
 
-    def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.94) -> None:
+    def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.95) -> None:
         self.page_long_edge_pt = float(page_long_edge_pt)
         self.word_safety_factor = float(word_safety_factor)
 
@@ -84,16 +99,42 @@ class ReflowPlanner:
             for element in page.elements
             if element.kind == "figure_group"
             and element.bbox.y1 <= page.height_px * 0.01
-            and element.bbox.height <= page.height_px * 0.35
+            and element.bbox.height <= page.height_px * 0.12
             and (element.bbox.x2 <= page.width_px * 0.55 or element.bbox.x1 >= page.width_px * 0.45)
         )
+        edge_text_labels = {
+            element.element_id
+            for element in page.elements
+            if self._is_edge_text_label(element, page)
+        }
         furniture = [
             element
             for element in page.elements
-            if element.kind in {"header", "footer", "page_number"} or element.element_id in edge_visuals
+            if element.kind in {"header", "footer", "page_number"}
+            or element.element_id in edge_visuals
         ]
-        body = [element for element in page.elements if element not in furniture]
-        bounds = self._union(element.bbox for element in body) if body else Rect(0, 0, page.width_px, page.height_px)
+        embedded_table_text = self._embedded_table_text_ids(page.elements)
+        if embedded_table_text:
+            page = replace(
+                page,
+                elements=tuple(
+                    element
+                    for element in page.elements
+                    if element.element_id not in embedded_table_text
+                ),
+            )
+            furniture = [element for element in furniture if element.element_id not in embedded_table_text]
+        body = [
+            element
+            for element in page.elements
+            if element not in furniture
+        ]
+        bounds_body = [element for element in body if element.element_id not in edge_text_labels]
+        bounds = (
+            self._union(element.bbox for element in bounds_body)
+            if bounds_body
+            else Rect(0, 0, page.width_px, page.height_px)
+        )
         lower_furniture_top = min(
             (element.bbox.y1 for element in furniture if element.bbox.y1 >= bounds.y2),
             default=page.height_px,
@@ -107,7 +148,8 @@ class ReflowPlanner:
             bounds.x1 * scale,
         )
         usable_width = geometry.width_pt - geometry.margin_left_pt - geometry.margin_right_pt
-        sections, placement = self._build_sections(body, bounds, usable_width)
+        sections, placement, span_constraints = self._build_sections(body, bounds, usable_width)
+        sections, placement = self._pair_heading_icons(sections, body, placement, scale)
         sections, placement = self._promote_wrapped_media(sections, body, placement, scale)
         sections = tuple(self._with_vertical_tracks(section, body, scale) for section in sections)
         container_frames = self._container_frames(body, sections, placement, bounds)
@@ -148,11 +190,22 @@ class ReflowPlanner:
             element.element_id: self._table_font_size(element, scale, body_font_size)
             for element in page.elements
         }
+        column_offsets = self._column_offsets(sections, page.elements, placement, scale)
+        uniform_list_roles = self._uniform_list_roles(body, role_by_id)
+
+        def target_bbox(element):
+            return (
+                geometry.margin_left_pt + (element.bbox.x1 - bounds.x1) * scale,
+                geometry.margin_top_pt + (element.bbox.y1 - bounds.y1) * scale,
+                geometry.margin_left_pt + (element.bbox.x2 - bounds.x1) * scale,
+                geometry.margin_top_pt + (element.bbox.y2 - bounds.y1) * scale,
+            )
+
         planned = tuple(
             PlannedElement(
                 element.element_id,
                 element.kind,
-                role_id=element.role_id or default_body_role,
+                role_id=uniform_list_roles.get(element.element_id, element.role_id or default_body_role),
                 text=element.text,
                 text_structure=element.text_structure,
                 text_rows=element.text_rows,
@@ -160,32 +213,59 @@ class ReflowPlanner:
                 payload={
                     **dict(element.payload),
                     "source_bbox": (element.bbox.x1, element.bbox.y1, element.bbox.x2, element.bbox.y2),
-                    "width_fraction": min(
-                        (
-                            self._layout_bbox(element)
-                            if element.kind == "figure_group"
-                            else self._background_bbox(element)
-                        ).width
-                        / container_widths.get(element.element_id, max(bounds.width, 1.0)),
+                    "source_frame_width_px": max(
+                        container_frames.get(element.element_id, (bounds.x1, bounds.x2))[1]
+                        - container_frames.get(element.element_id, (bounds.x1, bounds.x2))[0],
                         1.0,
                     ),
-                    "column": placement.get(element.element_id, 0),
-                    "alignment": alignments[element.element_id],
+                    "target_bbox_pt": target_bbox(element),
+                    "target_width_pt": max(target_bbox(element)[2] - target_bbox(element)[0], 1.0),
+                    "target_height_pt": max(target_bbox(element)[3] - target_bbox(element)[1], 1.0),
+                    "width_fraction": span_constraints.get(element.element_id, {}).get(
+                        "width_fraction",
+                        min(
+                            (
+                                self._layout_bbox(element)
+                                if element.kind == "figure_group"
+                                else self._background_bbox(element)
+                            ).width
+                            / container_widths.get(element.element_id, max(bounds.width, 1.0)),
+                            1.0,
+                        ),
+                    ),
+                    "column": span_constraints.get(element.element_id, {}).get(
+                        "column",
+                        placement.get(element.element_id, 0),
+                    ),
+                    "alignment": (
+                        "left"
+                        if element.element_id in span_constraints and element.kind != "heading"
+                        else alignments[element.element_id]
+                    ),
                     "first_line_indent_pt": (
                         self._first_line_indent(element, scale)
                         - hanging_indents[element.element_id]
                         - option_indents[element.element_id]
                         + background_indents[element.element_id]
                     ),
-                    "left_indent_pt": horizontal_indents.get(
-                        element.element_id,
-                        (max(element.bbox.x1 * scale - geometry.margin_left_pt, 0.0), 0.0),
-                    )[0] + hanging_indents[element.element_id] + option_indents[element.element_id],
-                    "right_indent_pt": horizontal_indents.get(
-                        element.element_id,
-                        (0.0, max((page.width_px - element.bbox.x2) * scale - geometry.margin_right_pt, 0.0)),
-                    )[1],
+                    "left_indent_pt": max(
+                        horizontal_indents.get(
+                            element.element_id,
+                            (max(element.bbox.x1 * scale - geometry.margin_left_pt, 0.0), 0.0),
+                        )[0]
+                        + hanging_indents[element.element_id]
+                        + option_indents[element.element_id],
+                        span_constraints.get(element.element_id, {}).get("left_indent_pt", 0.0),
+                    ),
+                    "right_indent_pt": max(
+                        horizontal_indents.get(
+                            element.element_id,
+                            (0.0, max((page.width_px - element.bbox.x2) * scale - geometry.margin_right_pt, 0.0)),
+                        )[1],
+                        span_constraints.get(element.element_id, {}).get("right_indent_pt", 0.0),
+                    ),
                     "space_before_pt": vertical_spacing.get(element.element_id, 0.0),
+                    "column_offset_pt": column_offsets.get(element.element_id, 0.0),
                     "line_height_pt": self._source_line_height(
                         element,
                         role_by_id.get(element.role_id or default_body_role),
@@ -212,7 +292,15 @@ class ReflowPlanner:
             for element in page.elements
         )
         usable_height = geometry.height_pt - geometry.margin_top_pt - geometry.margin_bottom_pt
-        fit_scale = self._fit_scale(sections, planned, role_by_id, usable_width, usable_height)
+        fit_scale, gap_scale = self._fit_page(
+            sections,
+            planned,
+            role_by_id,
+            usable_width,
+            usable_height,
+            page_index=page.page_index,
+        )
+        planned = self._with_compressed_gaps(planned, gap_scale)
         sections = tuple(
             replace(
                 section,
@@ -230,20 +318,6 @@ class ReflowPlanner:
             )
             else section
             for section in sections
-        )
-        planned_by_id = {element.element_id: element for element in planned}
-        fixed_grid_sections = tuple(
-            section
-            for section in sections
-            if section.kind == FlowKind.GRID
-            and any(self._is_floating_figure_cell(cell, planned_by_id) for cell in section.grid_cells)
-        )
-        grid_fit_scales = self._grid_cell_fit_scales(fixed_grid_sections, planned, role_by_id, fit_scale)
-        planned = tuple(
-            replace(element, payload={**element.payload, "grid_fit_scale": grid_fit_scales[element.element_id]})
-            if element.element_id in grid_fit_scales
-            else element
-            for element in planned
         )
         planned = self._resolve_text_layouts(sections, planned, role_by_id, fit_scale, usable_width)
         header_ids = tuple(
@@ -267,6 +341,7 @@ class ReflowPlanner:
     def _build_sections(self, elements, bounds: Rect, usable_width: float):
         sections = []
         placement = {}
+        span_constraints = {}
         anchor_lanes = self._anchor_lanes(elements, bounds.width)
         if len(anchor_lanes) < 2:
             anchor_lanes = self._local_visual_lanes(elements, bounds.width) or anchor_lanes
@@ -274,50 +349,210 @@ class ReflowPlanner:
             (median(self._layout_bbox(item).x1 for item in lane), median(self._layout_bbox(item).x2 for item in lane))
             for lane in anchor_lanes
         ]
-        spanning = []
-        for element in elements:
-            layout_bbox = self._layout_bbox(element)
-            overlap_count = sum(
-                1
-                for left, right in lane_bounds
-                if max(0.0, min(layout_bbox.x2, right) - max(layout_bbox.x1, left))
-                / max(right - left, 1.0)
-                >= 0.20
+        separators = [(left[1] + right[0]) / 2.0 for left, right in zip(lane_bounds, lane_bounds[1:])]
+        spanning = [
+            element
+            for element in elements
+            if any(
+                self._layout_bbox(element).x1 < separator - 1.0
+                and self._layout_bbox(element).x2 > separator + 1.0
+                for separator in separators
             )
-            lane_center = (lane_bounds[0][0] + lane_bounds[-1][1]) / 2.0 if lane_bounds else 0.0
-            centered_heading = element.kind == "heading" and abs(
-                (layout_bbox.x1 + layout_bbox.x2) / 2.0 - lane_center
-            ) <= bounds.width * 0.05
-            is_spanning = len(lane_bounds) >= 2 and (overlap_count == len(lane_bounds) or centered_heading)
-            if is_spanning:
-                spanning.append(element)
-
+        ]
+        lane_elements = [element for element in elements if element not in spanning]
+        refined_lanes = self._anchor_lanes(lane_elements, bounds.width)
+        if len(refined_lanes) >= 2:
+            lane_bounds = [
+                (median(self._layout_bbox(item).x1 for item in lane), median(self._layout_bbox(item).x2 for item in lane))
+                for lane in refined_lanes
+            ]
+            separators = [(left[1] + right[0]) / 2.0 for left, right in zip(lane_bounds, lane_bounds[1:])]
+            spanning = [
+                element
+                for element in elements
+                if any(
+                    self._layout_bbox(element).x1 < separator - 1.0
+                    and self._layout_bbox(element).x2 > separator + 1.0
+                    for separator in separators
+                )
+            ]
+        non_spanning = [element for element in elements if element not in spanning]
+        spanning = [
+            element
+            for element in spanning
+            if not any(
+                max(0.0, min(element.bbox.y2, other.bbox.y2) - max(element.bbox.y1, other.bbox.y1))
+                >= min(element.bbox.height, other.bbox.height) * 0.30
+                for other in non_spanning
+            )
+        ]
         spanning.sort(key=lambda item: ((item.bbox.y1 + item.bbox.y2) / 2.0, item.bbox.x1))
-        cuts = [(item.bbox.y1 + item.bbox.y2) / 2.0 for item in spanning]
-        bands = [[] for _ in range(len(spanning) + 1)]
-        spanning_ids = {item.element_id for item in spanning}
+        groups = []
+        for element in spanning:
+            if groups:
+                group = groups[-1]
+                ordered = sorted((*group, element), key=lambda item: item.bbox.x1)
+                no_overlap = all(left.bbox.x2 <= right.bbox.x1 + 1.0 for left, right in zip(ordered, ordered[1:]))
+                overlap = min(member.bbox.y2 for member in group) - max(member.bbox.y1 for member in group)
+                reference = min(min(member.bbox.height for member in group), element.bbox.height)
+                if no_overlap and overlap >= reference * 0.50:
+                    group.append(element)
+                    continue
+            groups.append([element])
+        cuts = [(min(item.bbox.y1 for item in group) + max(item.bbox.y2 for item in group)) / 2.0 for group in groups]
+        bands = [[] for _ in range(len(groups) + 1)]
+        spanning_ids = {element.element_id for element in spanning}
         for element in elements:
             if element.element_id not in spanning_ids:
-                center = (element.bbox.y1 + element.bbox.y2) / 2.0
-                bands[bisect_right(cuts, center)].append(element)
-
+                bands[bisect_right(cuts, (element.bbox.y1 + element.bbox.y2) / 2.0)].append(element)
         for index, band in enumerate(bands):
             if band:
-                section, columns = self._narrow_section(
-                    band,
-                    bounds,
-                    usable_width,
-                    len(sections),
-                    anchor_lanes,
-                )
+                section, columns = self._narrow_section(band, bounds, usable_width, len(sections), anchor_lanes)
                 sections.append(section)
                 placement.update(columns)
-            if index < len(spanning):
-                element = spanning[index]
-                section_id = f"section_{len(sections)}"
+            if index >= len(groups):
+                continue
+            group = groups[index]
+            section_id = f"section_{len(sections)}"
+            if len(group) == 1:
+                element = group[0]
+                span_constraints[element.element_id] = {
+                    "left_indent_pt": max(element.bbox.x1 - bounds.x1, 0.0) / max(bounds.width, 1.0) * usable_width,
+                    "right_indent_pt": max(bounds.x2 - element.bbox.x2, 0.0) / max(bounds.width, 1.0) * usable_width,
+                    "width_fraction": max(element.bbox.width, 1.0) / max(bounds.width, 1.0),
+                    "column": 0,
+                }
                 sections.append(FlowSection(section_id, FlowKind.SINGLE, (element.element_id,)))
                 placement[element.element_id] = 0
-        return tuple(sections), placement
+                continue
+            ordered = sorted(group, key=lambda item: item.bbox.x1)
+            widths = [max(item.bbox.width / max(bounds.width, 1.0) * usable_width, 1.0) for item in ordered]
+            gaps = [
+                max(right.bbox.x1 - left.bbox.x2, 0.0) / max(bounds.width, 1.0) * usable_width
+                for left, right in zip(ordered, ordered[1:])
+            ]
+            sections.append(
+                FlowSection(
+                    section_id,
+                    FlowKind.SEQUENTIAL_COLUMNS,
+                    tuple(item.element_id for item in ordered),
+                    column_widths_pt=tuple(widths),
+                    gutter_pt=median(gaps) if gaps else 0.0,
+                )
+            )
+            placement.update({item.element_id: column for column, item in enumerate(ordered)})
+        return tuple(sections), placement, span_constraints
+
+    @staticmethod
+    def _pair_heading_icons(sections, elements, placement, source_scale: float):
+        by_id = {element.element_id: element for element in elements}
+        paired = []
+        updated_placement = dict(placement)
+        index = 0
+        while index < len(sections):
+            current = sections[index]
+            next_section = sections[index + 1] if index + 1 < len(sections) else None
+            pair = None
+            if (
+                next_section is not None
+                and current.kind == FlowKind.SINGLE
+                and next_section.kind == FlowKind.SINGLE
+                and len(next_section.element_ids) == 1
+            ):
+                heading = by_id[next_section.element_ids[0]]
+                figures = [
+                    by_id[identifier]
+                    for identifier in current.element_ids
+                    if by_id[identifier].kind == "figure_group"
+                ]
+                if heading.kind == "heading" and len(figures) == 1:
+                    figure = figures[0]
+                    overlap = max(0.0, min(figure.bbox.y2, heading.bbox.y2) - max(figure.bbox.y1, heading.bbox.y1))
+                    gap = max(heading.bbox.x1 - figure.bbox.x2, figure.bbox.x1 - heading.bbox.x2, 0.0)
+                    if overlap / max(min(figure.bbox.height, heading.bbox.height), 1.0) >= 0.50 and gap <= heading.bbox.height * 2.0:
+                        pair = (figure, heading)
+            if pair is None:
+                paired.append(current)
+                index += 1
+                continue
+            figure, heading = pair
+            remaining_ids = tuple(identifier for identifier in current.element_ids if identifier != figure.element_id)
+            if remaining_ids:
+                paired.append(replace(current, element_ids=remaining_ids))
+            widths = (
+                max(figure.bbox.width * source_scale, 1.0),
+                max(heading.bbox.width * source_scale, 1.0),
+            )
+            updated_placement[figure.element_id] = 0
+            updated_placement[heading.element_id] = 1
+            paired.append(
+                FlowSection(
+                    f"section_{len(paired)}",
+                    FlowKind.GRID,
+                    (figure.element_id, heading.element_id),
+                    column_widths_pt=widths,
+                    gutter_pt=max(max(figure.bbox.x1, heading.bbox.x1) - min(figure.bbox.x2, heading.bbox.x2), 0.0)
+                    * source_scale,
+                    grid_cells=(
+                        GridCell(0, 0, (figure.element_id,)),
+                        GridCell(0, 1, (heading.element_id,)),
+                    ),
+                )
+            )
+            index += 2
+        return tuple(paired), updated_placement
+
+    @staticmethod
+    def _column_offsets(sections, elements, placement, source_scale: float):
+        by_id = {element.element_id: element for element in elements}
+        offsets = {}
+        for section in sections:
+            if section.kind != FlowKind.SEQUENTIAL_COLUMNS or not section.element_ids:
+                continue
+            first_by_column = {}
+            for identifier in section.element_ids:
+                element = by_id[identifier]
+                column = int(placement.get(identifier, 0))
+                if column not in first_by_column or element.bbox.y1 < first_by_column[column].bbox.y1:
+                    first_by_column[column] = element
+            top = min(element.bbox.y1 for element in first_by_column.values())
+            offsets.update(
+                {
+                    element.element_id: max(element.bbox.y1 - top, 0.0) * source_scale
+                    for element in first_by_column.values()
+                }
+            )
+        return offsets
+
+    @staticmethod
+    def _uniform_list_roles(elements, role_by_id):
+        ordered = sorted(
+            (
+                element
+                for element in elements
+                if element.kind == "paragraph_group" and element.text_structure.is_list
+            ),
+            key=lambda element: (element.bbox.y1, element.bbox.x1),
+        )
+        groups = []
+        for element in ordered:
+            if (
+                groups
+                and element.bbox.y1 <= max(member.bbox.y2 for member in groups[-1]) + max(element.bbox.height, 1.0) * 1.5
+            ):
+                groups[-1].append(element)
+            else:
+                groups.append([element])
+        overrides = {}
+        for group in groups:
+            roles = [role_by_id.get(element.role_id) for element in group]
+            roles = [role for role in roles if role is not None]
+            if len(group) < 2 or not roles:
+                continue
+            target_size = median(role.font_size_pt for role in roles)
+            target = min(roles, key=lambda role: abs(role.font_size_pt - target_size))
+            overrides.update({element.element_id: target.role_id for element in group})
+        return overrides
 
     @staticmethod
     def _promote_wrapped_media(sections, elements, placement, source_scale: float):
@@ -392,6 +627,52 @@ class ReflowPlanner:
             updated_placement.update((identifier, 0) for identifier in element_ids)
             index = next_index
         return tuple(promoted), updated_placement
+
+    @staticmethod
+    def _embedded_table_text_ids(elements) -> set[str]:
+        tables = [
+            element
+            for element in elements
+            if element.kind == "table_group" and element.payload.get("html")
+        ]
+        embedded = set()
+        for element in elements:
+            if element.kind not in {"paragraph_group", "footnote", "caption"} or not element.text:
+                continue
+            text = "".join(str(element.text).split())
+            for table in tables:
+                cell_texts = [
+                    "".join(node.get_text(" ", strip=True).split())
+                    for node in BeautifulSoup(str(table.payload["html"]), "html.parser").find_all(["td", "th"])
+                ]
+                contains = False
+                for table_text in cell_texts:
+                    common_prefix = 0
+                    for left, right in zip(text, table_text):
+                        if left != right:
+                            break
+                        common_prefix += 1
+                    if (
+                        text in table_text
+                        or (len(table_text) >= 4 and table_text in text)
+                        or common_prefix >= 4
+                    ):
+                        contains = True
+                        break
+                if not text or not contains:
+                    continue
+                horizontal = max(
+                    0.0,
+                    min(element.bbox.x2, table.bbox.x2) - max(element.bbox.x1, table.bbox.x1),
+                ) / max(element.bbox.width, 1.0)
+                vertical_overlap = max(
+                    0.0,
+                    min(element.bbox.y2, table.bbox.y2) - max(element.bbox.y1, table.bbox.y1),
+                )
+                if horizontal >= 0.5 and vertical_overlap >= element.bbox.height * 0.5:
+                    embedded.add(element.element_id)
+                    break
+        return embedded
 
     @staticmethod
     def _container_frames(elements, sections, placement, bounds: Rect):
@@ -502,12 +783,24 @@ class ReflowPlanner:
                     0.0,
                 )
                 continue
+            if (
+                element.kind == "paragraph_group"
+                and section_kind == FlowKind.SINGLE
+                and ReflowPlanner._alignment(element, (left, right)) in {"left", "justify"}
+            ):
+                target_width = target_widths[element.element_id]
+                result[element.element_id] = (
+                    max(visual_bbox.x1 - left, 0.0) / source_width * target_width,
+                    0.0,
+                )
+                continue
             if element.kind != "paragraph_group" or width_fraction < 0.3 or single_flow_uses_full_width:
                 result[element.element_id] = (0.0, 0.0)
                 continue
             target_width = target_widths[element.element_id]
+            alignment = ReflowPlanner._alignment(element, (left, right))
             right_indent = max(right - visual_bbox.x2, 0.0) / source_width * target_width
-            if element.text_structure.preserve_source_lines:
+            if element.text_structure.preserve_source_lines or alignment in {"left", "justify"}:
                 right_indent = 0.0
             result[element.element_id] = (
                 max(visual_bbox.x1 - left, 0.0) / source_width * target_width,
@@ -620,29 +913,11 @@ class ReflowPlanner:
         ]
         updated_lane_bounds = []
         for index, members in enumerate(lane_members):
-            text_members = [
-                item
-                for item in members
-                if item.kind in {"paragraph_group", "heading", "caption"}
-            ]
-            if len(lane_members) >= 3 and len(text_members) >= 2:
+            if members:
                 updated_lane_bounds.append(
                     (
-                        median(self._layout_bbox(item).x1 for item in text_members),
-                        median(self._layout_bbox(item).x2 for item in text_members),
-                    )
-                )
-            elif members:
-                visual_members = [
-                    item
-                    for item in members
-                    if item.kind in {"figure_group", "table_group"} or item.payload.get("background_bbox")
-                ]
-                frame_members = visual_members or members
-                updated_lane_bounds.append(
-                    (
-                        min(self._layout_bbox(item).x1 for item in frame_members),
-                        max(self._layout_bbox(item).x2 for item in frame_members),
+                        min(self._layout_bbox(item).x1 for item in members),
+                        max(self._layout_bbox(item).x2 for item in members),
                     )
                 )
             else:
@@ -673,20 +948,27 @@ class ReflowPlanner:
             sum(column_widths[start : start + span]) + gutter * (span - 1)
             for start, span in logical_columns
         ]
+        logical_text_counts = [
+            sum(
+                item.kind in {"paragraph_group", "heading", "caption"}
+                and start <= placement[item.element_id] < start + span
+                for item in elements
+            )
+            for start, span in logical_columns
+        ]
         independent_columns = (
             len(logical_columns) >= 2
-            and max(logical_widths) <= min(logical_widths) * 1.5
+            and (
+                max(logical_widths) <= min(logical_widths) * 1.5
+                or all(count >= 3 for count in logical_text_counts)
+            )
             and all(
                 left + span <= right
                 for (left, span), (right, _next_span) in zip(logical_columns, logical_columns[1:])
             )
             and all(
-                sum(
-                    item.kind in {"paragraph_group", "heading", "caption"}
-                    and start <= placement[item.element_id] < start + span
-                    for item in elements
-                ) >= 2
-                for start, span in logical_columns
+                count >= 2
+                for count in logical_text_counts
             )
             and all(
                 sum(
@@ -776,17 +1058,6 @@ class ReflowPlanner:
             ), placement
 
         has_spanning = max(spans.values(), default=1) > 1
-        has_vertical_text = any(item.text_structure.orientation == "vertical" for item in elements)
-        if has_spanning and not has_vertical_text:
-            cells = self._column_band_grid_cells(elements, placement, spans, len(lanes))
-            return FlowSection(
-                section_id,
-                FlowKind.GRID,
-                element_ids,
-                column_widths_pt=column_widths,
-                gutter_pt=gutter,
-                grid_cells=cells,
-            ), placement
 
         rows = self._spanning_grid_rows(elements) if has_spanning else self._grid_rows(elements)
         cells = defaultdict(list)
@@ -1070,51 +1341,6 @@ class ReflowPlanner:
         return rows
 
     @staticmethod
-    def _column_band_grid_cells(elements, placement, spans, column_count: int) -> tuple[GridCell, ...]:
-        spanning = sorted(
-            (item for item in elements if spans[item.element_id] > 1),
-            key=lambda item: ReflowPlanner._layout_bbox(item).y1,
-        )
-        tolerance = median(ReflowPlanner._layout_bbox(item).height for item in spanning) * 0.15
-        events = []
-        for item in spanning:
-            top = ReflowPlanner._layout_bbox(item).y1
-            if not events or top - events[-1][0] > tolerance:
-                events.append((top, [item]))
-            else:
-                events[-1][1].append(item)
-        single_column = [item for item in elements if spans[item.element_id] == 1]
-        row_count = len(events) * 2 + 1
-        cells = [
-            GridCell(event_index * 2 + 1, placement[item.element_id], (item.element_id,), column_span=spans[item.element_id])
-            for event_index, (_top, items) in enumerate(events)
-            for item in items
-        ]
-        for column in range(column_count):
-            column_items = [item for item in single_column if placement[item.element_id] == column]
-            if not column_items:
-                continue
-            first_top = min(ReflowPlanner._layout_bbox(item).y1 for item in column_items)
-            covering_events = [
-                event_index
-                for event_index, (top, items) in enumerate(events)
-                if max(ReflowPlanner._layout_bbox(item).y2 for item in items) <= first_top + tolerance
-                or any(
-                    placement[item.element_id] <= column < placement[item.element_id] + spans[item.element_id]
-                    for item in items
-                )
-            ]
-            groups = defaultdict(list)
-            for item in sorted(column_items, key=lambda value: ReflowPlanner._layout_bbox(value).y1):
-                segment = sum(events[event_index][0] <= ReflowPlanner._layout_bbox(item).y1 for event_index in covering_events)
-                groups[segment].append(item.element_id)
-            for segment, identifiers in groups.items():
-                start = 0 if segment == 0 else covering_events[segment - 1] * 2 + 2
-                end = row_count if segment == len(covering_events) else covering_events[segment] * 2 + 1
-                cells.append(GridCell(start, column, tuple(identifiers), row_span=end - start))
-        return tuple(sorted(cells, key=lambda cell: (cell.row, cell.column)))
-
-    @staticmethod
     def _vertical_spacing(elements, sections, placement, source_scale: float):
         by_id = {element.element_id: element for element in elements}
         spacing = {}
@@ -1145,7 +1371,11 @@ class ReflowPlanner:
                 ]
                 if predecessors:
                     previous = max(predecessors, key=lambda element: element.bbox.y2)
-                    spacing[identifier] = max(current.bbox.y1 - previous.bbox.y2, 0.0) * source_scale
+                    spacing[identifier] = ReflowPlanner._capped_paragraph_gap(
+                        current,
+                        previous,
+                        max(current.bbox.y1 - previous.bbox.y2, 0.0),
+                    ) * source_scale
                 elif section.kind == FlowKind.GRID and identifier in grid_cell_by_id:
                     current_cell = grid_cell_by_id[identifier]
                     previous_rows = [
@@ -1157,7 +1387,11 @@ class ReflowPlanner:
                     ]
                     if previous_rows:
                         previous = max(previous_rows, key=lambda element: element.bbox.y2)
-                        spacing[identifier] = max(current.bbox.y1 - previous.bbox.y2, 0.0) * source_scale
+                        spacing[identifier] = ReflowPlanner._capped_paragraph_gap(
+                            current,
+                            previous,
+                            max(current.bbox.y1 - previous.bbox.y2, 0.0),
+                        ) * source_scale
                 if section.kind != FlowKind.GRID:
                     by_column[column].append(current)
         section_elements = [
@@ -1199,37 +1433,142 @@ class ReflowPlanner:
             spacing.update((identifier, gap) for identifier in first_ids)
         return spacing
 
+    @staticmethod
+    def _capped_paragraph_gap(current, previous, gap_px: float) -> float:
+        if current.kind != "paragraph_group" or previous.kind != "paragraph_group":
+            return gap_px
+        return min(gap_px, max(ReflowPlanner._line_pitch_px(current), ReflowPlanner._line_pitch_px(previous)))
+
+    @staticmethod
+    def _line_pitch_px(element) -> float:
+        rows = element.text_rows
+        tops = tuple(row.bbox.y1 for row in rows) or element.payload.get("line_tops_px") or ()
+        if len(tops) >= 2:
+            pitches = [right - left for left, right in zip(tops, tops[1:]) if right > left]
+            if pitches:
+                return median(pitches)
+        pitches = element.payload.get("line_pitches_px") or ()
+        if pitches:
+            return median(float(value) for value in pitches)
+        line_count = len(rows) or len(element.payload.get("lines") or ()) or 1
+        return max(element.bbox.height / line_count, 1.0)
+
     def _fit_scale(self, sections, elements, roles, usable_width: float, usable_height: float) -> float:
+        return self._fit_page(sections, elements, roles, usable_width, usable_height)[0]
+
+    def _fit_page(
+        self,
+        sections,
+        elements,
+        roles,
+        usable_width: float,
+        usable_height: float,
+        page_index: int | None = None,
+    ) -> tuple[float, float]:
         by_id = {element.element_id: element for element in elements}
+        has_formulas = any(
+            (element.kind == "equation_group" and element.payload.get("latex"))
+            or element.payload.get("inline_formulas")
+            or (element.kind == "table_group" and "docflow-formula" in str(element.payload.get("html") or ""))
+            for element in elements
+        )
         has_fixed_grid_tracks = any(
             section.kind == FlowKind.GRID
             and any(self._is_floating_figure_cell(cell, by_id) for cell in section.grid_cells)
             for section in sections
         )
         safety_factor = (
-            min(self.word_safety_factor, self.GRID_WORD_SAFETY_FACTOR)
+            min(
+                self.word_safety_factor,
+                self.GRID_WORD_SAFETY_FACTOR,
+                self.FORMULA_WORD_SAFETY_FACTOR if has_formulas else 1.0,
+            )
             if has_fixed_grid_tracks
-            else self.word_safety_factor
+            else min(self.word_safety_factor, self.FORMULA_WORD_SAFETY_FACTOR if has_formulas else 1.0)
         )
+        if any(element.kind == "table_group" and element.payload.get("html") for element in elements):
+            safety_factor = min(safety_factor, self.TABLE_PAGE_SAFETY_FACTOR)
         target = max(usable_height * safety_factor, 1.0)
         section_overhead = sum(section.kind != FlowKind.SINGLE for section in sections) * 0.05
+        section_overhead += sum(
+            self.WRAPPED_SECTION_OVERHEAD_PT
+            for section in sections
+            if section.kind == FlowKind.WRAPPED
+        )
 
-        def content_height(scale: float) -> float:
+        def content_height(scale: float, gap_scale: float) -> float:
+            adjusted = self._with_compressed_gaps(elements, gap_scale)
             return section_overhead + sum(
-                self._section_height(section, elements, roles, usable_width, scale) for section in sections
+                self._section_height(section, adjusted, roles, usable_width, scale) for section in sections
             )
 
-        upper = 1.0
-        if content_height(upper) <= target:
-            return upper
-        lower = 0.0
+        if content_height(1.0, 1.0) <= target:
+            return 1.0, 1.0
+
+        if content_height(1.0, self.MIN_GAP_SCALE) <= target:
+            lower, upper = self.MIN_GAP_SCALE, 1.0
+            for _ in range(10):
+                middle = (lower + upper) / 2.0
+                if content_height(1.0, middle) <= target:
+                    lower = middle
+                else:
+                    upper = middle
+            return 1.0, lower
+
+        minimum_scale = self._minimum_page_scale(elements, roles)
+        physical_available = max(usable_height, 1.0)
+        if content_height(minimum_scale, self.MIN_GAP_SCALE) > physical_available + self.PAGE_HEIGHT_TOLERANCE_PT:
+            available = physical_available
+            required = content_height(minimum_scale, self.MIN_GAP_SCALE)
+            raise LayoutFitError(
+                f"page {page_index if page_index is not None else '?'} cannot fit within readable limits: "
+                f"required={required:.2f}pt available={available:.2f}pt min_scale={minimum_scale:.3f}"
+            )
+        lower, upper = minimum_scale, 1.0
         for _ in range(12):
             middle = (lower + upper) / 2.0
-            if content_height(middle) <= target:
+            if content_height(middle, self.MIN_GAP_SCALE) <= target:
                 lower = middle
             else:
                 upper = middle
-        return max(lower, 0.001)
+        return max(lower, minimum_scale), self.MIN_GAP_SCALE
+
+    def _minimum_page_scale(self, elements, roles) -> float:
+        minimum = self.MIN_PAGE_SCALE
+        for element in elements:
+            role = roles.get(element.role_id)
+            if role is None or not element.text:
+                continue
+            if element.kind == "heading" or str(role.role_id).startswith("heading"):
+                minimum_font = self.MIN_HEADING_FONT_PT
+            elif element.kind == "caption" or str(role.role_id).startswith("caption"):
+                minimum_font = self.MIN_CAPTION_FONT_PT
+            else:
+                minimum_font = self.MIN_BODY_FONT_PT
+            minimum = max(minimum, minimum_font / max(float(role.font_size_pt), 0.5))
+        return min(minimum, 1.0)
+
+    @classmethod
+    def _with_compressed_gaps(cls, elements, gap_scale: float):
+        if gap_scale >= 1.0:
+            return elements
+        adjusted = []
+        for element in elements:
+            original = float(element.payload.get("space_before_pt", 0.0))
+            if original <= 0:
+                adjusted.append(element)
+                continue
+            floor = min(original, cls.MIN_GAP_PT)
+            if element.kind == "caption":
+                floor = max(floor, min(original, 12.0))
+            compressed = max(original * gap_scale, floor)
+            adjusted.append(
+                replace(
+                    element,
+                    payload={**element.payload, "space_before_pt": compressed},
+                )
+            )
+        return tuple(adjusted)
 
     @staticmethod
     def _is_floating_figure_cell(cell, elements) -> bool:
@@ -1301,7 +1640,10 @@ class ReflowPlanner:
         constraints = defaultdict(list)
         for cell in section.grid_cells:
             width = sum(widths[cell.column : cell.column + cell.column_span]) + section.gutter_pt * (cell.column_span - 1)
-            height = sum(self._element_height(by_id[identifier], roles, width, fit_scale) for identifier in cell.element_ids)
+            height = sum(
+                self._element_height(by_id[identifier], roles, width, fit_scale)
+                for identifier in cell.element_ids
+            )
             constraints[cell.row].append((cell.row + cell.row_span, height))
         boundaries = [0.0] * (row_count + 1)
         for start in range(row_count):
@@ -1309,55 +1651,6 @@ class ReflowPlanner:
             for end, height in constraints[start]:
                 boundaries[end] = max(boundaries[end], boundaries[start] + height)
         return tuple(right - left for left, right in zip(boundaries, boundaries[1:]))
-
-    def _grid_cell_fit_scales(self, sections, elements, roles, fit_scale: float) -> dict[str, float]:
-        by_id = {element.element_id: element for element in elements}
-        scales = {}
-        for section in sections:
-            if section.kind != FlowKind.GRID:
-                continue
-            for cell in section.grid_cells:
-                cell_elements = [by_id[identifier] for identifier in cell.element_ids]
-                if not cell_elements or any(
-                    element.kind not in {"heading", "paragraph_group", "caption"} or not element.text
-                    for element in cell_elements
-                ):
-                    continue
-                visual_lines = sum(
-                    len(element.text_rows)
-                    or int(element.payload.get("visual_line_count") or len(element.payload.get("lines") or ()) or 1)
-                    for element in cell_elements
-                )
-                if visual_lines == 1:
-                    continue
-                width = (
-                    sum(section.column_widths_pt[cell.column : cell.column + cell.column_span])
-                    + section.gutter_pt * (cell.column_span - 1)
-                )
-                available = (
-                    sum(section.row_heights_pt[cell.row : cell.row + cell.row_span])
-                    * fit_scale
-                    * min(self.word_safety_factor, self.GRID_WORD_SAFETY_FACTOR)
-                )
-
-                def content_height(local_scale: float) -> float:
-                    return sum(
-                        self._element_height(element, roles, width, fit_scale * local_scale)
-                        for element in cell_elements
-                    )
-
-                if content_height(1.0) <= available:
-                    continue
-                lower, upper = 0.0, 1.0
-                for _ in range(12):
-                    middle = (lower + upper) / 2.0
-                    if content_height(middle) <= available:
-                        lower = middle
-                    else:
-                        upper = middle
-                for element in cell_elements:
-                    scales[element.element_id] = max(lower, 0.001)
-        return scales
 
     @staticmethod
     def _resolve_text_layouts(sections, elements, roles, fit_scale: float, usable_width: float):
@@ -1392,7 +1685,7 @@ class ReflowPlanner:
                     element,
                     roles.get(element.role_id),
                     widths[element.element_id],
-                    fit_scale * float(element.payload.get("grid_fit_scale", 1.0)),
+                    fit_scale,
                 ),
             )
             for element in elements
@@ -1437,6 +1730,7 @@ class ReflowPlanner:
     def _element_height(element, roles, width: float, fit_scale: float) -> float:
         role = roles.get(element.role_id)
         spacing = float(element.payload.get("space_before_pt", 0.0)) * fit_scale
+        spacing += float(element.payload.get("column_offset_pt", 0.0)) * fit_scale
         if element.kind == "table_group" and element.payload.get("html"):
             soup = BeautifulSoup(str(element.payload["html"]), "html.parser")
             table = soup.find("table")
@@ -1449,12 +1743,22 @@ class ReflowPlanner:
             )
             placements = get_table_cell_placements(table) if table else []
             table_width = width * float(element.payload.get("width_fraction", 1.0))
+            cell_geometry = {
+                (int(row), int(column)): (vertical, top, bottom, start, end)
+                for row, column, vertical, top, bottom, start, end in element.payload.get("table_cell_geometry", ())
+            }
             minimum_size = float(element.payload.get("table_min_font_size_pt", 0.5))
             fit_size = min(
                 (
-                    (table_width * sum(weights[column : column + span]) / max(sum(weights), 1.0) - 2.0)
-                    * 0.96
-                    / max((estimate_text_units(line) for line in get_table_cell_text_lines(cell)), default=1.0)
+                    table_cell_available_width(
+                        table_width * sum(weights[column : column + span]) / max(sum(weights), 1.0),
+                    cell_geometry.get((_row, column), ("center", 0, 0, 0, 0))[3],
+                    cell_geometry.get((_row, column), ("center", 0, 0, 0, 0))[4],
+                    )
+                    / max(
+                        (measure_text_width_pt(line, 1.0) for line in get_table_cell_text_lines(cell)),
+                        default=1.0,
+                    )
                     for _row, column, _row_span, span, cell in placements
                 ),
                 default=font_size,
@@ -1469,12 +1773,31 @@ class ReflowPlanner:
                 source_row = 0.0 if element.payload.get("table_content_fit") else source_height / max(len(rows), 1)
                 source_rows = [source_row] * len(rows)
             row_heights = [max(height, font_size * 1.2 + 3.0) for height in source_rows]
+            required_rows = [font_size * 1.2 + 3.0 for _ in range(len(rows))]
+            visual_rows = [False for _ in rows]
             for row_index, column, row_span, span, cell in placements:
                 cell_width = table_width * sum(weights[column : column + span]) / max(sum(weights), 1.0)
-                lines = max(1, estimate_table_cell_lines(cell, font_size, (cell_width - 2.0) * 0.96))
+                geometry = cell_geometry.get((row_index, column), ("center", 0, 0, 0, 0))
+                available_width = table_cell_available_width(cell_width, geometry[3], geometry[4])
+                lines = max(1, estimate_table_cell_lines(cell, font_size, available_width))
                 required = (lines * font_size * 1.2 + 3.0) / max(row_span, 1)
                 for target_row in range(row_index, min(row_index + row_span, len(rows))):
+                    required_rows[target_row] = max(required_rows[target_row], required)
+                    visual_rows[target_row] = visual_rows[target_row] or bool(cell.find("img"))
                     row_heights[target_row] = max(row_heights[target_row], required)
+            page_height = float(element.payload.get("page_height_px") or 0.0) * float(
+                element.payload.get("source_scale") or 1.0
+            )
+            compact_text_rows = bool(element.payload.get("table_auto_height")) or (
+                page_height > 0.0 and source_height > page_height * 0.45
+            )
+            if compact_text_rows:
+                for row in range(len(rows)):
+                    row_heights[row] = (
+                        max(row_heights[row], required_rows[row])
+                        if visual_rows[row]
+                        else required_rows[row]
+                    )
             height = sum(row_heights)
             return spacing + height + ReflowPlanner._caption_height(element, fit_scale)
         if role is not None and element.text:
@@ -1534,7 +1857,7 @@ class ReflowPlanner:
         ):
             return "center"
         if (
-            content_bbox.width <= width * 0.80
+            content_bbox.width <= width * 0.65
             and len(source_lines) >= 2
             and len(lefts) == len(widths) == len(source_lines)
             and all(
@@ -1543,18 +1866,63 @@ class ReflowPlanner:
             )
         ):
             return "center"
+        if element.kind == "heading" and centered and content_bbox.width <= width * 0.95:
+            return "center"
         if element.kind == "heading" and len(source_lines) > 1 and content_bbox.x1 <= left + width * 0.05:
             return "left"
-        if centered and (element.kind == "heading" or content_bbox.width <= width * 0.75):
-            return "center"
+        if element.kind == "paragraph_group":
+            line_rights = tuple(
+                float(source_left) + float(line_width)
+                for source_left, line_width in zip(lefts, widths)
+            )
+            if len(line_rights) >= 3:
+                right_edge = max(line_rights)
+                body_lines = line_rights[:-1]
+                aligned_lines = sum(
+                    right >= right_edge - width * 0.03 for right in body_lines
+                )
+                justified = aligned_lines >= max(2, math.ceil(len(body_lines) * 0.60))
+            elif not line_rights:
+                justified = len(source_lines) >= 3 and len(element.text) >= 40
+            else:
+                justified = False
+            if len(source_lines) == 1 and centered and content_bbox.width <= width * 0.65:
+                return "center"
+            if (
+                len(source_lines) >= 2
+                and len(lefts) == len(widths) == len(source_lines)
+                and max(float(line_width) for line_width in widths) <= width * 0.65
+                and all(
+                    abs(float(source_left) + float(line_width) / 2.0 - (left + right) / 2.0) <= width * 0.04
+                    for source_left, line_width in zip(lefts, widths)
+                )
+            ):
+                return "center"
+            if content_bbox.x2 >= right - width * 0.03 and content_bbox.x1 > left + width * 0.25 and len(source_lines) <= 2:
+                return "right"
+            return "justify" if justified and len(element.text) >= 40 else "left"
         if content_bbox.x2 >= right - width * 0.03 and content_bbox.x1 > left + width * 0.25 and len(source_lines) <= 2:
             return "right"
         return "justify" if element.kind == "paragraph_group" and len(source_lines) >= 3 and len(element.text) >= 40 else "left"
 
     @staticmethod
+    def _is_edge_text_label(element, page) -> bool:
+        if element.kind not in {"paragraph_group", "heading", "caption"}:
+            return False
+        if element.text_structure.orientation != "vertical":
+            return False
+        width = element.bbox.width
+        height = element.bbox.height
+        near_left = element.bbox.x2 <= page.width_px * 0.12
+        near_right = element.bbox.x1 >= page.width_px * 0.88
+        return width <= page.width_px * 0.09 and height >= width * 2.5 and (near_left or near_right)
+
+    @staticmethod
     def _row_alignments(element, frame) -> tuple[str, ...]:
         if len(element.text_rows) < 2:
             return ()
+        if element.kind == "paragraph_group" and element.text_structure.is_list:
+            return ("left",) * len(element.text_rows)
         left, right = frame
         frame_width = max(right - left, 1.0)
         inferred = []

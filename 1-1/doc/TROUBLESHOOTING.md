@@ -40,25 +40,23 @@ Code/models_openvino/font_openvino/mobilenetv3.xml
 
 ## PDF 没有生成
 
-执行以下命令确认系统可以找到 LibreOffice：
+PDF 由 PyMuPDF 直接生成，不依赖 LibreOffice。先单独运行：
 
 ```bash
-soffice --version
+python Code/test.py --input dataset/exam_paper_02.png --output test-result --formats pdf --no-debug-vis
 ```
 
-Linux 上命令也可能叫 `libreoffice`。如果系统找不到它，安装 LibreOffice 并重新打开终端。随后先排除 DOCX 生成问题：
+若生成失败，检查终端中的坐标、字体或图片解码报错。DOCX 和 PDF 已相互独立，DOCX 失败不会阻止单独生成 PDF，PDF 失败也不会影响已有 DOCX。
 
-```bash
-python Code/test.py --input dataset/exam_paper_02.png --output test-result --formats docx,markdown
-```
+## PDF 元素位置异常
 
-这一步成功后再加入 `pdf`。转换失败时保留终端报错；已经生成的 DOCX 仍在对应的运行目录中。
+PDF 直接使用版面检测坐标，不再经过 Word 重排。元素位置异常通常来自上游识别结果：
 
-## Word 和 LibreOffice 的页数不同
+- 文本行框或 `TextRow` 坐标错误。
+- 图片、公式或表格缺少 `image_base64`。
+- 版面模型将区域分到了错误的语义元素。
 
-两者的字体度量和分页行为并不完全一致。程序会检查 LibreOffice 导出的 PDF 页数，但无法预判其他环境中 Microsoft Word 的分页结果。
-
-先确认使用的是同一份 DOCX，再比较发生换页前的字号、行距和表格高度。如果只在 Word 中多出空白页，记录 Word 版本，并同时保留 LibreOffice 的 PDF 作为对照。
+此时应检查 `<样本名>.recognition.json`、`<样本名>.json` 和 debug 版面图，不要修改 PDF 渲染器去补偿上游坐标。
 
 ## 运行很慢
 

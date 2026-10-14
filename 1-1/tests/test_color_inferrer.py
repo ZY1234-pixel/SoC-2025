@@ -24,6 +24,17 @@ def test_crop_style_and_table_fill_are_inferred_from_region_pixels():
     assert row_styles[0][:2] == (1, "#234B82")
 
 
+def test_crop_style_detects_a_colored_border_when_text_dominates_the_crop():
+    image = np.full((40, 180, 3), (100, 40, 220), dtype=np.uint8)
+    image[5:-5, 10:-10] = 255
+    encoded = base64.b64encode(cv2.imencode(".png", image)[1]).decode("ascii")
+
+    style = infer_crop_style(encoded)
+
+    assert style is not None
+    assert style.background_color == "#DC2864"
+
+
 def test_table_fill_detects_a_low_saturation_header():
     image = np.full((80, 200, 3), 255, dtype=np.uint8)
     image[:40, :] = 210

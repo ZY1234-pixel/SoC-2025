@@ -6,13 +6,11 @@ import argparse
 from collections import Counter
 import json
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 import cv2
-import fitz
 from docx import Document as DocxDocument
 
 CODE_ROOT = Path(__file__).resolve().parent
@@ -25,9 +23,15 @@ for import_root in (PROJECT_ROOT, DOCFLOW_SRC_ROOT):
 
 from Code.dataset import collect_samples, is_pdf_file
 from Code.model import RuntimePaths
-from Code.model_integration.runtime import RAW_RESULT_PREVIEW_MAX_TEXT, bootstrap_import_paths, make_engine
+from Code.model_integration.runtime import (
+    RAW_RESULT_PREVIEW_MAX_TEXT,
+    FormulaRecognitionRunner,
+    bootstrap_import_paths,
+    make_engine,
+    recognize_formula_regions,
+)
 from Code.preprocess import expand_to_pages
-from Code.utils import ensure_runtime_paths, find_libreoffice, parse_formats, print_list
+from Code.utils import ensure_runtime_paths, parse_formats, print_list
 from docflow.adapters.paddle_adapter import PaddleAdapter
 from docflow.adapters.rapidai_table_adapter import RapidAITableAdapter
 from docflow.analysis import DocumentAnalyzer
@@ -36,6 +40,8 @@ from docflow.model.stages import RecognitionEvidence
 from docflow.planning import ReflowPlanner
 from docflow.renderer.reflow_docx_renderer import ReflowDocxRenderer
 from docflow.renderer.reflow_markdown_renderer import ReflowMarkdownRenderer
+from docflow.renderer.reflow_pdf_renderer import ReflowPdfRenderer
+from docflow.renderer.fidelity_pdf_renderer import FidelityPdfRenderer
 from docflow.utils.result_layout import (
     ResultRunLayout,
     build_main_run_manifest,
@@ -117,8 +123,17 @@ def summarize_raw_result(result: list) -> dict:
         if hasattr(img, "shape"):
             item["img_shape"] = list(img.shape)
 
+        result_value = region.get("res")
+        if isinstance(result_value, dict):
+            item["res"] = {
+                str(key): str(value)[:RAW_RESULT_PREVIEW_MAX_TEXT]
+                for key, value in result_value.items()
+            }
+            regions.append(item)
+            continue
+
         res_preview: list[dict] = []
-        for res_item in region.get("res") or []:
+        for res_item in result_value or []:
             if isinstance(res_item, dict):
                 preview = {
                     "text": str(res_item.get("text", ""))[:RAW_RESULT_PREVIEW_MAX_TEXT],
@@ -148,9 +163,11 @@ def analyze_page(
     source_path: str,
     table_adapter: RapidAITableAdapter | None = None,
     table_output_dir: Path | None = None,
+    formula_recognizer=None,
 ) -> tuple[RecognitionEvidence, list, float]:
     started_at = time.time()
     result, _ = engine(image, img_idx=page_index)
+    recognize_formula_regions(image, result, formula_recognizer)
     if table_adapter is not None:
         result = table_adapter.enrich(image, result, page_index, table_output_dir or Path.cwd())
     elapsed = time.time() - started_at
@@ -219,9 +236,18 @@ def _validate_content_integrity(evidence, analysis) -> None:
         for element in page.elements
         for source_id in element.source_ids
     )
-    if source_ids != resolved_ids:
-        missing = sorted((source_ids - resolved_ids).elements())
-        duplicated = sorted((resolved_ids - source_ids).elements())
+    split_ids = Counter(
+        source_id
+        for page in analysis.pages
+        for element in page.elements
+        if element.payload.get("paragraph_break_before")
+        for source_id in element.source_ids
+    )
+    missing = source_ids - resolved_ids
+    unexpected_duplicates = (resolved_ids - source_ids) - split_ids
+    if missing or unexpected_duplicates:
+        missing = sorted(missing.elements())
+        duplicated = sorted(unexpected_duplicates.elements())
         raise RuntimeError(
             f"Document Analysis provenance mismatch: missing={missing}, duplicated={duplicated}"
         )
@@ -236,7 +262,9 @@ def run_sample(
     formats: list[str],
     pdf_dpi: int,
     save_debug_vis: bool,
+    save_stages: bool,
     table_adapter: RapidAITableAdapter | None = None,
+    formula_recognizer=None,
 ) -> int:
     pages = expand_to_pages(sample_path, dpi=pdf_dpi) if is_pdf_file(sample_path) else expand_to_pages(sample_path)
     evidence_pages = []
@@ -250,29 +278,34 @@ def run_sample(
             page_index,
             str(sample_path),
             table_adapter,
-            sample_layout.sample_dir,
+            sample_layout.table_dir,
+            formula_recognizer,
         )
         print(f"[分析] {sample_path.name} p{page_index + 1}: 检测到 {len(result)} 个区域，耗时 {elapsed:.2f}s")
         print_regions(result)
         if save_debug_vis:
-            write_json(sample_layout.sample_dir / "raw_result.json", summarize_raw_result(result))
+            write_json(
+                sample_layout.debug_dir / f"{sample_layout.sample_key}.raw_result.json",
+                summarize_raw_result(result),
+            )
             save_debug_images(image, result, sample_layout, page_index)
         evidence_pages.extend(evidence.pages)
 
     evidence = RecognitionEvidence(tuple(evidence_pages), source_file=str(sample_path))
-    write_json(sample_layout.recognition_path, evidence.to_dict())
     analysis = analyzer.analyze(evidence)
     _validate_content_integrity(evidence, analysis)
-    write_json(sample_layout.json_path, analysis.to_dict())
     reflow_plan = ReflowPlanner().plan(analysis)
-    write_json(sample_layout.render_plan_path, reflow_plan.to_dict())
+    if save_stages:
+        write_json(sample_layout.recognition_path, evidence.to_dict())
+        write_json(sample_layout.json_path, analysis.to_dict())
+        write_json(sample_layout.render_plan_path, reflow_plan.to_dict())
 
     native_docx_table_count = 0
-    if "docx" in formats or "pdf" in formats:
+    if "docx" in formats:
         ReflowDocxRenderer().render(reflow_plan, str(sample_layout.docx_path))
         native_docx_table_count = _native_docx_table_count(sample_layout.docx_path)
         semantic_table_count = sum(
-            element.kind == "table_group"
+            element.kind == "table_group" and bool(element.payload.get("html"))
             for page in analysis.pages
             for element in page.elements
         )
@@ -281,68 +314,63 @@ def run_sample(
                 f"native table loss: expected at least {semantic_table_count}, got {native_docx_table_count}"
             )
     if "markdown" in formats:
-        ReflowMarkdownRenderer().render(analysis, str(sample_layout.markdown_path))
-    if "pdf" in formats:
-        subprocess.run(
-            [
-                find_libreoffice(),
-                "--headless",
-                "--convert-to",
-                "pdf",
-                "--outdir",
-                str(sample_layout.sample_dir),
-                str(sample_layout.docx_path),
-            ],
-            check=True,
-            capture_output=True,
-            timeout=120,
+        ReflowMarkdownRenderer().render(
+            analysis,
+            str(sample_layout.markdown_path),
+            str(sample_layout.assets_dir),
         )
-        if not sample_layout.pdf_path.exists():
-            raise RuntimeError("LibreOffice conversion completed without producing the PDF")
-        with fitz.open(sample_layout.pdf_path) as pdf:
-            if len(pdf) != len(evidence_pages):
-                raise RuntimeError(
-                    f"Page Budget exceeded: source={len(evidence_pages)}, rendered={len(pdf)}"
-                )
-    return len(evidence_pages), native_docx_table_count
+    if "pdf" in formats:
+        ReflowPdfRenderer().render(
+            analysis,
+            [image for _name, image in pages],
+            str(sample_layout.pdf_path),
+        )
+    if "pdf_fidelity" in formats:
+        FidelityPdfRenderer().render(
+            analysis,
+            [image for _name, image in pages],
+            str(sample_layout.pdf_path.with_name(f"{sample_layout.sample_key}.fidelity.pdf")),
+        )
+    plan_payload = reflow_plan.to_dict()
+    flow_kinds: dict[str, int] = {}
+    fit_scaled_pages = 0
+    for page in plan_payload.get("pages") or []:
+        fit_scaled_pages += int(float(page.get("fit_scale", 1.0)) < 1.0)
+        for section in page.get("sections") or []:
+            key = section.get("kind", "unknown")
+            flow_kinds[key] = flow_kinds.get(key, 0) + 1
+    return {
+        "page_count": len(evidence_pages),
+        "native_docx_table_count": native_docx_table_count,
+        "analysis_diagnostic_count": sum(len(page.diagnostics) for page in analysis.pages),
+        "fit_scaled_pages": fit_scaled_pages,
+        "flow_kinds": flow_kinds,
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="DocFlow 全流程测试运行器")
     parser.add_argument("--input", "-i", default=None, help="输入样本文件或目录。默认: ../dataset")
     parser.add_argument("--output", "-o", default=None, help="结果根目录。默认: ../test-result")
-    parser.add_argument("--formats", "-f", default="docx,markdown,pdf", help="逗号分隔输出格式：docx,markdown,pdf")
+    parser.add_argument(
+        "--formats",
+        "-f",
+        default="docx,markdown,pdf",
+        help="逗号分隔输出格式：docx,markdown,pdf,pdf_fidelity",
+    )
     parser.add_argument("--pdf-dpi", type=int, default=200, help="PDF 转图像的 DPI，默认 200")
-    parser.add_argument("--no-debug-vis", action="store_true", help="关闭 debug 可视化图导出")
-    parser.add_argument("--table-backend", choices=["slanet", "rapidai"], default="rapidai", help="表格识别后端。")
-    parser.add_argument(
-        "--rapidai-table-engine",
-        choices=["auto", "wired_table_v2", "lineless_table"],
-        default="auto",
-        help="RapidAI 表格结构模型，默认由分类器自动选择。",
-    )
-    parser.add_argument(
-        "--rapidai-full-page-fallback",
-        action="store_true",
-        help="版面模型未检出 table 时仍对整页执行 RapidAI（可能误识别，默认关闭）。",
-    )
-    parser.add_argument(
-        "--layout-model",
-        default="pp-doclayout-v3",
-        choices=["pp-doclayout-v3", "PP-DocLayoutV3", "doclayout_yolo", "picodet-l_layout_17cls", "pp-doclayout-m"],
-        help="选择版面分析模型。",
-    )
+    parser.add_argument("--save-stages", action="store_true", help="额外保存 recognition/analysis/render plan JSON")
+    parser.add_argument("--save-debug", action="store_true", help="额外保存版面调试图和原始结果")
+    parser.add_argument("--no-debug-vis", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-formula", action="store_true", help="关闭公式识别。")
     args = parser.parse_args()
 
-    paths = RuntimePaths.discover(layout_model_name=args.layout_model)
+    paths = RuntimePaths.discover()
     input_path = resolve_cli_path(args.input, paths.dataset_root)
     output_root = resolve_cli_path(args.output, paths.result_root)
     formats = parse_formats(args.formats)
 
-    ensure_runtime_paths(paths, args.table_backend)
-    if "pdf" in formats and find_libreoffice() is None:
-        raise RuntimeError("你请求了 PDF 输出，但系统 PATH 中未找到 LibreOffice/soffice。")
-
+    ensure_runtime_paths(paths, formula_enabled=not args.no_formula)
     bootstrap_import_paths(paths)
     samples = collect_samples(input_path)
     if not samples:
@@ -353,17 +381,14 @@ def main() -> int:
     print_list("样本列表：", [str(path) for path in samples])
     print(f"输出格式：{formats}")
     print(f"运行目录：{run_layout.run_dir}")
-    print(f"版面模型：{paths.layout_model_spec.name} -> {paths.layout_model}")
-    engine = make_engine(paths, run_layout.runtime_dir, args.table_backend)
+    print(f"版面模型：PP-DocLayoutV3 -> {paths.layout_model}")
+    engine = make_engine(paths, run_layout.runtime_dir)
+    formula_recognizer = FormulaRecognitionRunner(paths.formula_model) if not args.no_formula else None
     adapter = PaddleAdapter()
-    table_adapter = None
-    if args.table_backend == "rapidai":
-        table_adapter = RapidAITableAdapter(
-            paths.models_openvino_root,
-            table_engine=args.rapidai_table_engine,
-            full_page_fallback=args.rapidai_full_page_fallback,
-        )
-        print(f"表格后端：RapidAI ({args.rapidai_table_engine})")
+    table_adapter = RapidAITableAdapter(
+        paths.models_openvino_root,
+    )
+    print("表格后端：Table CLS -> wired_table_v2 / slanet_plus")
     analyzer = DocumentAnalyzer(
         FontClassifier(str(paths.models_openvino_root / "font_openvino" / "mobilenetv3.xml"))
     )
@@ -381,7 +406,7 @@ def main() -> int:
     for sample_path in samples:
         sample_layout = run_layout.create_sample(sample_path)
         try:
-            page_count = run_sample(
+            sample_result = run_sample(
                 engine=engine,
                 adapter=adapter,
                 analyzer=analyzer,
@@ -389,33 +414,29 @@ def main() -> int:
                 sample_layout=sample_layout,
                 formats=formats,
                 pdf_dpi=args.pdf_dpi,
-                save_debug_vis=not args.no_debug_vis,
+                save_debug_vis=args.save_debug and not args.no_debug_vis,
+                save_stages=args.save_stages,
                 table_adapter=table_adapter,
+                formula_recognizer=formula_recognizer,
             )
-            if isinstance(page_count, tuple):
-                page_count, native_docx_table_count = page_count
-            else:
-                native_docx_table_count = 0
+            page_count = sample_result["page_count"]
+            native_docx_table_count = sample_result["native_docx_table_count"]
             total_pages += page_count
             quality_summary["native_docx_table_count"] += native_docx_table_count
-            analysis_payload = json.loads(sample_layout.json_path.read_text(encoding="utf-8"))
-            diagnostic_count = sum(len(page.get("diagnostics") or []) for page in analysis_payload.get("pages") or [])
+            diagnostic_count = sample_result["analysis_diagnostic_count"]
             quality_summary["analysis_diagnostics_total"] += diagnostic_count
-            plan_payload = json.loads(sample_layout.render_plan_path.read_text(encoding="utf-8"))
-            for page in plan_payload.get("pages") or []:
-                quality_summary["fit_scaled_pages"] += int(float(page.get("fit_scale", 1.0)) < 1.0)
-                for section in page.get("sections") or []:
-                    key = section.get("kind", "unknown")
-                    strategy_stats["flow_kinds"][key] = strategy_stats["flow_kinds"].get(key, 0) + 1
+            quality_summary["fit_scaled_pages"] += sample_result["fit_scaled_pages"]
+            for key, count in sample_result["flow_kinds"].items():
+                strategy_stats["flow_kinds"][key] = strategy_stats["flow_kinds"].get(key, 0) + count
             sample_records.append(
                 {
                     "sample_key": sample_layout.sample_key,
                     "source_path": str(sample_path),
-                    "sample_dir": str(sample_layout.sample_dir),
+                    "run_dir": str(sample_layout.sample_dir),
                     "page_count": page_count,
                     "analysis_diagnostic_count": diagnostic_count,
                     "native_docx_table_count": native_docx_table_count,
-                    "render_plan_path": str(sample_layout.render_plan_path),
+                    "render_plan_path": str(sample_layout.render_plan_path) if args.save_stages else None,
                     "status": "ok",
                 }
             )
@@ -425,11 +446,11 @@ def main() -> int:
                 {
                     "sample_key": sample_layout.sample_key,
                     "source_path": str(sample_path),
-                    "sample_dir": str(sample_layout.sample_dir),
+                    "run_dir": str(sample_layout.sample_dir),
                     "page_count": 0,
                     "analysis_diagnostic_count": 0,
                     "native_docx_table_count": 0,
-                    "render_plan_path": str(sample_layout.render_plan_path),
+                    "render_plan_path": str(sample_layout.render_plan_path) if args.save_stages else None,
                     "status": "failed",
                     "error": str(ex),
                 }

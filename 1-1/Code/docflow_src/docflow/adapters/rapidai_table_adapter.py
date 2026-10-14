@@ -18,6 +18,7 @@ from docflow.vendor.table_rec.fusion import (
     fused_to_html,
     image_to_data_uri,
 )
+from docflow.vendor.table_rec.slanet_plus import SLANetPlusTableEngine
 
 
 LOGGER = logging.getLogger(__name__)
@@ -28,8 +29,6 @@ class RapidAITableAdapter:
     def __init__(
         self,
         models_openvino_root: Path,
-        table_engine: str = "auto",
-        full_page_fallback: bool = False,
     ):
         openvino_root = Path(models_openvino_root)
         table_model_dir = openvino_root / "RapidAI_TableRec_openvino"
@@ -39,8 +38,8 @@ class RapidAITableAdapter:
         cls_model = table_model_dir / "ocr_cls" / "ch_ppocr_mobile_v2.0_cls_infer.xml"
         required = (
             table_model_dir / "wired_table_v2" / "unet.xml",
-            table_model_dir / "lineless_table" / "lore_detect.xml",
-            table_model_dir / "lineless_table" / "lore_process.xml",
+            table_model_dir / "slanet_plus" / "slanet-plus.xml",
+            table_model_dir / "slanet_plus" / "character.txt",
             table_model_dir / "table_cls" / "yolo_cls.xml",
             det_model,
             rec_model,
@@ -50,31 +49,23 @@ class RapidAITableAdapter:
         missing = [str(path) for path in required if not path.is_file()]
         if missing:
             raise FileNotFoundError(f"RapidAI model files not found: {missing}")
-        self.recognizer = self._openvino_recognizer(
-            table_engine, table_model_dir, det_model, rec_model, rec_keys, cls_model
-        )
+        self.recognizer = self._openvino_recognizer(table_model_dir, det_model, rec_model, rec_keys, cls_model)
         self.fusion = LayoutTableFusion()
         self.crop_layout_images = crop_layout_images
         self.fused_to_html = fused_to_html
         self.image_to_data_uri = image_to_data_uri
-        self.table_engine = table_engine
-        self.full_page_fallback = full_page_fallback
 
     @staticmethod
-    def _openvino_recognizer(table_engine, table_dir, det_model, rec_model, rec_keys, cls_model):
-        import lineless_table_rec.table_structure_lore as lore_runtime
+    def _openvino_recognizer(table_dir, det_model, rec_model, rec_keys, cls_model):
         import rapidocr_onnxruntime.ch_ppocr_cls.text_cls as ocr_cls_runtime
         import rapidocr_onnxruntime.ch_ppocr_det.text_detect as ocr_det_runtime
         import rapidocr_onnxruntime.ch_ppocr_rec.text_recognize as ocr_rec_runtime
         import table_cls.main as table_cls_runtime
         import wired_table_rec.table_structure_unet as unet_runtime
-        from lineless_table_rec import LinelessTableRecognition
-        from lineless_table_rec.main import LinelessTableInput
         from table_cls import TableCls
         from wired_table_rec import WiredTableRecognition
         from wired_table_rec.main import ModelType, WiredTableInput
 
-        lore_runtime.OrtInferSession = OpenVINOInferSession
         unet_runtime.OrtInferSession = OpenVINOInferSession
         table_cls_runtime.OrtInferSession = OpenVINOInferSession
         ocr_det_runtime.OrtInferSession = OpenVINOInferSession
@@ -82,20 +73,15 @@ class RapidAITableAdapter:
         ocr_rec_runtime.OrtInferSession = lambda config: OpenVINOInferSession(config, "bf16")
 
         recognizer = runner.RapidAITableRecognizer.__new__(runner.RapidAITableRecognizer)
-        recognizer.table_engine_type = table_engine
+        recognizer.table_engine_type = "auto"
         recognizer.wired_engine = WiredTableRecognition(
             WiredTableInput(model_type=ModelType.UNET.value, model_path=table_dir / "wired_table_v2" / "unet.xml")
         )
         recognizer.wired_mode = "openvino_unet"
-        recognizer.lineless_engine = LinelessTableRecognition(
-            LinelessTableInput(
-                model_path={
-                    "lore_detect": table_dir / "lineless_table" / "lore_detect.xml",
-                    "lore_process": table_dir / "lineless_table" / "lore_process.xml",
-                }
-            )
+        recognizer.lineless_engine = SLANetPlusTableEngine(
+            table_dir / "slanet_plus" / "slanet-plus.xml"
         )
-        recognizer.lineless_mode = "openvino_lore"
+        recognizer.lineless_mode = "openvino_slanet_plus"
         recognizer.table_cls = TableCls(model_path=table_dir / "table_cls" / "yolo_cls.xml")
         recognizer.ocr_engine = runner.make_ocr_engine(
             None, det_model, rec_model, rec_keys, cls_model
@@ -103,6 +89,7 @@ class RapidAITableAdapter:
         recognizer.ocr_model_dir = rec_model.parent
         recognizer.model_paths = {
             "table": str(table_dir),
+            "slanet_plus": str(table_dir / "slanet_plus" / "slanet-plus.xml"),
             "det": str(det_model),
             "rec": str(rec_model),
             "rec_keys": str(rec_keys),
@@ -118,8 +105,6 @@ class RapidAITableAdapter:
             if str(region.get("raw_type") or region.get("type") or "").lower() == "table"
         ]
         candidates = [(index, bbox) for index, bbox in candidates if bbox]
-        if not candidates and self.full_page_fallback:
-            candidates = [(None, [0, 0, width, height])]
         if not candidates:
             return regions
 
@@ -137,23 +122,26 @@ class RapidAITableAdapter:
                 if not cv2.imwrite(str(crop_path), crop):
                     raise OSError(f"cannot write table crop: {crop_path}")
                 table_result = self.recognizer.predict(crop)
+                self._apply_table_rule_geometry(table_result, crop)
                 crop_layout = {"boxes": self.crop_layout_regions(regions, bbox)}
                 fused = self.fusion.fuse(crop_path, crop_layout, table_result)
-                if self.table_engine == "auto" and self._needs_alternate_engine(fused):
-                    selected = table_result.get("table_type")
-                    alternate = "wired_table_v2" if selected == "lineless_table" else "lineless_table"
-                    previous = self.recognizer.table_engine_type
+                if self._needs_engine_fallback(fused):
+                    selected_engine = str(table_result.get("table_type") or "")
+                    alternate_engine = (
+                        "slanet_plus" if selected_engine == "wired_table_v2" else "wired_table_v2"
+                    )
+                    previous_engine = self.recognizer.table_engine_type
                     try:
-                        self.recognizer.table_engine_type = alternate
+                        self.recognizer.table_engine_type = alternate_engine
                         alternate_result = self.recognizer.predict(crop)
                         alternate_fused = self.fusion.fuse(crop_path, crop_layout, alternate_result)
                     except Exception as exc:
-                        LOGGER.warning("RapidAI alternate engine %s failed: %s", alternate, exc)
+                        LOGGER.warning("RapidAI alternate engine %s failed: %s", alternate_engine, exc)
                     else:
-                        if self._structure_quality(alternate_fused) < self._structure_quality(fused):
+                        if self._fusion_quality(alternate_fused) < self._fusion_quality(fused):
                             table_result, fused = alternate_result, alternate_fused
                     finally:
-                        self.recognizer.table_engine_type = previous
+                        self.recognizer.table_engine_type = previous_engine
                 if fused.get("status") != "ok" or not fused.get("cells"):
                     continue
 
@@ -163,19 +151,40 @@ class RapidAITableAdapter:
                 debug_path = table_dir / "fused.json"
                 debug_path.write_text(json.dumps(fused, ensure_ascii=False, indent=2), encoding="utf-8")
                 html_fused = copy.deepcopy(fused)
-                for cell in html_fused.get("cells") or []:
+                source_cells = fused.get("cells") or ()
+                for cell_index, cell in enumerate(html_fused.get("cells") or []):
+                    bbox = cell.get("bbox")
+                    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                        cell["page_bbox"] = [
+                            float(bbox[0]) + x0,
+                            float(bbox[1]) + y0,
+                            float(bbox[2]) + x0,
+                            float(bbox[3]) + y0,
+                        ]
+                    for obj in cell.get("layout_objects") or []:
+                        bbox = obj.get("bbox")
+                        if obj.get("latex") and bbox:
+                            obj["page_bbox"] = [
+                                float(bbox[0]) + x0,
+                                float(bbox[1]) + y0,
+                                float(bbox[2]) + x0,
+                                float(bbox[3]) + y0,
+                            ]
                     formula_boxes = [
                         obj.get("bbox")
                         for obj in cell.get("layout_objects") or []
                         if obj.get("label") in _FORMULA_LABELS and obj.get("image_path")
                     ]
                     if formula_boxes:
-                        cell["text"] = " ".join(
+                        cleaned_text = " ".join(
                             str(obj.get("text") or "").strip()
                             for obj in cell.get("ocr_objects") or []
                             if str(obj.get("text") or "").strip()
-                            and not any(self._bbox_coverage(box, obj.get("bbox")) >= 0.5 for box in formula_boxes)
+                            and not any(self._formula_overlaps_ocr(box, obj.get("bbox")) for box in formula_boxes)
                         )
+                        cell["text"] = cleaned_text
+                        if cell_index < len(source_cells):
+                            source_cells[cell_index]["text"] = cleaned_text
                     for obj in cell.get("layout_objects") or []:
                         asset = obj.get("image_path")
                         if asset:
@@ -200,6 +209,7 @@ class RapidAITableAdapter:
                             "rapidai": fused.get("diagnostics") or {},
                             "debug_path": str(debug_path),
                             "table_content_fit": True,
+                            "table_auto_height": table_result.get("table_type") == "slanet_plus",
                         },
                     }
                 )
@@ -209,26 +219,163 @@ class RapidAITableAdapter:
                 LOGGER.warning("RapidAI table recognition failed for page %s bbox %s: %s", page_index + 1, bbox, exc)
         return [region for index, region in enumerate(regions) if index not in replaced_indexes] + replacements
 
+    @classmethod
+    def _apply_table_rule_geometry(cls, table_result: dict, image: np.ndarray) -> None:
+        """Constrain table OCR to the physical horizontal-rule envelope.
+
+        A table crop can include a continuation label above the top rule or a
+        source note below the bottom rule. Those lines are page furniture, not
+        table content, and must not be allowed to compete with real cells.
+        """
+        rules = cls._detect_horizontal_rules(image)
+        if len(rules) < 2:
+            return
+        _, width = image.shape[:2]
+        content_bbox = [0, int(rules[0]) + 1, width, int(rules[-1])]
+        table_result["_content_bbox"] = content_bbox
+        table_result["_horizontal_rule_ys"] = [float(value) for value in rules]
+        table_result["ocr_result"] = [
+            item
+            for item in table_result.get("ocr_result") or []
+            if cls._bbox_coverage(content_bbox, item.get("rect") or item.get("bbox")) >= 0.60
+        ]
+
     @staticmethod
-    def _structure_quality(fused: dict) -> tuple[float, float, float]:
+    def _detect_horizontal_rules(image: np.ndarray) -> list[int]:
+        if image.ndim != 3 or image.size == 0:
+            return []
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        height, width = gray.shape[:2]
+        ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+        kernel_width = max(40, int(width * 0.45))
+        horizontal = cv2.morphologyEx(
+            ink,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, 1)),
+        )
+        counts = (horizontal > 0).sum(axis=1)
+        active = np.flatnonzero(counts >= width * 0.55)
+        groups: list[list[int]] = []
+        for value in active:
+            if groups and value - groups[-1][-1] <= 3:
+                groups[-1].append(int(value))
+            else:
+                groups.append([int(value)])
+        return [int(np.mean(group)) for group in groups]
+
+    @staticmethod
+    def _needs_engine_fallback(fused: dict) -> bool:
+        row_count = int(fused.get("row_count") or 0)
+        col_count = int(fused.get("col_count") or 0)
         cells = fused.get("cells") or ()
+        diagnostics = fused.get("diagnostics") or {}
+        if not cells or row_count <= 0 or col_count <= 0:
+            return True
+        collisions = RapidAITableAdapter._span_collisions(cells)
+        empty_ratio = int(diagnostics.get("empty_cells") or 0) / max(len(cells), 1)
+        collision_ratio = collisions / max(row_count * col_count, 1)
+        semantic_defects = RapidAITableAdapter._semantic_defect_count(
+            cells,
+            row_count,
+            col_count,
+        )
+        return collision_ratio > 0.01 or empty_ratio > 0.15 or semantic_defects > 0
+
+    @staticmethod
+    def _fusion_quality(fused: dict) -> float:
+        row_count = max(int(fused.get("row_count") or 0), 1)
+        col_count = max(int(fused.get("col_count") or 0), 1)
+        cells = fused.get("cells") or ()
+        diagnostics = fused.get("diagnostics") or {}
+        collisions = RapidAITableAdapter._span_collisions(cells)
+        empty_ratio = int(diagnostics.get("empty_cells") or 0) / max(len(cells), 1)
+        text_units = sum(len(str(cell.get("text") or "")) for cell in cells)
+        visual_count = sum(len(cell.get("layout_objects") or ()) for cell in cells)
+        content_count = max(len(fused.get("ocr_objects") or ()), len(cells), 1)
+        cell_coverage = min(len(cells) / content_count, 1.0)
+        semantic_defects = RapidAITableAdapter._semantic_defect_count(
+            cells,
+            row_count,
+            col_count,
+        )
+        return (
+            collisions / max(row_count * col_count, 1) * 2.0
+            + empty_ratio
+            + semantic_defects * 0.20
+            - min(text_units / 10000.0, 0.20)
+            - min(visual_count / 100.0, 0.10)
+            - cell_coverage * 0.50
+        )
+
+    @staticmethod
+    def _semantic_defect_count(cells, row_count: int, col_count: int) -> int:
+        def empty(cell) -> bool:
+            return not str(cell.get("text") or "").strip() and not cell.get("layout_objects")
+
+        occupied: dict[tuple[int, int], list] = {}
+        for cell in cells:
+            row = int(cell.get("row", 0))
+            column = int(cell.get("col", 0))
+            row_span = max(int(cell.get("rowspan", 1)), 1)
+            column_span = max(int(cell.get("colspan", 1)), 1)
+            for target_row in range(row, row + row_span):
+                for target_column in range(column, column + column_span):
+                    occupied.setdefault((target_row, target_column), []).append(cell)
+
+        defects = 0
+        for row in (0, row_count - 1):
+            row_cells = [
+                cell
+                for column in range(col_count)
+                for cell in occupied.get((row, column), ())
+            ]
+            if row_cells and all(empty(cell) for cell in row_cells):
+                defects += 1
+
+        row_headers: dict[int, list] = {}
+        for cell in cells:
+            if str(cell.get("role") or "") == "row_header":
+                row_headers.setdefault(int(cell.get("col", 0)), []).append(cell)
+        for column_cells in row_headers.values():
+            column_cells.sort(key=lambda cell: int(cell.get("row", 0)))
+            for left, right in zip(column_cells, column_cells[1:]):
+                if (
+                    str(left.get("text") or "").strip()
+                    and empty(right)
+                    and int(left.get("row", 0)) + max(int(left.get("rowspan", 1)), 1)
+                    == int(right.get("row", 0))
+                ):
+                    defects += 1
+
+        top_row = min((int(cell.get("row", 0)) for cell in cells), default=0)
+        for row in (top_row, top_row + 1):
+            row_cells = sorted(
+                (cell for cell in cells if int(cell.get("row", 0)) == row),
+                key=lambda cell: int(cell.get("col", 0)),
+            )
+            for left, right in zip(row_cells, row_cells[1:]):
+                if (
+                    int(left.get("colspan", 1)) == int(right.get("colspan", 1)) == 1
+                    and int(left.get("rowspan", 1)) == int(right.get("rowspan", 1)) >= 2
+                    and int(right.get("col", 0)) == int(left.get("col", 0)) + 1
+                    and len(str(left.get("text") or "").strip()) == len(str(right.get("text") or "").strip()) == 1
+                ):
+                    defects += 1
+        return defects
+
+    @staticmethod
+    def _span_collisions(cells) -> int:
         occupied: dict[tuple[int, int], int] = {}
         for cell in cells:
-            row, column = int(cell.get("row", 0)), int(cell.get("col", 0))
-            for target_row in range(row, row + max(int(cell.get("rowspan", 1)), 1)):
-                for target_column in range(column, column + max(int(cell.get("colspan", 1)), 1)):
+            row = int(cell.get("row", 0))
+            column = int(cell.get("col", 0))
+            row_span = max(int(cell.get("rowspan", 1)), 1)
+            column_span = max(int(cell.get("colspan", 1)), 1)
+            for target_row in range(row, row + row_span):
+                for target_column in range(column, column + column_span):
                     key = (target_row, target_column)
                     occupied[key] = occupied.get(key, 0) + 1
-        grid_size = max(int(fused.get("row_count", 0)) * int(fused.get("col_count", 0)), 1)
-        diagnostics = fused.get("diagnostics") or {}
-        collisions = sum(count > 1 for count in occupied.values()) / grid_size
-        empty = int(diagnostics.get("empty_cells", 0)) / max(len(cells), 1)
-        repairs = int(diagnostics.get("span_repairs", 0)) / max(len(cells), 1)
-        return collisions, empty, repairs
-
-    @classmethod
-    def _needs_alternate_engine(cls, fused: dict) -> bool:
-        return cls._structure_quality(fused)[0] > 0.02
+        return sum(count > 1 for count in occupied.values())
 
     @staticmethod
     def _crop_formula_images(fused: dict, image: np.ndarray, assets_dir: Path) -> None:
@@ -259,6 +406,19 @@ class RapidAITableAdapter:
         overlap = max(x2 - x1, 0.0) * max(y2 - y1, 0.0)
         area = max(float(inner[2]) - float(inner[0]), 0.0) * max(float(inner[3]) - float(inner[1]), 0.0)
         return overlap / max(area, 1.0)
+
+    @staticmethod
+    def _formula_overlaps_ocr(formula_bbox, ocr_bbox) -> bool:
+        if not formula_bbox or not ocr_bbox or len(formula_bbox) < 4 or len(ocr_bbox) < 4:
+            return False
+        if RapidAITableAdapter._bbox_coverage(formula_bbox, ocr_bbox) >= 0.35:
+            return True
+        center_x = (float(ocr_bbox[0]) + float(ocr_bbox[2])) / 2.0
+        center_y = (float(ocr_bbox[1]) + float(ocr_bbox[3])) / 2.0
+        return (
+            float(formula_bbox[0]) <= center_x <= float(formula_bbox[2])
+            and float(formula_bbox[1]) <= center_y <= float(formula_bbox[3])
+        )
 
     @staticmethod
     def _translate_cells(cells, offset_x: float, offset_y: float):
@@ -296,6 +456,7 @@ class RapidAITableAdapter:
                     "label": str(region.get("raw_type") or region.get("type") or ""),
                     "bbox": [ix0 - x0, iy0 - y0, ix1 - x0, iy1 - y0],
                     "score": float(region.get("score", 1.0)),
+                    "res": region.get("res") if isinstance(region.get("res"), dict) else {},
                 }
             )
         return result
