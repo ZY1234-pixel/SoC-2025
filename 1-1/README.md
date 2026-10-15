@@ -14,26 +14,26 @@ PDF 公式使用项目中随附的 MathJax headless bundle 和 QuickJS 离线渲
 
 | 原图 | 版面分析 | DOCX 渲染 |
 |:----:|:--------:|:---------:|
-| <img src="doc/assets/readme/academic_paper_01/original.jpg" width="320"> | <img src="doc/assets/readme/academic_paper_01/layout.jpg" width="320"> | <img src="doc/assets/readme/academic_paper_01/rendered.jpg" width="320"> |
+| <img src="assets/readme/academic_paper_01/original.jpg" width="320"> | <img src="assets/readme/academic_paper_01/layout.jpg" width="320"> | <img src="assets/readme/academic_paper_01/rendered.jpg" width="320"> |
 
 ### 连续表格：五张可编辑表格保持在同一页
 
 | 原图 | 版面分析 | DOCX 渲染 |
 |:----:|:--------:|:---------:|
-| <img src="doc/assets/readme/docstructbench_01/original.jpg" width="320"> | <img src="doc/assets/readme/docstructbench_01/layout.jpg" width="320"> | <img src="doc/assets/readme/docstructbench_01/rendered.jpg" width="320"> |
+| <img src="assets/readme/docstructbench_01/original.jpg" width="320"> | <img src="assets/readme/docstructbench_01/layout.jpg" width="320"> | <img src="assets/readme/docstructbench_01/rendered.jpg" width="320"> |
 
 ### 金融研报：双栏、图表和四类中文字体
 
 | 原图 | 版面分析 | DOCX 渲染 |
 |:----:|:--------:|:---------:|
-| <img src="doc/assets/readme/eastmoney_01/original.jpg" width="320"> | <img src="doc/assets/readme/eastmoney_01/layout.jpg" width="320"> | <img src="doc/assets/readme/eastmoney_01/rendered.jpg" width="320"> |
+| <img src="assets/readme/eastmoney_01/original.jpg" width="320"> | <img src="assets/readme/eastmoney_01/layout.jpg" width="320"> | <img src="assets/readme/eastmoney_01/rendered.jpg" width="320"> |
 
 
 ### 报纸：四栏、跨栏图片和两行图注
 
 | 原图 | 版面分析 | DOCX 渲染 |
 |:----:|:--------:|:---------:|
-| <img src="doc/assets/readme/newspaper_01/original.jpg" width="320"> | <img src="doc/assets/readme/newspaper_01/layout.jpg" width="320"> | <img src="doc/assets/readme/newspaper_01/rendered.jpg" width="320"> |
+| <img src="assets/readme/newspaper_01/original.jpg" width="320"> | <img src="assets/readme/newspaper_01/layout.jpg" width="320"> | <img src="assets/readme/newspaper_01/rendered.jpg" width="320"> |
 
 ## 快速开始
 
@@ -59,7 +59,7 @@ python -m pip install -r Code\requirement.txt
 
 `Code/test.py` 会直接加载 `Code/docflow_src/`，无需额外安装项目 wheel。
 
-模型目录、环境要求和验收方式见 [部署说明](doc/DEPLOYMENT.md)。
+模型目录和环境要求见下文“模型准备”章节。
 
 需要在其他项目中直接调用版面分析、OCR 或表格识别模型时，见 [模型调用说明](Code/model_integration/README.md)。
 
@@ -201,7 +201,7 @@ pytest -q tests
 3. 表格是否完整，图片比例和图注位置是否合理。
 4. 字号、行距、对齐和段落间距是否接近原图。
 
-更具体的命令和检查方法见 [部署说明](doc/DEPLOYMENT.md)、[模型调用说明](Code/model_integration/README.md)、[测试说明](doc/TESTING.md) 和 [常见问题](doc/TROUBLESHOOTING.md)。
+更具体的模型调用方式见 [模型调用说明](Code/model_integration/README.md)。
 
 ## 已知限制
 
@@ -222,6 +222,6 @@ pytest -q tests
 │   └── requirement.txt   # Python 依赖
 ├── tests/                # 单元测试
 ├── test-result/          # 本地运行结果
-├── doc/                  # 部署、测试和排障文档
+├── assets/readme/        # README 示例图片
 └── README.md
 ```
