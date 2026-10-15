@@ -13,6 +13,11 @@ venv/
 /internal_validation/
 /test-result/
 
+# Internal specifications and design notes
+/CONTEXT.md
+/doc/
+/docs/
+
 # Only the small smoke-test image is delivered
 /dataset/*
 !/dataset/exam_paper_02.png
