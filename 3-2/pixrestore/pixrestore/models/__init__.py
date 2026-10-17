@@ -1,0 +1,1 @@
+from .pixel_dit import LightningDiT_PixelDiffusion

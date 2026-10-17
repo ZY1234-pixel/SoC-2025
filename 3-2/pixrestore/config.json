@@ -1,0 +1,57 @@
+{
+  "resolution": 1024,
+  "patch_size": 8,
+  "bottleneck_dim": 768,
+  "mlp_ratio": 4,
+  "encoder_dim_ratio": 3,
+  "use_qknorm": true,
+  "use_swiglu": true,
+  "use_rope": true,
+  "use_rmsnorm": true,
+  "hidden_size": 384,
+  "depth": 12,
+  "num_heads": 6,
+  "encoder_dim": 384,
+  "encoder_input_size": 448,
+  "encoder_layers": [
+    1,
+    2,
+    4,
+    6,
+    8,
+    10
+  ],
+  "feature_norm": "channel_rmsnorm",
+  "gate_temperature": 1.0,
+  "dino_layer_router_mode": "content",
+  "use_dino_layer_router": true,
+  "same_condition_layer_weights": false,
+  "use_lq_degradation_token": true,
+  "flow_ratio": 0.5,
+  "time_distribution": [
+    "uniform",
+    0,
+    1.0
+  ],
+  "alpha": 0.9,
+  "adaptive_loss_power": 0.5,
+  "t_eps": 0.05,
+  "cfg_ratio": 0.1,
+  "cfg_scale": 1.0,
+  "use_aelq": true,
+  "use_venc": true,
+  "cond_strength_aelq_list": [
+    5.0,
+    1.0
+  ],
+  "weak_cond_strength_aelq_list": [
+    0.99,
+    1.0
+  ],
+  "cond_strength_aelq_test": 1.0,
+  "cond_strength_venc": 1.0,
+  "weak_cond_strength_venc": 1.0,
+  "aug_noise": false,
+  "use_time_shift": false,
+  "time_shift_base_dimension": 4096
+}
