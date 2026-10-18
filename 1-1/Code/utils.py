@@ -57,7 +57,7 @@ def write_json(path: Path, payload: dict) -> None:
 
 
 def parse_formats(raw: str) -> List[str]:
-    allowed = {"docx", "markdown", "pdf", "pdf_fidelity"}
+    allowed = {"docx", "markdown", "pdf", "txt", "html", "rtf", "xlsx"}
     values = [x.strip().lower() for x in raw.split(",") if x.strip()]
     if not values:
         return ["docx", "markdown"]

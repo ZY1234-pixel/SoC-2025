@@ -40,8 +40,8 @@ from docflow.model.stages import RecognitionEvidence
 from docflow.planning import ReflowPlanner
 from docflow.renderer.reflow_docx_renderer import ReflowDocxRenderer
 from docflow.renderer.reflow_markdown_renderer import ReflowMarkdownRenderer
-from docflow.renderer.reflow_pdf_renderer import ReflowPdfRenderer
 from docflow.renderer.fidelity_pdf_renderer import FidelityPdfRenderer
+from docflow.renderer.simple_renderers import HtmlRenderer, PlainTextRenderer, RtfRenderer, XlsxRenderer
 from docflow.utils.result_layout import (
     ResultRunLayout,
     build_main_run_manifest,
@@ -319,17 +319,19 @@ def run_sample(
             str(sample_layout.markdown_path),
             str(sample_layout.assets_dir),
         )
+    if "txt" in formats:
+        PlainTextRenderer().render(analysis, str(sample_layout.txt_path))
+    if "html" in formats:
+        HtmlRenderer().render(analysis, str(sample_layout.html_path))
+    if "rtf" in formats:
+        RtfRenderer().render(analysis, str(sample_layout.rtf_path))
+    if "xlsx" in formats:
+        XlsxRenderer().render(analysis, str(sample_layout.xlsx_path))
     if "pdf" in formats:
-        ReflowPdfRenderer().render(
-            analysis,
-            [image for _name, image in pages],
-            str(sample_layout.pdf_path),
-        )
-    if "pdf_fidelity" in formats:
         FidelityPdfRenderer().render(
             analysis,
             [image for _name, image in pages],
-            str(sample_layout.pdf_path.with_name(f"{sample_layout.sample_key}.fidelity.pdf")),
+            str(sample_layout.pdf_path),
         )
     plan_payload = reflow_plan.to_dict()
     flow_kinds: dict[str, int] = {}
@@ -356,7 +358,7 @@ def main() -> int:
         "--formats",
         "-f",
         default="docx,markdown,pdf",
-        help="逗号分隔输出格式：docx,markdown,pdf,pdf_fidelity",
+        help="逗号分隔输出格式：docx,markdown,pdf,txt,html,rtf,xlsx；pdf 为双图层 PDF",
     )
     parser.add_argument("--pdf-dpi", type=int, default=200, help="PDF 转图像的 DPI，默认 200")
     parser.add_argument("--save-stages", action="store_true", help="额外保存 recognition/analysis/render plan JSON")

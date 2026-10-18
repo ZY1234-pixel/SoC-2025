@@ -1,10 +1,10 @@
 # 图片文本解析及矢量化转换
 
-图片文本解析及矢量化转换模块面向扫描图片和 PDF，经过 OCR、版面分析与布局规划，生成可编辑的 DOCX、结构化 Markdown，并可直接生成保留原始坐标的 PDF。
+图片文本解析及矢量化转换模块面向扫描图片和 PDF，经过 OCR、版面分析与布局规划，生成可编辑的 DOCX、结构化 Markdown，以及可搜索的双图层 PDF。
 
-DOCX 采用流式排版，使用 Word 原生段落、分栏和表格组织页面，文字和表格可继续编辑。PDF 使用独立的原始坐标渲染路径，将文本、图片、公式和表格直接写回源页面位置，不经过 DOCX 或办公套件转换。
+DOCX 采用流式排版，使用 Word 原生段落、分栏和表格组织页面，文字和表格可继续编辑。PDF 使用双图层方案：底层保留原始页面视觉，上层叠加按检测框定位的不可见文本层，使输出既可搜索又尽量贴近原图。
 
-PDF 公式使用项目中随附的 MathJax headless bundle 和 QuickJS 离线渲染为 SVG 矢量，再嵌入 PDF；运行时不依赖 Node、浏览器或 LaTeX 发行版。
+PDF 文本层包含正文、表格单元格文字和公式 LaTeX。输出不依赖 LibreOffice、Node、浏览器或 LaTeX 发行版。
 
 ## 效果示例
 
@@ -73,7 +73,7 @@ python Code/test.py --input dataset/exam_paper_02.png --output test-result --for
 
 ### 全量处理
 
-处理整个 `dataset/`，并将 DOCX 转换为 PDF：
+处理整个 `dataset/`，并生成 DOCX 和双图层 PDF：
 
 ```bash
 python Code/test.py --input dataset --output test-result --formats docx,markdown,pdf
@@ -85,19 +85,19 @@ python Code/test.py --input dataset --output test-result --formats docx,markdown
 |------|------|
 | `--input`, `-i` | 图片、PDF 或目录，默认读取 `dataset/` |
 | `--output`, `-o` | 结果保存目录，默认为 `test-result/` |
-| `--formats`, `-f` | 从 `docx,markdown,pdf,pdf_fidelity` 中选择一种或多种格式 |
+| `--formats`, `-f` | 从 `docx,markdown,pdf,txt,html,rtf,xlsx` 中选择一种或多种格式 |
 | `--no-formula` | 关闭行间和行内公式识别；普通文档可减少启动和推理开销 |
 | `--pdf-dpi` | 输入 PDF 转图片时使用的 DPI，默认 `200` |
 | `--save-stages` | 额外保存 recognition、analysis 和 render plan JSON |
 | `--save-debug` | 额外保存版面调试图和原始模型结果 |
 
-高保真 PDF 模式：
+双图层 PDF：
 
 ```bash
-python Code/test.py --input dataset --output test-result --formats pdf_fidelity
+python Code/test.py --input dataset --output test-result --formats pdf
 ```
 
-该模式保留原始页面视觉，并叠加不可见文本层，文件名为 `<样本名>.fidelity.pdf`。
+`pdf` 输出双图层 `<样本名>.pdf`。
 
 ## 处理流程
 
@@ -142,7 +142,6 @@ test-result/
     ├── <样本名>.docx
     ├── <样本名>.md
     ├── <样本名>.pdf
-    ├── <样本名>.fidelity.pdf
     ├── assets/<样本名>/       # Markdown 图片资源
     ├── assets/tables/<样本名>/ # 表格中间图片资源
     ├── stages/                 # 仅 --save-stages 时生成

@@ -63,6 +63,10 @@ class SampleResultLayout:
     docx_path: Path
     markdown_path: Path
     pdf_path: Path
+    txt_path: Path
+    html_path: Path
+    rtf_path: Path
+    xlsx_path: Path
     debug_dir: Path
 
     def debug_image_path(self, page_index: int, suffix: str) -> Path:
@@ -119,6 +123,10 @@ class ResultRunLayout:
             docx_path=sample_dir / f"{sample_key}.docx",
             markdown_path=sample_dir / f"{sample_key}.md",
             pdf_path=sample_dir / f"{sample_key}.pdf",
+            txt_path=sample_dir / f"{sample_key}.txt",
+            html_path=sample_dir / f"{sample_key}.html",
+            rtf_path=sample_dir / f"{sample_key}.rtf",
+            xlsx_path=sample_dir / f"{sample_key}.xlsx",
             debug_dir=debug_dir,
         )
 
