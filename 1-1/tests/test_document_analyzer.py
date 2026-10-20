@@ -413,6 +413,32 @@ def test_table_column_alignment_uses_body_consensus() -> None:
     assert [style[2] for style in styles] == ["left", "left", "left", "left"]
 
 
+def test_table_header_does_not_skew_numeric_body_consensus() -> None:
+    cells = [
+        {
+            "row": 0,
+            "col": 0,
+            "role": "column_header",
+            "bbox": [0, 0, 100, 20],
+            "ocr_objects": [{"text": "Value", "bbox": [25, 2, 75, 18]}],
+        },
+        *[
+            {
+                "row": row,
+                "col": 0,
+                "role": "body",
+                "bbox": [0, row * 20, 100, (row + 1) * 20],
+                "ocr_objects": [{"text": "100", "bbox": [45, row * 20 + 2, 95, row * 20 + 18]}],
+            }
+            for row in range(1, 4)
+        ],
+    ]
+
+    styles = DocumentAnalyzer._table_cell_styles(cells, (0, 100))
+
+    assert [style[2] for style in styles] == ["right", "right", "right", "right"]
+
+
 def test_table_cell_paragraphs_split_greeting_body_and_right_signoff() -> None:
     cell = {
         "row": 0,

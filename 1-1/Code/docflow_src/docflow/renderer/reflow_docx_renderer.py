@@ -28,12 +28,12 @@ from docflow.model.stages import (
     TextParagraphLayout,
 )
 from docflow.planning.text_metrics import (
-    measure_text_width_pt,
     resolve_text_layout,
     visual_text,
 )
 from docflow.renderer.docx_utils.html_table import (
     estimate_table_cell_lines,
+    fit_table_font_size,
     get_table_cell_content_nodes,
     get_table_cell_placements,
     get_table_cell_text_lines,
@@ -653,7 +653,8 @@ class ReflowDocxRenderer:
             for layout in layouts:
                 self._write_resolved_text(container.add_paragraph(), element, role, layout)
             return
-        self._write_block_spacing(container, element, fit_scale)
+        if element.kind != "equation_group" or element.payload.get("number"):
+            self._write_block_spacing(container, element, fit_scale)
         if element.kind == "figure_group":
             if element.payload.get("caption_position") == "before":
                 self._write_caption(container, element.payload.get("caption"), roles, fit_scale, element.payload.get("caption_alignment"), roles.get(element.role_id), element.payload.get("caption_font_size_pt"), container_width)
@@ -965,6 +966,12 @@ class ReflowDocxRenderer:
             width=Pt(image_width),
             height=Pt(image_height),
         )
+        if element.kind == "equation_group":
+            paragraph.paragraph_format.space_before = Pt(
+                float(element.payload.get("space_before_pt", 0.0)) * fit_scale
+            )
+            paragraph.paragraph_format.line_spacing = Pt(max(image_height, 0.5))
+            paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
         if element.payload.get("float_in_grid"):
             self._float_picture(picture._inline, element.payload.get("alignment"))
             paragraph.paragraph_format.line_spacing = Pt(1)
@@ -991,16 +998,20 @@ class ReflowDocxRenderer:
             formula_size = min(formula_size, max(target_height / 1.35, 0.5))
         formula_size = self._fit_formula_width(latex, formula_size, container_width * 0.90)
         if not number:
+            if not latex:
+                self._write_image(container, element, fit_scale, container_width)
+                return
             paragraph = container.add_paragraph()
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph.paragraph_format.space_before = Pt(
+                float(element.payload.get("space_before_pt", 0.0)) * fit_scale
+            )
+            paragraph.paragraph_format.space_after = Pt(0)
             paragraph.paragraph_format.line_spacing = Pt(max(formula_size * 1.6, 6.0))
             paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
-            if latex and append_latex_omml(paragraph, latex, formula_size):
+            if append_latex_omml(paragraph, latex, formula_size):
                 return
-            if latex:
-                paragraph.add_run(latex)
-            else:
-                self._write_image(container, element, fit_scale, container_width)
+            paragraph.add_run(latex)
             return
         table = container.add_table(rows=1, cols=2)
         if target_height > 0:
@@ -1075,7 +1086,7 @@ class ReflowDocxRenderer:
         else:
             clear_table_borders(table)
         left_indent = float(element.payload.get("left_indent_pt", 0.0))
-        if left_indent > 0:
+        if left_indent > 4.0:
             table.alignment = WD_TABLE_ALIGNMENT.LEFT
             table_indent = OxmlElement("w:tblInd")
             table_indent.set(qn("w:w"), str(round(left_indent * 20)))
@@ -1104,23 +1115,14 @@ class ReflowDocxRenderer:
         base_size = float(element.payload.get("table_font_size_pt") or (role.font_size_pt if role else 10.5))
         minimum_size = float(element.payload.get("table_min_font_size_pt", 0.5))
         font_size = max(round(base_size * fit_scale * 2) / 2.0, minimum_size)
-        fit_size = min(
-            (
-                table_cell_available_width(
-                    sum(column_widths[column : column + span]),
-                    cell_geometry.get((_row, column), ("center", 0, 0, 0, 0))[3],
-                    cell_geometry.get((_row, column), ("center", 0, 0, 0, 0))[4],
-                )
-                / max(
-                    (measure_text_width_pt(line, 1.0) for line in get_table_cell_text_lines(cell)),
-                    default=1.0,
-                )
-                for _row, column, _row_span, span, cell in placements
-            ),
-            default=font_size,
+        font_size = fit_table_font_size(
+            source,
+            font_size,
+            table_width,
+            column_weights,
+            cell_geometry,
+            minimum_size,
         )
-        if fit_size >= minimum_size:
-            font_size = min(font_size, fit_size)
         source_height = float(element.payload.get("table_height_pt") or 0.0) * fit_scale
         row_ratios = element.payload.get("table_row_height_ratios") or ()
         if len(row_ratios) == rows:
@@ -1186,29 +1188,37 @@ class ReflowDocxRenderer:
             )
             start_ratio, end_ratio = table_cell_padding_ratios(start_ratio, end_ratio)
             available_width = table_cell_available_width(cell_width, start_ratio, end_ratio)
-            cell.vertical_alignment = {
-                "top": WD_CELL_VERTICAL_ALIGNMENT.TOP,
-                "bottom": WD_CELL_VERTICAL_ALIGNMENT.BOTTOM,
-            }.get(vertical, WD_CELL_VERTICAL_ALIGNMENT.CENTER)
-            vertical_padding_height = cell_height / max(row_span, 1)
-            set_cell_margins(
-                cell,
-                top=round(top_ratio * vertical_padding_height * 20),
-                bottom=round(bottom_ratio * vertical_padding_height * 20),
-                start=round(start_ratio * cell_width * 20),
-                end=round(end_ratio * cell_width * 20),
-            )
-            image_nodes = cell_source.find_all("img", src=True)[:4]
-            formula_nodes = cell_source.find_all("span", class_="docflow-formula")
             cell_text = "\n".join(get_table_cell_text_lines(cell_source))
-            self._clear_container(cell)
-            annotated = has_table_cell_paragraphs(cell_source)
-            content_nodes = get_table_cell_content_nodes(cell_source) if annotated else ()
             text_lines = (
                 max(1, estimate_table_cell_lines(cell_source, font_size, available_width))
                 if cell_text
                 else 0
             )
+            cell.vertical_alignment = {
+                "top": WD_CELL_VERTICAL_ALIGNMENT.TOP,
+                "bottom": WD_CELL_VERTICAL_ALIGNMENT.BOTTOM,
+            }.get(vertical, WD_CELL_VERTICAL_ALIGNMENT.CENTER)
+            vertical_padding_height = cell_height / max(row_span, 1)
+            top_padding = top_ratio * vertical_padding_height
+            bottom_padding = bottom_ratio * vertical_padding_height
+            if text_lines:
+                max_vertical_padding = max(cell_height - text_lines * font_size * 1.2 - 2.0, 0.0)
+                if top_padding + bottom_padding > max_vertical_padding:
+                    padding_scale = max_vertical_padding / max(top_padding + bottom_padding, 1e-9)
+                    top_padding *= padding_scale
+                    bottom_padding *= padding_scale
+            set_cell_margins(
+                cell,
+                top=round(top_padding * 20),
+                bottom=round(bottom_padding * 20),
+                start=round(start_ratio * cell_width * 20),
+                end=round(end_ratio * cell_width * 20),
+            )
+            image_nodes = cell_source.find_all("img", src=True)[:4]
+            formula_nodes = cell_source.find_all("span", class_="docflow-formula")
+            self._clear_container(cell)
+            annotated = has_table_cell_paragraphs(cell_source)
+            content_nodes = get_table_cell_content_nodes(cell_source) if annotated else ()
             cell_height = sum(row_heights[row_index : row_index + row_span])
             image_height = max(
                 (
@@ -1240,7 +1250,7 @@ class ReflowDocxRenderer:
                         )
                         continue
                     if content_node.name == "img":
-                        self._add_table_image_paragraph(cell, content_node, cell_width, image_height)
+                        self._add_table_image_paragraph(cell, content_node, available_width, image_height)
                         continue
                     self._add_table_formula_paragraph(cell, content_node, font_size, cell_height, cell_width)
                 if not content_nodes:
@@ -1261,7 +1271,7 @@ class ReflowDocxRenderer:
                     self._shade(cell._tc.get_or_add_tcPr(), fill)
                 continue
             for image_index, image_node in enumerate(image_nodes):
-                self._add_table_image_paragraph(cell, image_node, cell_width, image_height)
+                self._add_table_image_paragraph(cell, image_node, available_width, image_height)
             for formula_index, formula_node in enumerate(formula_nodes):
                 self._add_table_formula_paragraph(cell, formula_node, font_size, cell_height, cell_width)
             if cell_text:

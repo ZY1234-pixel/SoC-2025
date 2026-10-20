@@ -23,15 +23,12 @@ from docflow.model.stages import (
 )
 from docflow.renderer.docx_utils.html_table import (
     estimate_table_cell_lines,
+    fit_table_font_size,
     get_table_cell_placements,
-    get_table_cell_text_lines,
     get_table_column_weights,
     table_cell_available_width,
 )
-from docflow.planning.text_metrics import (
-    measure_text_width_pt,
-    resolve_text_layout,
-)
+from docflow.planning.text_metrics import resolve_text_layout
 
 
 class LayoutFitError(RuntimeError):
@@ -48,9 +45,8 @@ class ReflowPlanner:
     MIN_HEADING_FONT_PT = 9.0
     MIN_CAPTION_FONT_PT = 7.0
     PAGE_HEIGHT_TOLERANCE_PT = 2.0
+    PAGE_RENDER_OVERHEAD_PT = 12.0
     WRAPPED_SECTION_OVERHEAD_PT = 18.0
-    TABLE_PAGE_SAFETY_FACTOR = 0.82
-
     def __init__(self, page_long_edge_pt: float = 841.89, word_safety_factor: float = 0.95) -> None:
         self.page_long_edge_pt = float(page_long_edge_pt)
         self.word_safety_factor = float(word_safety_factor)
@@ -759,7 +755,6 @@ class ReflowPlanner:
         for element in elements:
             left, right = frames[element.element_id]
             source_width = max(right - left, 1.0)
-            source_lines = element.text_rows or element.payload.get("lines") or ()
             content_bbox = ReflowPlanner._content_bbox(element)
             visual_bbox = ReflowPlanner._background_bbox(element)
             centered = abs((content_bbox.x1 + content_bbox.x2 - left - right) / 2.0) <= source_width * 0.04
@@ -1094,6 +1089,7 @@ class ReflowPlanner:
             )
             for cell in grid_cells
         ]
+        grid_cells = ReflowPlanner._merge_contiguous_grid_cells(grid_cells, by_id)
         return FlowSection(
             section_id,
             FlowKind.GRID,
@@ -1102,6 +1098,60 @@ class ReflowPlanner:
             gutter_pt=gutter,
             grid_cells=tuple(sorted(grid_cells, key=lambda cell: (cell.row, cell.column))),
         ), placement
+
+    @staticmethod
+    def _merge_contiguous_grid_cells(cells, by_id):
+        merged = []
+        locked = [cell for cell in cells if cell.column_span > 1]
+        for column in sorted({cell.column for cell in cells if cell.column_span == 1}):
+            column_cells = sorted(
+                (cell for cell in cells if cell.column_span == 1 and cell.column == column),
+                key=lambda cell: cell.row,
+            )
+            current = column_cells[0]
+            for candidate in column_cells[1:]:
+                current_ids = tuple(current.element_ids)
+                candidate_ids = tuple(candidate.element_ids)
+                text_kinds = {"paragraph_group", "heading", "caption"}
+                if not all(by_id[item].kind in text_kinds for item in current_ids + candidate_ids):
+                    merged.append(current)
+                    current = candidate
+                    continue
+                if current.row_span == 1 and candidate.row == current.row + 1:
+                    merged.append(current)
+                    current = candidate
+                    continue
+                current_top = min(ReflowPlanner._layout_bbox(by_id[item]).y1 for item in current_ids)
+                current_bottom = max(ReflowPlanner._layout_bbox(by_id[item]).y2 for item in current_ids)
+                candidate_top = min(ReflowPlanner._layout_bbox(by_id[item]).y1 for item in candidate_ids)
+                candidate_bottom = max(ReflowPlanner._layout_bbox(by_id[item]).y2 for item in candidate_ids)
+                gap = max(candidate_top - current_bottom, 0.0)
+                contact_limit = min(current_bottom - current_top, candidate_bottom - candidate_top) * 0.35
+                blocked = any(
+                    cell is not current
+                    and cell is not candidate
+                    and cell.column <= column < cell.column + cell.column_span
+                    and cell.row < candidate.row + candidate.row_span
+                    and cell.row + cell.row_span > current.row + current.row_span
+                    for cell in locked
+                )
+                if not blocked and gap <= max(contact_limit, 1.0):
+                    element_ids = tuple(
+                        sorted(
+                            current_ids + candidate_ids,
+                            key=lambda identifier: ReflowPlanner._layout_bbox(by_id[identifier]).y1,
+                        )
+                    )
+                    current = replace(
+                        current,
+                        row_span=candidate.row + candidate.row_span - current.row,
+                        element_ids=element_ids,
+                    )
+                else:
+                    merged.append(current)
+                    current = candidate
+            merged.append(current)
+        return tuple(sorted((*merged, *locked), key=lambda cell: (cell.row, cell.column)))
 
     @staticmethod
     def _side_rail_lanes(elements, bounds: Rect, main_lanes=()):
@@ -1486,9 +1536,9 @@ class ReflowPlanner:
             if has_fixed_grid_tracks
             else min(self.word_safety_factor, self.FORMULA_WORD_SAFETY_FACTOR if has_formulas else 1.0)
         )
-        if any(element.kind == "table_group" and element.payload.get("html") for element in elements):
-            safety_factor = min(safety_factor, self.TABLE_PAGE_SAFETY_FACTOR)
-        target = max(usable_height * safety_factor, 1.0)
+        # Word/LibreOffice section and table boxes need a small allowance beyond paragraph math.
+        render_overhead = min(self.PAGE_RENDER_OVERHEAD_PT, usable_height * 0.015)
+        target = max(usable_height * safety_factor - render_overhead, 1.0)
         section_overhead = sum(section.kind != FlowKind.SINGLE for section in sections) * 0.05
         section_overhead += sum(
             self.WRAPPED_SECTION_OVERHEAD_PT
@@ -1748,23 +1798,14 @@ class ReflowPlanner:
                 for row, column, vertical, top, bottom, start, end in element.payload.get("table_cell_geometry", ())
             }
             minimum_size = float(element.payload.get("table_min_font_size_pt", 0.5))
-            fit_size = min(
-                (
-                    table_cell_available_width(
-                        table_width * sum(weights[column : column + span]) / max(sum(weights), 1.0),
-                    cell_geometry.get((_row, column), ("center", 0, 0, 0, 0))[3],
-                    cell_geometry.get((_row, column), ("center", 0, 0, 0, 0))[4],
-                    )
-                    / max(
-                        (measure_text_width_pt(line, 1.0) for line in get_table_cell_text_lines(cell)),
-                        default=1.0,
-                    )
-                    for _row, column, _row_span, span, cell in placements
-                ),
-                default=font_size,
+            font_size = fit_table_font_size(
+                table,
+                font_size,
+                table_width,
+                weights,
+                cell_geometry,
+                minimum_size,
             )
-            if fit_size >= minimum_size:
-                font_size = min(font_size, fit_size)
             source_height = float(element.payload.get("table_height_pt") or 0.0) * fit_scale
             row_ratios = element.payload.get("table_row_height_ratios") or ()
             if len(row_ratios) == len(rows):
@@ -1988,6 +2029,9 @@ class ReflowPlanner:
     def _table_font_size(element, source_scale: float, body_font_size: float):
         if element.kind != "table_group" or not element.payload.get("html"):
             return None
+        line_heights = element.payload.get("table_line_heights_px") or ()
+        if line_heights:
+            return min(median(float(height) for height in line_heights) * source_scale, body_font_size)
         table = BeautifulSoup(str(element.payload["html"]), "html.parser").find("table")
         row_count = len(table.find_all("tr")) if table else 0
         if row_count == 0:

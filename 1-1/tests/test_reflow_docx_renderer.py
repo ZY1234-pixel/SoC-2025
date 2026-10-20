@@ -1095,7 +1095,9 @@ def test_native_table_renders_annotated_cell_paragraphs() -> None:
         WD_ALIGN_PARAGRAPH.LEFT,
         WD_ALIGN_PARAGRAPH.RIGHT,
     ]
-    assert cell.paragraphs[-1].paragraph_format.space_before.pt == pytest.approx(5.25)
+    assert cell.paragraphs[-1].paragraph_format.space_before.pt == pytest.approx(
+        cell.paragraphs[-1].runs[0].font.size.pt * 0.5
+    )
     assert cell.paragraphs[-1]._p.xpath(".//w:br")
 
 
@@ -1230,6 +1232,32 @@ def test_invalid_latex_equation_falls_back_to_text_not_image() -> None:
     assert "(2)" in container.tables[0].cell(0, 1).text
     assert body._tc.xpath(".//w:t")
     assert not body._tc.xpath(".//w:drawing")
+
+
+def test_unnumbered_equation_image_uses_its_own_spacing_paragraph() -> None:
+    document = Document()
+    for paragraph in list(document.paragraphs):
+        paragraph._element.getparent().remove(paragraph._element)
+    element = PlannedElement(
+        "equation",
+        "equation_group",
+        "body",
+        payload={
+            "image_base64": _png_base64(),
+            "source_bbox": (0, 0, 100, 20),
+            "space_before_pt": 8,
+            "target_width_pt": 100,
+            "target_height_pt": 20,
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._render_element(document, element, {"body": role}, 1.0, 100)
+
+    assert len(document.paragraphs) == 1
+    paragraph = document.paragraphs[0]
+    assert paragraph.paragraph_format.space_before.pt == pytest.approx(8)
+    assert paragraph.paragraph_format.line_spacing.pt == pytest.approx(20)
 
 
 def test_native_table_uses_inferred_table_font() -> None:
@@ -1432,6 +1460,30 @@ def test_native_table_uses_source_cell_geometry_ratios() -> None:
     assert margins.find(qn("w:top")).get(qn("w:w")) == "200"
     assert margins.find(qn("w:start")).get(qn("w:w")) == "213"
     assert margins.find(qn("w:end")).get(qn("w:w")) == "107"
+
+
+def test_native_table_caps_vertical_padding_to_source_row_height() -> None:
+    container = Document().add_table(rows=1, cols=1).cell(0, 0)
+    element = PlannedElement(
+        "table",
+        "table_group",
+        "body",
+        payload={
+            "html": "<table><tr><td>Row</td></tr></table>",
+            "table_height_pt": 18,
+            "table_cell_geometry": ((0, 0, "center", 0.25, 0.25, 0.0, 0.0),),
+        },
+    )
+    role = TypographicRole("body", "宋体", "Times New Roman", 10.5, 1.0)
+
+    ReflowDocxRenderer()._write_native_table(container, element, {"body": role}, 1.0, 100)
+
+    cell = container.tables[0].cell(0, 0)
+    margins = cell._tc.tcPr.find(qn("w:tcMar"))
+    top = int(margins.find(qn("w:top")).get(qn("w:w")))
+    bottom = int(margins.find(qn("w:bottom")).get(qn("w:w")))
+    font_size = cell.paragraphs[0].runs[0].font.size.pt
+    assert top + bottom <= round((18 - font_size * 1.2 - 2) * 20) + 1
 
 
 def test_native_table_fixed_row_height_accounts_for_wrapped_content() -> None:

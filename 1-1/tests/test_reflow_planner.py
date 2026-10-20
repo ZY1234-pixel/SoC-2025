@@ -767,7 +767,7 @@ def test_single_row_table_uses_body_font_and_wrap_aware_fit() -> None:
 
     assert page.elements[0].payload["table_font_size_pt"] == pytest.approx(10.5)
     assert page.elements[0].payload["table_min_font_size_pt"] == pytest.approx(6.5)
-    assert page.fit_scale < 1.0
+    assert page.fit_scale == pytest.approx(1.0)
 
 
 def test_table_font_size_excludes_grouped_caption_height() -> None:
@@ -787,6 +787,24 @@ def test_table_font_size_excludes_grouped_caption_height() -> None:
     planned = ReflowPlanner().plan(_analysis((table,))).pages[0].elements[0]
 
     assert planned.payload["table_font_size_pt"] == pytest.approx(200 * 841.89 / 1400 / 10 / 1.45)
+
+
+def test_table_font_size_prefers_observed_text_height() -> None:
+    table = _element(
+        "table",
+        (100, 100, 900, 600),
+        1,
+        text="",
+        kind="table_group",
+        payload={
+            "html": "<table><tr><td>Value</td></tr></table>",
+            "table_line_heights_px": (10, 12, 14),
+        },
+    )
+
+    planned = ReflowPlanner().plan(_analysis((table,))).pages[0].elements[0]
+
+    assert planned.payload["table_font_size_pt"] == pytest.approx(12 * 841.89 / 1400)
 
 
 def test_table_height_budget_reserves_word_row_box_drift() -> None:
@@ -1446,6 +1464,26 @@ def test_grid_keeps_source_text_blocks_separate_across_other_columns() -> None:
     left = [cell for cell in section.grid_cells if cell.column == 0]
     assert [cell.element_ids for cell in left] == [("left-top",), ("left-bottom",)]
     assert left[0].row + left[0].row_span == left[1].row
+
+
+def test_contiguous_text_blocks_merge_across_wide_neighbor_rows() -> None:
+    elements = (
+        _element("left-top", (50, 100, 300, 200), 1),
+        _element("left-bottom", (50, 210, 300, 300), 2),
+        _element("right", (400, 100, 950, 300), 3),
+    )
+    by_id = {element.element_id: element for element in elements}
+    cells = (
+        GridCell(0, 0, ("left-top",), row_span=4),
+        GridCell(4, 0, ("left-bottom",), row_span=2),
+        GridCell(0, 1, ("right",), row_span=6),
+    )
+
+    merged = ReflowPlanner._merge_contiguous_grid_cells(cells, by_id)
+
+    left = next(cell for cell in merged if cell.column == 0)
+    assert left.element_ids == ("left-top", "left-bottom")
+    assert left.row_span == 6
 
 
 def test_grid_cell_fills_unoccupied_rows_in_its_column() -> None:

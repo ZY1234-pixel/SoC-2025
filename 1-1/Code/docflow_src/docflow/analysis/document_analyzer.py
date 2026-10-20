@@ -32,6 +32,7 @@ from docflow.model.stages import (
     Rect,
     SemanticElement,
     TextRow,
+    TextEvidence,
     TextSpan,
     TextStructure,
     TypographicRole,
@@ -140,7 +141,10 @@ def _join_text_segments(left: str, right: str) -> str:
         return left or right
     previous = left.rstrip()[-1]
     current = right.lstrip()[0]
-    cjk = lambda char: "\u3400" <= char <= "\u9fff" or "\uf900" <= char <= "\ufaff"
+
+    def cjk(char: str) -> bool:
+        return "\u3400" <= char <= "\u9fff" or "\uf900" <= char <= "\ufaff"
+
     separator = " " if not cjk(previous) and not cjk(current) and (
         previous.isalnum() and current.isalnum()
         or previous in ",.;:!?)%]”’" and current.isalnum()
@@ -589,6 +593,14 @@ class DocumentAnalyzer:
             if source_attributes.get("table_auto_height"):
                 payload["table_auto_height"] = True
             cells = primary.attributes.get("table_cells") or ()
+            payload["table_line_heights_px"] = tuple(
+                float(obj["bbox"][3]) - float(obj["bbox"][1])
+                for cell in cells
+                for obj in cell.get("ocr_objects") or ()
+                if str(obj.get("text") or "").strip()
+                and len(obj.get("bbox") or ()) >= 4
+                and float(obj["bbox"][3]) > float(obj["bbox"][1])
+            )
             row_ratios = self._table_axis_ratios(cells, row_count, "row", "rowspan", 1, 3)
             column_edges = self._table_column_edges(cells, column_count)
             column_ratios = self._ratios_from_edges(column_edges)
@@ -1394,17 +1406,7 @@ class DocumentAnalyzer:
             if text_boxes:
                 text_left = min(box[0] for box in text_boxes)
                 text_right = max(box[2] for box in text_boxes)
-            else:
-                try:
-                    text_left, text_right = float(cell["bbox"][0]), float(cell["bbox"][2])
-                except (KeyError, TypeError, ValueError, IndexError):
-                    continue
-            left_gap, right_gap = max(text_left - left, 0.0), max(right - text_right, 0.0)
             width = max(right - left, 1.0)
-            column_samples.setdefault(column, []).extend(
-                (box, left, right, width)
-                for box in text_boxes
-            )
             alignment = DocumentAnalyzer._table_text_alignment(
                 text_boxes,
                 (left, right),
@@ -1417,8 +1419,13 @@ class DocumentAnalyzer:
             if has_formula:
                 alignment = "center"
                 formula_columns.add(column)
-            column_votes.setdefault(column, Counter())[alignment] += 1
             role = str(cell.get("role") or "body")
+            if role not in {"corner", "column_header"}:
+                column_samples.setdefault(column, []).extend(
+                    (box, left, right, width)
+                    for box in text_boxes
+                )
+                column_votes.setdefault(column, Counter())[alignment] += 1
             stroke_ratio = None
             if table_image is not None:
                 try:

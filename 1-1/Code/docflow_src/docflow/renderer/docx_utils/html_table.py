@@ -98,6 +98,34 @@ def table_cell_available_width(cell_width: float, start_ratio: float = 0.0, end_
     return max((cell_width * (1.0 - padding_ratio) - 2.0) * 0.96, 1.0)
 
 
+def fit_table_font_size(
+    table_soup,
+    base_size: float,
+    table_width: float,
+    column_weights,
+    cell_geometry,
+    minimum_size: float,
+) -> float:
+    fit_sizes = []
+    for row, column, _row_span, column_span, cell in get_table_cell_placements(table_soup):
+        cell_width = table_width * sum(column_weights[column : column + column_span]) / max(sum(column_weights), 1.0)
+        _vertical, _top, _bottom, start_ratio, end_ratio = cell_geometry.get(
+            (row, column),
+            ("center", 0.0, 0.0, 0.0, 0.0),
+        )
+        available_width = table_cell_available_width(cell_width, start_ratio, end_ratio)
+        longest_line = max(
+            (measure_text_width_pt(line, 1.0) for line in get_table_cell_text_lines(cell)),
+            default=1.0,
+        )
+        fit_sizes.append(available_width / longest_line)
+    if not fit_sizes:
+        return float(base_size)
+    fitted = min(float(base_size), min(fit_sizes))
+    # Whole-point sizing keeps repeated tables typographically consistent.
+    return max(float(minimum_size), float(round(fitted)))
+
+
 def estimate_table_cell_lines(cell_soup, font_size: float, available_width: float) -> int:
     return sum(
         max(1, math.ceil(measure_text_width_pt(line, font_size) / max(available_width, 1.0)))
