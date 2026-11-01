@@ -26,11 +26,15 @@ python infer.py --input input.jpg --output output.png --threads 4
 | `model.py` | NCNN模型加载和单块预测 |
 | `tiling.py` | 图片补边、分块和重叠融合 |
 | `fusion.py` | 接缝校正及保护式回退 |
-| `weights/` | 配套的 `.param` 和 `.bin` 模型文件，两者都需要保留 |
+| `weights/` | 本地放置配套 `.param` 和 `.bin` 模型文件的目录；模型权重不随仓库上传 |
 | `requirements.txt` | 安装运行依赖 |
 | `LICENSE.txt` | 保留的 PDNet 上游许可文本 |
 
 如果后续接入自己的应用，可以先沿用这里的完整流程，确认结果一致后再调整。模型输出已经包含 RGB 残差相加，不需要再和原图叠加。
+
+## 权重文件
+
+仓库不包含 `weights/esdnet_lite_int8.param` 和 `weights/esdnet_lite_int8.bin`。请在交付环境或内部存储中获取这两个配套文件，并按上述目录结构放到 `weights/` 后再运行推理；两者必须来自同一次导出。
 
 ## 目前的效果与取舍
 
