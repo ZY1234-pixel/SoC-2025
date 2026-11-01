@@ -1,0 +1,5 @@
+# Tested Linux aarch64 / Python 3.12 CPU deployment environment.
+ncnn==1.0.20261020
+numpy==1.26.4
+Pillow==12.3.0
+scipy==1.17.1

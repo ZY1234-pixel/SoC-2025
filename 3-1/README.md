@@ -1,151 +1,43 @@
-# ESDNet-Lite
+# ESDNet-Lite：轻量去屏纹模型
 
-面向测试交付整理后的 ESDNet-Lite 工程。
+目前模型约有 **51.62 万参数**，量化后的权重约 **0.54 MB**。这里交接的是已经导出的 NCNN INT8 版本，使用 CPU 推理。使用时只运行 `infer.py`，它会调用同目录下的模型、分块和融合模块。
+## 先跑一张图
 
-当前版本只保留以下内容：
+建议使用 Linux 和 Python 3.12。在当前目录安装依赖，然后把命令里的图片路径换成自己的文件：
 
-- PyTorch CPU 推理
-- PyTorch GPU 推理
-- NCNN 推理
-- TensorRT FP16 推理
-- UHDM 数据格式训练代码
+```bash
+python -m pip install -r requirements.txt
+python infer.py --input input.jpg --output output.png
+```
+
+程序会在终端显示处理进度，完成后保存一张与原图尺寸相同的 PNG。内部会把大图分块处理，再融合回完整画面，不需要提前裁图。
+
+默认使用 8 个线程。如果设备核心较少，可以改成 4 个线程：
+
+```bash
+python infer.py --input input.jpg --output output.png --threads 4
+```
 
 ## 目录结构
 
-- `dataset/`: 数据目录说明
-- `Code/`: 核心代码、配置和模型文件
-- `test-result/`: 推理结果输出目录
-- `doc/`: 补充说明文档
-- `imagelist.txt`: 真实校准图片列表
-- `image_list.txt`: `imagelist.txt` 的同内容别名
-- `release_note.txt`: 本次交付整理说明
+| 文件 | 用途 |
+|---|---|
+| `infer.py` | 唯一运行入口，负责读图、组织推理和保存 |
+| `model.py` | NCNN模型加载和单块预测 |
+| `tiling.py` | 图片补边、分块和重叠融合 |
+| `fusion.py` | 接缝校正及保护式回退 |
+| `weights/` | 配套的 `.param` 和 `.bin` 模型文件，两者都需要保留 |
+| `requirements.txt` | 安装运行依赖 |
+| `LICENSE.txt` | 保留的 PDNet 上游许可文本 |
 
-## Code 目录
+如果后续接入自己的应用，可以先沿用这里的完整流程，确认结果一致后再调整。模型输出已经包含 RGB 残差相加，不需要再和原图叠加。
 
-- `model.py`: 模型入口
-- `train.py`: 训练脚本
-- `test.py`: 推理脚本
-- `dataset.py`: UHDM 数据读取
-- `utils.py`: 公共工具函数
-- `preprocess.py`: 图像预处理与保存
-- `esdnet_lite_uhdm.yaml`: 训练配置模板
-- `requirement.txt`: 依赖说明
-- `runcmd.txt`: 常用命令
-- `weights/`: 当前随包提供的模型文件
+## 目前的效果与取舍
 
-## 环境
+这个版本优先控制了模型体积，实际处理时间仍会受到图片大小、CPU 和线程设置的影响。它还不能把所有屏纹去干净，部分场景会有彩纹残留、颜色偏差或细节损失。评估时建议同时看整图和局部细节，尤其留意天空、渐变背景和细密纹理。
 
-安装基础依赖：
+交接前已在独立目录验证运行，4K 输出与原项目默认流程逐像素一致。目前尚未在目标安卓平板上验证，设备上的速度和内存占用还需要实际测试。
 
-```bash
-pip install -r Code/requirement.txt
-```
+## 来源
 
-按实际环境额外安装：
-
-- `torch`
-- `torchvision`
-- `ncnn`，仅 Python NCNN 推理需要
-- `onnx`
-- `TensorRT 8.6 GA Python bindings`，仅 TensorRT 推理需要
-
-## 当前模型文件
-
-位于 `Code/weights/`：
-
-- `uhdm_lite_s_best.pt`
-- `uhdm_lite_s_best.ncnn.param`
-- `uhdm_lite_s_best.ncnn.bin`
-- `uhdm_lite_s_best_hybrid_int8.ncnn.param`
-- `uhdm_lite_s_best_hybrid_int8.ncnn.bin`
-- `uhdm_lite_s_best_hybrid.table`
-
-TensorRT engine 默认会按以下顺序自动查找：
-
-- `Code/weights/*.plan`
-- `../NAFNet/output_model/*.plan`
-
-## 常用命令
-
-PyTorch CPU 推理：
-
-```bash
-python Code/test.py \
-  --backend torch \
-  --preset lite-s \
-  --model_path Code/weights/uhdm_lite_s_best.pt \
-  --device cpu \
-  --mode tile \
-  --input_dir dataset/input \
-  --output_dir test-result/torch_cpu \
-  --tile 512 --tile_overlap 128
-```
-
-PyTorch GPU 推理：
-
-```bash
-python Code/test.py \
-  --backend torch \
-  --preset lite-s \
-  --model_path Code/weights/uhdm_lite_s_best.pt \
-  --device cuda:0 \
-  --mode tile \
-  --input_dir dataset/input \
-  --output_dir test-result/torch_gpu \
-  --tile 512 --tile_overlap 128
-```
-
-NCNN FP16 推理：
-
-```bash
-python Code/test.py \
-  --backend ncnn \
-  --preset lite-s \
-  --ncnn_param Code/weights/uhdm_lite_s_best.ncnn.param \
-  --ncnn_bin Code/weights/uhdm_lite_s_best.ncnn.bin \
-  --input_dir dataset/input \
-  --output_dir test-result/ncnn_fp16 \
-  --tile 512 --tile_overlap 128
-```
-
-NCNN hybrid INT8 推理：
-
-```bash
-python Code/test.py \
-  --backend ncnn \
-  --preset lite-s \
-  --ncnn_param Code/weights/uhdm_lite_s_best_hybrid_int8.ncnn.param \
-  --ncnn_bin Code/weights/uhdm_lite_s_best_hybrid_int8.ncnn.bin \
-  --input_dir dataset/input \
-  --output_dir test-result/ncnn_int8 \
-  --tile 512 --tile_overlap 128
-```
-
-TensorRT FP16 推理：
-
-```bash
-conda run -n torch25 python Code/test.py \
-  --backend tensorrt \
-  --preset lite-s \
-  --trt_engine ../NAFNet/output_model/esdnet_lite_fp16.plan \
-  --device cuda:0 \
-  --input_dir dataset/input \
-  --output_dir test-result/tensorrt_fp16 \
-  --tile 256 --tile_overlap 64
-```
-
-训练：
-
-```bash
-python Code/train.py \
-  --train_dir /path/to/UHDM/train \
-  --val_dir /path/to/UHDM/test \
-  --model_preset lite-s \
-  --save_dir test-result/train_runs
-```
-
-## 说明
-
-- 更详细的推理说明见 `doc/inference.md`
-- 更多命令示例见 `Code/runcmd.txt`
-- TensorRT 当前仅支持 `tile` 模式，且 `tile` 会自动对齐到 engine 固定输入尺寸
+模型骨架来自 [ESDNet](https://github.com/CVMI-Lab/UHDM)，轻量化训练和部署整理在本项目中完成；分块融合沿用项目已有工程实现，相关研究参考 [PDNet](https://github.com/ChenJiaCong-1005/PDNet)。
