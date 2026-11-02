@@ -21,9 +21,12 @@ message(STATUS " NCNN library found.")
 
 # ====== 编译配置 ======
 add_executable(doc_detector main.cpp)
+add_executable(doc_detector_route_a main_route_a.cpp)
 
 # 包含头文件路径 (确保 OpenCV 的头文件能被找到)
 target_include_directories(doc_detector PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_include_directories(doc_detector_route_a PRIVATE ${OpenCV_INCLUDE_DIRS})
 
 # 链接依赖
 target_link_libraries(doc_detector ncnn ${OpenCV_LIBS})
+target_link_libraries(doc_detector_route_a ncnn ${OpenCV_LIBS})
