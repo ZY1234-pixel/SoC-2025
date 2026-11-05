@@ -1,0 +1,90 @@
+# Standalone inference config; no training config inheritance.
+CUDNN_BENCHMARK: true
+DATASETS:
+  TRAIN: []
+  TEST: []
+INPUT:
+  DATASET_MAPPER_NAME: doc_letterbox_1024
+  FORMAT: RGB
+  IMAGE_SIZE: 1024
+  MASK_FORMAT: bitmask
+  MAX_SCALE: 2.0
+  MIN_SCALE: 0.1
+  RANDOM_FLIP: none
+MODEL:
+  BACKBONE:
+    FREEZE_AT: 0
+    NAME: build_internimage_l_backbone
+  META_ARCHITECTURE: MaskDINO
+  MaskDINO:
+    BOX_WEIGHT: 5.0
+    CLASS_WEIGHT: 4.0
+    DEC_LAYERS: 9
+    DEEP_SUPERVISION: true
+    DICE_WEIGHT: 5.0
+    DIM_FEEDFORWARD: 2048
+    DN: seg
+    DN_NUM: 100
+    DROPOUT: 0.0
+    ENC_LAYERS: 0
+    ENFORCE_INPUT_PROJ: false
+    EVAL_FLAG: 1
+    GIOU_WEIGHT: 2.0
+    HIDDEN_DIM: 256
+    IMPORTANCE_SAMPLE_RATIO: 0.75
+    INITIALIZE_BOX_TYPE: bitmask
+    INITIAL_PRED: true
+    MASK_WEIGHT: 5.0
+    NHEADS: 8
+    NO_OBJECT_WEIGHT: 0.1
+    NUM_OBJECT_QUERIES: 100
+    OVERSAMPLE_RATIO: 3.0
+    PRE_NORM: false
+    SIZE_DIVISIBILITY: 32
+    TEST:
+      INSTANCE_ON: true
+      OBJECT_MASK_THRESHOLD: 0.25
+      OVERLAP_THRESHOLD: 0.8
+      PANOPTIC_ON: false
+      SEMANTIC_ON: false
+    TRAIN_NUM_POINTS: 12544
+    TRANSFORMER_DECODER_NAME: MaskDINODecoder
+    TWO_STAGE: true
+  PIXEL_MEAN:
+  - 0.0
+  - 0.0
+  - 0.0
+  PIXEL_STD:
+  - 255.0
+  - 255.0
+  - 255.0
+  SEM_SEG_HEAD:
+    COMMON_STRIDE: 4
+    CONVS_DIM: 256
+    DEFORMABLE_TRANSFORMER_ENCODER_IN_FEATURES:
+    - res2
+    - res3
+    - res4
+    - res5
+    DIM_FEEDFORWARD: 2048
+    FEATURE_ORDER: low2high
+    IGNORE_VALUE: 255
+    IN_FEATURES:
+    - res2
+    - res3
+    - res4
+    - res5
+    LOSS_WEIGHT: 1.0
+    MASK_DIM: 256
+    NAME: MaskDINOHead
+    NORM: GN
+    NUM_CLASSES: 1
+    NUM_FEATURE_LEVELS: 4
+    PIXEL_DECODER_NAME: MaskDINOEncoder
+    TOTAL_NUM_FEATURE_LEVELS: 5
+    TRANSFORMER_ENC_LAYERS: 6
+  WEIGHTS: checkpoints/best_hd95_1024.pth
+OUTPUT_DIR: outputs
+TEST:
+  DETECTIONS_PER_IMAGE: 3
+VERSION: 2
