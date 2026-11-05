@@ -1,0 +1,32 @@
+# Runtime configuration record. The current Python implementation keeps these
+# geometry values in spine_line_heatmap_runtime.py and YOLO thresholds in
+# infer_spine_auto_orientation.py; keep them in sync if modifying either file.
+pipeline:
+  direction_weights: weights/direction.pt
+  coarse_detector_weights: weights/detector.pt
+  line_heatmap_weights: weights/heatmap.pt
+  stages: [direction, coarse_spine, local_heatmap]
+
+yolo:
+  input_size: 1024
+  confidence_threshold: 0.01
+  spine_keypoint_indices: [4, 5]
+
+heatmap:
+  architecture: VGG16_features_UNet_decoder
+  checkpoint_epoch: 10
+  crop_size: 384
+  canonical_line_half_length: 144
+  fit_rows_start_inclusive: 64
+  fit_rows_stop_exclusive: 320
+  image_color_order: RGB
+  image_mean: [0.485, 0.456, 0.406]
+  image_std: [0.229, 0.224, 0.225]
+
+tested_environment:
+  python: '3.10'
+  ultralytics: '8.0.180'
+  torch: '2.5.1+cu118'
+  torchvision: '0.20.1+cu118'
+  opencv: '4.10.0'
+  numpy: '1.26.3'
